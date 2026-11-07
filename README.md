@@ -82,6 +82,9 @@ npx wrangler secret put ADMIN_TOKEN      # optional, but recommended: locks the 
 npm run deploy
 ```
 
+The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
+own domain, or remove it to use the `*.workers.dev` address.
+
 Without `ADMIN_TOKEN` anyone who finds the URL can edit workflows, so set it for any public deployment.
 Webhook URLs stay public either way; the random key in each URL is its secret.
 

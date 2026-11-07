@@ -20,5 +20,7 @@
   ],
   // Every minute: start scheduled workflows and resume runs that are waiting on a retry or a delay.
   "triggers": { "crons": ["* * * * *"] },
+  // Served at knotwork.gigiberidze.com. Cloudflare creates the DNS record and certificate on deploy.
+  "routes": [{ "pattern": "knotwork.gigiberidze.com", "custom_domain": true }],
   "observability": { "enabled": true }
 }
