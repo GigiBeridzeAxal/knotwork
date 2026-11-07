@@ -1,6 +1,7 @@
 import type { Run, Step, StepLog, Trigger, Workflow } from "../shared/schema";
 import { cronMatches, parseCron } from "../shared/cron";
-import { type Env, newRunId, type RunRow } from "./db";
+import { LIMITS } from "../shared/limits";
+import { type Env, newRunId, recentRunCount, type RunRow } from "./db";
 import { executeStep, formatSeconds, type Scope } from "./steps";
 
 /**
@@ -167,7 +168,7 @@ export async function tick(env: Env, now = Date.now()): Promise<{ scheduled: num
      AND (last_scheduled_at IS NULL OR last_scheduled_at < ?)`,
   )
     .bind(minute)
-    .all<{ id: string; trigger: string; steps: string; name: string }>();
+    .all<{ id: string; workspace_id: string; trigger: string; steps: string; name: string }>();
 
   for (const wf of schedules) {
     const trigger = JSON.parse(wf.trigger) as Extract<Trigger, { type: "schedule" }>;
@@ -178,6 +179,7 @@ export async function tick(env: Env, now = Date.now()): Promise<{ scheduled: num
       continue;
     }
     if (!matches) continue;
+    if ((await recentRunCount(env.DB, wf.workspace_id, now)) >= LIMITS.runsPerWorkspacePerHour) continue;
     // Mark the minute first, so two ticks can never fire the same schedule twice.
     const marked = await env.DB.prepare(
       `UPDATE workflows SET last_scheduled_at = ? WHERE id = ? AND (last_scheduled_at IS NULL OR last_scheduled_at < ?)`,
@@ -209,6 +211,15 @@ export async function tick(env: Env, now = Date.now()): Promise<{ scheduled: num
     ).bind(cutoff),
     env.DB.prepare(`DELETE FROM runs WHERE created_at < ? AND finished_at IS NOT NULL`).bind(cutoff),
   ]);
+
+  // Workflows nobody has edited or run for a long while are removed. Their runs are already gone
+  // (runs only live 14 days), so a workflow with no runs left and an old updated_at is idle.
+  const idleCutoff = now - LIMITS.idleWorkflowDays * 24 * 3600 * 1000;
+  await env.DB.prepare(
+    `DELETE FROM workflows WHERE updated_at < ? AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.workflow_id = workflows.id)`,
+  )
+    .bind(idleCutoff)
+    .run();
 
   return { scheduled, resumed: due.length };
 }

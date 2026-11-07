@@ -71,3 +71,12 @@ export function validateCron(expr: string): string | null {
     return (err as Error).message;
   }
 }
+
+/** The shortest gap, in minutes, between two runs of a schedule within an hour. */
+export function minutesBetweenRuns(expr: string): number {
+  const minutes = [...parseCron(expr).minute].sort((a, b) => a - b);
+  if (minutes.length === 1) return 60;
+  let gap = 60 - minutes[minutes.length - 1] + minutes[0];
+  for (let i = 1; i < minutes.length; i++) gap = Math.min(gap, minutes[i] - minutes[i - 1]);
+  return gap;
+}

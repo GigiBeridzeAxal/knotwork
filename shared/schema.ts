@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { validateCron } from "./cron";
+import { minutesBetweenRuns, validateCron } from "./cron";
+import { LIMITS } from "./limits";
 
 /** A step id is how later steps refer to this step's output: `{{ steps.<id>.body }}`. */
 const stepId = z
@@ -91,12 +92,15 @@ export const triggerSchema = z.discriminatedUnion("type", [
       .max(100)
       .superRefine((cron, ctx) => {
         const problem = validateCron(cron);
-        if (problem) ctx.addIssue({ code: "custom", message: problem });
+        if (problem) return ctx.addIssue({ code: "custom", message: problem });
+        if (minutesBetweenRuns(cron) < LIMITS.minScheduleMinutes) {
+          ctx.addIssue({ code: "custom", message: `Schedules can run at most every ${LIMITS.minScheduleMinutes} minutes` });
+        }
       }),
   }),
 ]);
 
-export const MAX_STEPS = 25;
+export const MAX_STEPS = LIMITS.stepsPerWorkflow;
 
 export const workflowInput = z
   .object({
@@ -127,6 +131,7 @@ export type LogStatus = "ok" | "failed" | "retrying" | "stopped" | "waiting";
 
 export interface Workflow extends WorkflowInput {
   id: string;
+  workspaceId: string;
   hookKey: string;
   createdAt: number;
   updatedAt: number;

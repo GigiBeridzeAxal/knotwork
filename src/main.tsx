@@ -1,7 +1,7 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, getToken, onUnauthorized, setToken } from "./api";
-import { Button, cn, inputClass, Logo } from "./components/ui";
+import { workspaceId } from "./api";
+import { cn, Logo } from "./components/ui";
 import "./index.css";
 import { EditorPage } from "./pages/EditorPage";
 import { RunPage } from "./pages/RunPage";
@@ -60,78 +60,39 @@ function Shell() {
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-12">
         <Routes path={path} />
       </main>
+      <WorkspaceFooter />
     </div>
   );
 }
 
-function SignIn({ onDone }: { onDone: () => void }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+function WorkspaceFooter() {
+  const [copied, setCopied] = useState(false);
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <form
-        className="w-full max-w-sm rounded-2xl border border-line bg-graphite p-8"
-        onSubmit={async (e) => {
-          e.preventDefault();
-          setBusy(true);
-          setError("");
-          setToken(value.trim());
-          try {
-            await api.checkToken();
-            onDone();
-          } catch {
-            setToken("");
-            setError("That token didn't work.");
-          } finally {
-            setBusy(false);
+    <footer className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-6 text-sm text-muted sm:px-6">
+      <p>Your workflows are private to this browser. No sign-up needed.</p>
+      <div className="flex flex-wrap items-center gap-4">
+        <button
+          type="button"
+          className="min-h-11 text-soft hover:text-text"
+          onClick={() =>
+            navigator.clipboard.writeText(`${location.origin}/?workspace=${workspaceId}`).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            })
           }
-        }}
-      >
-        <div className="mb-6 flex items-center gap-3">
-          <Logo size={40} />
-          <span className="font-display text-2xl font-bold tracking-tight">knotwork</span>
-        </div>
-        <label htmlFor="token" className="text-[13px] text-soft">
-          Access token
-        </label>
-        <input
-          id="token"
-          type="password"
-          autoComplete="current-password"
-          className={cn(inputClass, "mt-2")}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-        />
-        {error && <p className="mt-2 text-[13px] text-fail">{error}</p>}
-        <Button type="submit" variant="primary" className="mt-6 w-full" disabled={!value || busy}>
-          Sign in
-        </Button>
-        <p className="mt-4 text-[13px] text-muted">This instance is private. The token is its ADMIN_TOKEN secret.</p>
-      </form>
-    </div>
+        >
+          {copied ? "Link copied. Keep it private." : "Copy a link to open this workspace elsewhere"}
+        </button>
+        <a href="https://github.com/GigiBeridzeAxal/knotwork" className="min-h-11 content-center text-soft hover:text-text">
+          Source on GitHub
+        </a>
+      </div>
+    </footer>
   );
-}
-
-function App() {
-  const [state, setState] = useState<"loading" | "signin" | "ready">("loading");
-  useEffect(() => {
-    api
-      .config()
-      .then(({ authRequired }) => setState(authRequired && !getToken() ? "signin" : "ready"))
-      .catch(() => setState("ready"));
-    return onUnauthorized(() => {
-      setToken("");
-      setState("signin");
-    });
-  }, []);
-  if (state === "loading") return null;
-  if (state === "signin") return <SignIn onDone={() => setState("ready")} />;
-  return <Shell />;
 }
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <Shell />
   </StrictMode>,
 );

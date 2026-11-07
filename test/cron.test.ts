@@ -28,3 +28,13 @@ describe("cron", () => {
     expect(validateCron("15,45 8-18/2 * * *")).toBeNull();
   });
 });
+
+describe("schedule spacing", () => {
+  it("finds the shortest gap between runs", async () => {
+    const { minutesBetweenRuns } = await import("../shared/cron");
+    expect(minutesBetweenRuns("* * * * *")).toBe(1);
+    expect(minutesBetweenRuns("*/5 * * * *")).toBe(5);
+    expect(minutesBetweenRuns("0 * * * *")).toBe(60);
+    expect(minutesBetweenRuns("0,58 * * * *")).toBe(2);
+  });
+});

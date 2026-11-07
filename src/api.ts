@@ -1,33 +1,36 @@
 import type { Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary } from "../shared/schema";
 
-const TOKEN_KEY = "knotwork.token";
+const WORKSPACE_KEY = "knotwork.workspace";
+const WORKSPACE = /^ws_[A-Za-z0-9_-]{16,40}$/;
 
-export function getToken(): string {
-  try {
-    return localStorage.getItem(TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
+function newWorkspaceId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return "ws_" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function setToken(token: string) {
+/**
+ * There are no accounts: this browser's workspace id is the key to its workflows. A link with
+ * `?workspace=` opens the same workspace somewhere else.
+ */
+function loadWorkspace(): string {
+  const fromLink = new URLSearchParams(location.search).get("workspace");
+  let stored = "";
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
+    stored = localStorage.getItem(WORKSPACE_KEY) ?? "";
   } catch {
-    // Storage blocked: the token lasts for this page only.
+    // Storage blocked: this tab gets a workspace of its own.
   }
-  memoryToken = token;
+  const id = fromLink && WORKSPACE.test(fromLink) ? fromLink : WORKSPACE.test(stored) ? stored : newWorkspaceId();
+  try {
+    localStorage.setItem(WORKSPACE_KEY, id);
+  } catch {
+    // Same as above.
+  }
+  if (fromLink) history.replaceState(null, "", location.pathname);
+  return id;
 }
 
-let memoryToken = "";
-const listeners = new Set<() => void>();
-export const onUnauthorized = (fn: () => void) => {
-  listeners.add(fn);
-  return () => {
-    listeners.delete(fn);
-  };
-};
+export const workspaceId = loadWorkspace();
 
 export interface Issue {
   path: (string | number)[];
@@ -45,12 +48,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getToken() || memoryToken;
   const headers = new Headers(init.headers);
   if (init.body) headers.set("content-type", "application/json");
-  if (token) headers.set("authorization", `Bearer ${token}`);
+  headers.set("x-knotwork-workspace", workspaceId);
   const res = await fetch(`/api${path}`, { ...init, headers });
-  if (res.status === 401) listeners.forEach((fn) => fn());
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(data.error ?? `Request failed (${res.status})`, res.status, data.issues);
@@ -58,8 +59,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  config: () => request<{ authRequired: boolean }>("/config"),
-  checkToken: () => request<WorkflowSummary[]>("/workflows"),
   workflows: () => request<WorkflowSummary[]>("/workflows"),
   workflow: (id: string) => request<Workflow>(`/workflows/${id}`),
   createWorkflow: (input: WorkflowInput) =>

@@ -25,6 +25,8 @@ attempt is written to a run log you can open in the dashboard.
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
 - **Run history.** Every attempt, its output, and how long it took. History is kept for 14 days.
+- **No sign-up.** Each visitor gets a private workspace, an id kept in their browser. A workspace only ever
+  sees its own workflows and runs, and a link with `?workspace=` opens it on another device.
 
 ![A run](docs/run.png)
 
@@ -78,21 +80,25 @@ npm run build    # type-check and build
 npx wrangler login
 npx wrangler d1 create knotwork          # copy the database_id it prints into wrangler.jsonc
 npm run db:migrate                       # create the tables in the real database
-npx wrangler secret put ADMIN_TOKEN      # optional, but recommended: locks the dashboard and API
 npm run deploy
 ```
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
 own domain, or remove it to use the `*.workers.dev` address.
 
-Without `ADMIN_TOKEN` anyone who finds the URL can edit workflows, so set it for any public deployment.
-Webhook URLs stay public either way; the random key in each URL is its secret.
+Anyone can use a deployment, each in their own workspace. Webhook URLs are public; the random key in
+each URL is its secret.
 
 ## Limits
 
-- 25 steps per workflow, 15s per HTTP call, 256 KB per webhook payload or response.
-- Up to 5 retries per step. Schedules have one-minute resolution, in UTC.
-- Runs are deleted after 14 days.
+Because anyone can use it, each workspace has limits ([`shared/limits.ts`](shared/limits.ts)) that keep one
+visitor from using up the free plan:
+
+- 10 workflows per workspace and 25 steps per workflow.
+- 60 runs per workspace per hour, across webhooks, schedules and manual runs.
+- Schedules run at most every 5 minutes, in UTC.
+- 15s per HTTP call, 256 KB per webhook payload or response, up to 5 retries per step.
+- Runs are deleted after 14 days, and workflows nobody edits or runs for 30 days are deleted too.
 
 ## Roadmap
 
