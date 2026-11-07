@@ -14,7 +14,7 @@
       "binding": "DB",
       "database_name": "knotwork",
       // Replace with the id that `npx wrangler d1 create knotwork` prints.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "0f48a649-3f54-4f79-ac6c-57c34394b99f",
       "migrations_dir": "migrations"
     }
   ],
