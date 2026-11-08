@@ -8,11 +8,11 @@ export function cn(...parts: (string | false | null | undefined)[]) {
 export function Logo({ size = 32 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden="true">
-      <rect x="0.5" y="0.5" width="63" height="63" rx="16" fill="#171B22" stroke="#2A303B" />
-      <path d="M22 14V50" stroke="#E8EAED" strokeWidth="6" strokeLinecap="round" fill="none" />
-      <path d="M22 32L43 48" stroke="#E8EAED" strokeWidth="6" strokeLinecap="round" fill="none" />
-      <path d="M22 32L40 19" stroke="#FF7A45" strokeWidth="6" strokeLinecap="round" fill="none" />
-      <circle cx="43" cy="17" r="6.5" fill="#FF7A45" />
+      <rect x="0.5" y="0.5" width="63" height="63" rx="16" fill="#141613" stroke="#2A2D27" />
+      <path d="M22 14V50" stroke="#F2F2EC" strokeWidth="6" strokeLinecap="round" fill="none" />
+      <path d="M22 32L43 48" stroke="#F2F2EC" strokeWidth="6" strokeLinecap="round" fill="none" />
+      <path d="M22 32L40 19" stroke="#C6F432" strokeWidth="6" strokeLinecap="round" fill="none" />
+      <circle cx="43" cy="17" r="6.5" fill="#C6F432" />
     </svg>
   );
 }

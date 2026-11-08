@@ -1,18 +1,18 @@
 @import "tailwindcss";
 
-/* Knotwork brand tokens. Dark first. */
+/* Knotwork brand tokens: ink and lime, dark first. */
 @theme {
-  --color-ink: #0e1116;
-  --color-deep: #12161c;
-  --color-graphite: #171b22;
-  --color-line: #2a303b;
-  --color-edge: #3a4250;
-  --color-text: #e8eaed;
-  --color-soft: #a3abb8;
-  --color-muted: #8b93a1;
-  --color-spark: #ff7a45;
-  --color-spark-hover: #ff9466;
-  --color-wire: #5b8cff;
+  --color-ink: #0a0b0a;
+  --color-deep: #0f110e;
+  --color-graphite: #141613;
+  --color-line: #2a2d27;
+  --color-edge: #3a3e35;
+  --color-text: #f2f2ec;
+  --color-soft: #a9ac9f;
+  --color-muted: #8e9185;
+  --color-spark: #c6f432;
+  --color-spark-hover: #d8fa6e;
+  --color-wire: #c6f432;
   --color-pass: #3dd68c;
   --color-retry: #f5c04a;
   --color-fail: #f25f5c;
@@ -40,6 +40,6 @@ body {
 }
 
 .dots {
-  background-image: radial-gradient(#232833 1px, transparent 1px);
+  background-image: radial-gradient(#1E211B 1px, transparent 1px);
   background-size: 24px 24px;
 }
