@@ -4,6 +4,7 @@ import { workspaceId } from "./api";
 import { cn, Logo } from "./components/ui";
 import "./index.css";
 import { EditorPage } from "./pages/EditorPage";
+import { LandingPage } from "./pages/LandingPage";
 import { RunPage } from "./pages/RunPage";
 import { RunsPage } from "./pages/RunsPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
@@ -11,7 +12,7 @@ import { Link, match, usePath } from "./router";
 
 function Routes({ path }: { path: string }) {
   let p;
-  if (path === "/" || path === "/workflows") return <WorkflowsPage />;
+  if (path === "/workflows") return <WorkflowsPage />;
   if ((p = match("/workflows/new", path))) return <EditorPage key="new" id={null} />;
   if ((p = match("/workflows/:id", path))) return <EditorPage key={p.id} id={p.id} />;
   if (path === "/runs") return <RunsPage />;
@@ -19,17 +20,21 @@ function Routes({ path }: { path: string }) {
   return (
     <div className="py-24 text-center">
       <p className="font-display text-2xl font-bold">Nothing here</p>
-      <Link href="/" className="mt-4 inline-block text-wire hover:underline">
+      <Link href="/workflows" className="mt-4 inline-block text-wire hover:underline">
         Back to workflows
       </Link>
     </div>
   );
 }
 
-function Shell() {
+function App() {
   const path = usePath();
+  return path === "/" ? <LandingPage /> : <Shell path={path} />;
+}
+
+function Shell({ path }: { path: string }) {
   const nav = [
-    { href: "/", label: "Workflows", active: path === "/" || path.startsWith("/workflows") },
+    { href: "/workflows", label: "Workflows", active: path.startsWith("/workflows") },
     { href: "/runs", label: "Runs", active: path.startsWith("/runs") },
   ];
   return (
@@ -75,7 +80,7 @@ function WorkspaceFooter() {
           type="button"
           className="min-h-11 text-soft hover:text-text"
           onClick={() =>
-            navigator.clipboard.writeText(`${location.origin}/?workspace=${workspaceId}`).then(() => {
+            navigator.clipboard.writeText(`${location.origin}/workflows?workspace=${workspaceId}`).then(() => {
               setCopied(true);
               setTimeout(() => setCopied(false), 1500);
             })
@@ -93,6 +98,6 @@ function WorkspaceFooter() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Shell />
+    <App />
   </StrictMode>,
 );

@@ -108,7 +108,7 @@ export function EditorPage({ id }: { id: string | null }) {
   async function remove() {
     if (!saved || !confirm(`Delete "${saved.name}" and all its runs?`)) return;
     await api.deleteWorkflow(saved.id);
-    navigate("/");
+    navigate("/workflows");
   }
 
   function addStep(type: StepType) {
@@ -132,7 +132,7 @@ export function EditorPage({ id }: { id: string | null }) {
     <div className="flex flex-col gap-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-2">
-          <Link href="/" className="text-sm text-soft hover:text-text">
+          <Link href="/workflows" className="text-sm text-soft hover:text-text">
             ← Workflows
           </Link>
           <label htmlFor="wf-name" className="sr-only">
