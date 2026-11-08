@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* Knotwork brand tokens: ink and lime, dark first. */
+@theme {
+  --color-ink: #0a0b0a;
+  --color-deep: #0f100e;
+  --color-graphite: #141613;
+  --color-line: #2b2e25;
+  --color-edge: #373b30;
+  --color-text: #f2f2ec;
+  --color-soft: #b5b9ae;
+  --color-muted: #909488;
+  --color-spark: #c6f432;
+  --color-spark-hover: #d1fc5a;
+  --color-wire: #c6f432;
+  --color-pass: #3dd68c;
+  --color-retry: #f5c04a;
+  --color-fail: #f25f5c;
+
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-wire);
+  outline-offset: 2px;
+}
+
+.dots {
+  background-image: radial-gradient(#1E211B 1px, transparent 1px);
+  background-size: 24px 24px;
+}

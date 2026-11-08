@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "knotwork",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // The dashboard is a single-page app. /api and /hooks go to the Worker, everything else is static.
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/hooks/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "knotwork",
+      // Replace with the id that `npx wrangler d1 create knotwork` prints.
+      "database_id": "0f48a649-3f54-4f79-ac6c-57c34394b99f",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Every minute: start scheduled workflows and resume runs that are waiting on a retry or a delay.
+  "triggers": { "crons": ["* * * * *"] },
+  // Served at knotwork.gigiberidze.com. Cloudflare creates the DNS record and certificate on deploy.
+  "routes": [{ "pattern": "knotwork.gigiberidze.com", "custom_domain": true }],
+  "observability": { "enabled": true }
+}

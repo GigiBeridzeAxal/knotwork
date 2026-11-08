@@ -1,0 +1,182 @@
+import type { FilterOp, Step } from "../shared/schema";
+import { render, renderString, renderText } from "../shared/template";
+
+export type StepResult =
+  | { kind: "ok"; output: unknown; message?: string }
+  | { kind: "wait"; seconds: number; output: unknown; message: string }
+  | { kind: "stop"; message: string }
+  | { kind: "fail"; message: string; output?: unknown };
+
+export interface Scope {
+  trigger: unknown;
+  steps: Record<string, unknown>;
+  run: { id: string; startedAt: string };
+  workflow: { id: string; name: string };
+}
+
+const HTTP_TIMEOUT_MS = 15_000;
+const MAX_RESPONSE_BYTES = 256 * 1024;
+const USER_AGENT = "Knotwork/0.1 (+https://github.com/GigiBeridzeAxal/knotwork)";
+
+export async function executeStep(step: Step, scope: Scope): Promise<StepResult> {
+  switch (step.type) {
+    case "http":
+      return http(step, scope);
+    case "transform":
+      return { kind: "ok", output: render(step.config.output, scope) };
+    case "filter":
+      return filter(step, scope);
+    case "delay":
+      return {
+        kind: "wait",
+        seconds: step.config.seconds,
+        output: { waitedSeconds: step.config.seconds },
+        message: `Waiting ${formatSeconds(step.config.seconds)}`,
+      };
+    case "log": {
+      const message = renderText(step.config.message, scope);
+      return { kind: "ok", output: { message }, message };
+    }
+  }
+}
+
+async function http(step: Extract<Step, { type: "http" }>, scope: Scope): Promise<StepResult> {
+  const { config } = step;
+  const url = renderText(config.url, scope).trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { kind: "fail", message: `"${url}" is not a valid URL` };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { kind: "fail", message: "Only http and https URLs can be called" };
+  }
+
+  const headers = new Headers({ "user-agent": USER_AGENT });
+  for (const [name, value] of Object.entries(config.headers)) {
+    headers.set(name, renderText(value, scope));
+  }
+
+  let body: string | undefined;
+  if (config.body !== undefined && config.body !== "" && config.method !== "GET") {
+    if (typeof config.body === "string") {
+      const rendered = renderString(config.body, scope);
+      body = typeof rendered === "string" ? rendered : JSON.stringify(rendered);
+    } else {
+      body = JSON.stringify(render(config.body, scope));
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    }
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(parsed.toString(), {
+      method: config.method,
+      headers,
+      body,
+      redirect: "follow",
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
+    return { kind: "fail", message: `${config.method} ${parsed.host} failed: ${reason}` };
+  }
+
+  const text = await readLimited(res, MAX_RESPONSE_BYTES);
+  let responseBody: unknown = text;
+  if (text && (res.headers.get("content-type") ?? "").includes("json")) {
+    try {
+      responseBody = JSON.parse(text);
+    } catch {
+      // Not valid JSON after all; keep the text.
+    }
+  }
+  const output = {
+    status: res.status,
+    ok: res.ok,
+    headers: { "content-type": res.headers.get("content-type") ?? "" },
+    body: responseBody,
+  };
+  const message = `${config.method} ${parsed.host}${parsed.pathname} → ${res.status}`;
+  if (!res.ok && config.failOnError) return { kind: "fail", message, output };
+  return { kind: "ok", output, message };
+}
+
+async function readLimited(res: Response, limit: number): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      return text + "…[response cut off at 256 KB]";
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+const OP_WORDS: Record<FilterOp, string> = {
+  equals: "equals",
+  not_equals: "does not equal",
+  contains: "contains",
+  gt: "is greater than",
+  lt: "is less than",
+  exists: "has a value",
+  not_exists: "is empty",
+};
+
+function filter(step: Extract<Step, { type: "filter" }>, scope: Scope): StepResult {
+  const { left, op, right } = step.config;
+  const leftValue = renderString(left, scope);
+  const rightText = renderText(right, scope);
+  const passed = compare(leftValue, op, rightText);
+  const shown = typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing";
+  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${rightText}"`}`;
+  if (!passed) return { kind: "stop", message: `Stopped: ${description} is false` };
+  return { kind: "ok", output: { passed: true }, message: `Passed: ${description}` };
+}
+
+export function compare(left: unknown, op: FilterOp, right: string): boolean {
+  const empty = left === undefined || left === null || left === "";
+  switch (op) {
+    case "exists":
+      return !empty;
+    case "not_exists":
+      return empty;
+    case "equals":
+      return asText(left) === right;
+    case "not_equals":
+      return asText(left) !== right;
+    case "contains":
+      if (Array.isArray(left)) return left.some((item) => asText(item) === right);
+      return asText(left).includes(right);
+    case "gt":
+    case "lt": {
+      const a = Number(left);
+      const b = Number(right);
+      if (empty || Number.isNaN(a) || Number.isNaN(b)) return false;
+      return op === "gt" ? a > b : a < b;
+    }
+  }
+}
+
+function asText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+export function formatSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.round(seconds / 360) / 10}h`;
+  return `${Math.round(seconds / 8640) / 10}d`;
+}
+
