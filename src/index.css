@@ -3,15 +3,15 @@
 /* Knotwork brand tokens: ink and lime, dark first. */
 @theme {
   --color-ink: #0a0b0a;
-  --color-deep: #0f110e;
+  --color-deep: #0f100e;
   --color-graphite: #141613;
-  --color-line: #2a2d27;
-  --color-edge: #3a3e35;
+  --color-line: #2b2e25;
+  --color-edge: #373b30;
   --color-text: #f2f2ec;
-  --color-soft: #a9ac9f;
-  --color-muted: #8e9185;
+  --color-soft: #b5b9ae;
+  --color-muted: #909488;
   --color-spark: #c6f432;
-  --color-spark-hover: #d8fa6e;
+  --color-spark-hover: #d1fc5a;
   --color-wire: #c6f432;
   --color-pass: #3dd68c;
   --color-retry: #f5c04a;
