@@ -75,9 +75,10 @@ taken out again if it went over.
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
-use. Past 350 MB, queued and waiting runs are stopped, keeping only the reason: first those of accounts
-holding 5 or more, biggest backlogs first, then any waiting more than a day ahead; only if that isn't
-enough are everyone's oldest finished runs deleted, and near 450 MB any pending runs. Past 450 MB it
+use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
+the pending runs of accounts holding more than 20 (biggest backlogs first), then everyone's oldest
+finished runs are deleted, then the pending runs of accounts holding 5 or more are stopped, and near
+450 MB any pending runs. A stopped run keeps only the reason. Past 450 MB it
 pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
 in all; see Limits), so even a burst can't fill the space between two checks.
 

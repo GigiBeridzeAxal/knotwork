@@ -290,9 +290,11 @@ export async function chargeRunBytes(
   if (mine <= LIMITS.runBytesPerAccountPerHour && all <= cap && fair) return null;
   await Promise.all([bump(c, `runbytes:${ownerId}`, HOUR, now, -bytes), bump(c, poolKey, HOUR, now, -bytes)]);
   const at = new Date((Math.floor(now / HOUR) + 1) * HOUR).toISOString().slice(11, 16);
-  return mine > LIMITS.runBytesPerAccountPerHour
-    ? `Your account's runs have stored their ${LIMITS.runBytesPerAccountPerHour / 1_000_000} MB this hour. New runs can start at ${at} UTC.`
-    : `Knotwork's runs this hour have used the space it can give them. New runs can start at ${at} UTC.`;
+  if (mine > LIMITS.runBytesPerAccountPerHour) {
+    return `Your account's runs have stored their ${LIMITS.runBytesPerAccountPerHour / 1_000_000} MB this hour. New runs can start at ${at} UTC.`;
+  }
+  if (all > cap) return `Knotwork's runs this hour have used the space it can give them. New runs can start at ${at} UTC.`;
+  return `Knotwork is busy this hour, and your account's runs have already stored ${LIMITS.fairShareRunBytesPerHour / 1_000} KB, so new ones wait until ${at} UTC.`;
 }
 
 /** Bytes a run stores when it's created: its input and its copy of the steps. */

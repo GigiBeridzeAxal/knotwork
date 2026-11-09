@@ -165,7 +165,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     // Past half of the webhook and manual pool, an account that stored more than 200 KB this hour waits ...
     await bump(c, "runbytes:demand", 3_600_000, now, 30_000_000);
     expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 150_000)).toBeNull();
-    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 100_000)).toMatch(/space/);
+    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 100_000)).toMatch(/your account.s runs have already stored 200 KB/);
     // ... but its schedules, in their own pool, and a quiet account still run.
     expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 10_000)).toBeNull();
     expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
@@ -289,18 +289,19 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
   });
 
-  it("shrinks many accounts' moderate backlogs before anyone's history, and any backlog near full", { timeout: 180_000 }, async () => {
+  it("shrinks many accounts' moderate backlogs after old history, and any backlog near full", { timeout: 180_000 }, async () => {
     await c.runs.deleteMany({});
     const pendingRun = (owner: string, i: number) =>
       ({ _id: `run_${owner}_${i}`, ownerId: owner, workflowId: `wf_${owner}`, status: "waiting", steps: [], input: { big: "x" }, outputs: {}, logs: [], createdAt: 1 }) as never;
     // 100 accounts holding 20 waiting runs each, and one account's finished run.
     await c.runs.insertMany(Array.from({ length: 100 }, (_, a) => Array.from({ length: 20 }, (_, i) => pendingRun(`usr_s${a}`, i))).flat());
     await c.runs.insertOne({ _id: "run_history", ownerId: "usr_h", status: "succeeded", createdAt: 0 } as never);
-    const sizes = [460_000_000, 300_000_000];
+    // Old history goes first; when that isn't enough, the moderate backlogs.
+    const sizes = [460_000_000, 460_000_000, 300_000_000];
     const stub = { stats: async () => ({ dataSize: sizes.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db;
     await guardStorage(c, stub, Date.now());
     expect(await c.runs.countDocuments({ status: "stopped", input: null })).toBe(2_000);
-    expect(await c.runs.findOne({ _id: "run_history" })).not.toBeNull();
+    expect(await c.runs.findOne({ _id: "run_history" })).toBeNull();
 
     // Many accounts with one waiting run each: history goes first, then, near full, those runs too.
     await c.runs.deleteMany({});
@@ -311,6 +312,19 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await guardStorage(c, stub2, Date.now())).toBe(300_000_000);
     expect(await c.runs.findOne({ _id: "run_history" })).toBeNull();
     expect(await c.runs.countDocuments({ status: "stopped" })).toBe(30);
+    await c.runs.deleteMany({});
+  });
+
+  it("deletes old history before stopping an ordinary account's few runs in flight", async () => {
+    await c.runs.deleteMany({});
+    const now = Date.now();
+    const waiting = Array.from({ length: 5 }, (_, i) => ({ _id: `run_live_${i}`, ownerId: "usr_live", status: "waiting", nextRunAt: now + 600_000, createdAt: now }) as never);
+    const history = Array.from({ length: 300 }, (_, i) => ({ _id: `run_old_${i}`, ownerId: "usr_old", status: "succeeded", createdAt: i }) as never);
+    await c.runs.insertMany([...waiting, ...history]);
+    const sizes = [380_000_000, 200_000_000];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 200_000_000, indexSize: 0 }) } as unknown as Db, now);
+    expect(await c.runs.countDocuments({ ownerId: "usr_live", status: "waiting" })).toBe(5);
+    expect(await c.runs.countDocuments({ ownerId: "usr_old" })).toBe(0);
     await c.runs.deleteMany({});
   });
 

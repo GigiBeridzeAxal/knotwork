@@ -36,7 +36,9 @@ const MAX_ERROR = 1_000;
 const DUE_PER_TICK = 10;
 /** At most this many of one account's runs per tick, so one account can't take every slot. */
 const DUE_PER_OWNER = 2;
-/** When the database is nearly full, accounts with at least this many pending runs have them stopped first. */
+/** When the database is nearly full: pending runs an account may hold before they're stopped ahead of old history ... */
+const BIG_BACKLOG = 21;
+/** ... and after it. */
 const SHRINK_BACKLOG_FROM = 5;
 /** Most runs the storage guard stops, or deletes, in one step of one check. */
 const SHRINK_PER_CHECK = 2_000;
@@ -383,14 +385,16 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
   };
   let used = await measure();
   if (used > STORAGE_PRUNE_BYTES) {
-    // Waiting runs can't simply be deleted, so accounts could fill the space with them. In order,
-    // measuring again after each step, until there's room:
-    //   1. shrink the pending runs of accounts holding several, the biggest backlogs first;
-    //   2. shrink runs waiting more than a day ahead, from any account;
+    // Waiting runs can't simply be deleted, so accounts could fill the space with them; but ordinary
+    // in-flight work shouldn't pay for old history either. In order, measuring again after each step,
+    // until there's room:
+    //   1. shrink runs waiting more than a day ahead (long waits are what filling the space needs);
+    //   2. shrink the pending runs of accounts holding far more than usual, biggest backlogs first;
     //   3. delete everyone's oldest finished runs;
-    //   4. near the full mark, shrink any pending runs, the biggest backlogs first.
-    if (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM)) used = await measure();
-    if (used > STORAGE_PRUNE_BYTES && (await shrinkLongWaits(c, now))) used = await measure();
+    //   4. shrink the pending runs of accounts holding several;
+    //   5. near the full mark, shrink any pending runs, the biggest backlogs first.
+    if (await shrinkLongWaits(c, now)) used = await measure();
+    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, BIG_BACKLOG))) used = await measure();
     if (used > STORAGE_PRUNE_BYTES) {
       const old = await c.runs
         .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
@@ -402,6 +406,7 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
         used = await measure();
       }
     }
+    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
     if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
   }
   // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
