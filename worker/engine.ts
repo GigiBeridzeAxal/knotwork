@@ -3,7 +3,7 @@ import { cronMatches, nextFire, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
 import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
-import { STORAGE_FULL, takeRunSlot } from "./db";
+import { runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
 import { clip, DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
@@ -44,6 +44,7 @@ const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
 /** The free cluster holds 512 MB. Past the first mark old runs are pruned; past the second, new runs and sign-ups pause. */
+const STORAGE_WATCH_BYTES = 250 * MB;
 const STORAGE_PRUNE_BYTES = 350 * MB;
 const STORAGE_FULL_BYTES = 450 * MB;
 
@@ -320,12 +321,27 @@ async function shrinkBacklogs(c: Collections, now: number, from: number): Promis
   if (!owners.length) return 0;
   const pending = { ownerId: { $in: owners }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
   const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).limit(SHRINK_PER_CHECK).toArray()).map((r) => r._id);
+  return shrinkRuns(c, now, ids, "this account had many runs waiting");
+}
+
+/** Runs waiting more than a day ahead (long delays are what filling the database with waits needs), latest first. */
+async function shrinkLongWaits(c: Collections, now: number): Promise<number> {
+  const ids = await c.runs
+    .find({ status: "waiting", nextRunAt: { $gt: now + DAY } }, { projection: { _id: 1 } })
+    .sort({ nextRunAt: -1 })
+    .limit(SHRINK_PER_CHECK)
+    .toArray();
+  return shrinkRuns(c, now, ids.map((r) => r._id), "this run was waiting more than a day ahead");
+}
+
+async function shrinkRuns(c: Collections, now: number, ids: string[], why: string): Promise<number> {
+  if (!ids.length) return 0;
   await c.runs.updateMany(
     { _id: { $in: ids }, status: { $in: ["queued", "waiting"] } },
     {
       $set: {
         status: "stopped",
-        error: "Stopped to free space: Knotwork's free database was nearly full, and this account had many runs waiting.",
+        error: `Stopped to free space: Knotwork's free database was nearly full, and ${why}.`,
         finishedAt: now,
         nextRunAt: null,
         input: null,
@@ -336,7 +352,7 @@ async function shrinkBacklogs(c: Collections, now: number, from: number): Promis
       },
     },
   );
-  await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped" } });
+  await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped", "lastRun.error": "space" } });
   return ids.length;
 }
 
@@ -352,9 +368,11 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     // Waiting runs can't simply be deleted, so accounts could fill the space with them. In order,
     // measuring again after each step, until there's room:
     //   1. shrink the pending runs of accounts holding several, the biggest backlogs first;
-    //   2. delete everyone's oldest finished runs;
-    //   3. near the full mark, shrink any pending runs, the biggest backlogs first.
+    //   2. shrink runs waiting more than a day ahead, from any account;
+    //   3. delete everyone's oldest finished runs;
+    //   4. near the full mark, shrink any pending runs, the biggest backlogs first.
     if (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM)) used = await measure();
+    if (used > STORAGE_PRUNE_BYTES && (await shrinkLongWaits(c, now))) used = await measure();
     if (used > STORAGE_PRUNE_BYTES) {
       const old = await c.runs
         .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
@@ -367,6 +385,13 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
       }
     }
     if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
+  }
+  // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
+  // the rest of the space between two checks.
+  if (used > STORAGE_WATCH_BYTES) {
+    await c.counters.updateOne({ _id: STORAGE_HIGH }, { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } }, { upsert: true });
+  } else {
+    await c.counters.deleteOne({ _id: STORAGE_HIGH });
   }
   if (used > STORAGE_FULL_BYTES) {
     // Lasts until a little after the next check, which renews it while the database stays full.
@@ -424,7 +449,7 @@ export async function tick(
       );
       if (!wf) continue;
       // A schedule that hits the account's hourly limit is skipped for this time; the log says why.
-      const blocked = await takeRunSlot(c, wf.ownerId, now, "schedule");
+      const blocked = await takeRunSlot(c, wf.ownerId, now, "schedule", runBytes(null, wf.steps));
       if (blocked) {
         console.log(`schedule ${_id} skipped: ${blocked}`);
         continue;
@@ -487,8 +512,8 @@ export async function tick(
   // A few at a time: they share one database connection, and the Worker one CPU budget.
   await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
 
-  // Every 10 minutes, check how much of the free cluster is in use.
-  if (db && minuteOfHour % 10 === 0) {
+  // Every 10 minutes, check how much of the free cluster is in use; every minute once it's high.
+  if (db && (minuteOfHour % 10 === 0 || (await c.counters.findOne({ _id: STORAGE_HIGH }, { projection: { _id: 1 } })))) {
     await guardStorage(c, db, now).catch((err) => console.error("storage check", err));
   }
 

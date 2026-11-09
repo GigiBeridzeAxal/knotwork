@@ -186,6 +186,8 @@ export async function deleteWorkflow(c: Collections, id: string, workspaceId: st
 const HOUR = 3_600_000;
 /** Set by the cron tick while the database is close to the free cluster's 512 MB. */
 export const STORAGE_FULL = "storage:full";
+/** Set by the cron tick while the database is above its watch mark: it then checks every minute. */
+export const STORAGE_HIGH = "storage:high";
 export const runCounter = (ownerId: string) => `runs:${ownerId}`;
 
 export const storageFull = async (c: Collections) => (await c.counters.findOne({ _id: STORAGE_FULL })) !== null;
@@ -211,6 +213,8 @@ export async function takeRunSlot(
   ownerId: string,
   now: number,
   kind: "schedule" | "webhook" | "manual" = "manual",
+  /** What the run will store up front (`runBytes`), counted against the hourly byte budgets. */
+  bytes = 0,
 ): Promise<string | null> {
   const [full, max, pending] = await Promise.all([
     storageFull(c),
@@ -251,8 +255,35 @@ export async function takeRunSlot(
         : `Knotwork is busy this hour, and your account has already started ${LIMITS.fairShareRunsPerHour} runs, so new ones wait until ${at} UTC. Scheduled runs keep going.`;
     }
   }
+  // Bytes, for every kind of run: how much new runs may add to the database per hour, per account and
+  // overall, so a burst can't fill the free cluster between two storage checks.
+  if (bytes > 0) {
+    const [mineBytes, allBytes] = await Promise.all([
+      bump(c, `runbytes:${ownerId}`, HOUR, now, bytes),
+      bump(c, "runbytes:all", HOUR, now, bytes),
+    ]);
+    const fairBytes = allBytes <= LIMITS.runBytesPerHourOverall / 2 || mineBytes <= LIMITS.fairShareRunBytesPerHour;
+    if (mineBytes > LIMITS.runBytesPerAccountPerHour || allBytes > LIMITS.runBytesPerHourOverall || !fairBytes) {
+      await Promise.all([
+        bump(c, `runbytes:${ownerId}`, HOUR, now, -bytes),
+        bump(c, "runbytes:all", HOUR, now, -bytes),
+        giveBack(c, runCounter(ownerId), HOUR, now),
+        kind !== "schedule" ? giveBack(c, "runs:all", HOUR, now) : null,
+      ]);
+      const at = new Date((Math.floor(now / HOUR) + 1) * HOUR).toISOString().slice(11, 16);
+      return mineBytes > LIMITS.runBytesPerAccountPerHour
+        ? `Your account's runs this hour have used their ${LIMITS.runBytesPerAccountPerHour / 1_000_000} MB of input and steps. New runs can start at ${at} UTC.`
+        : `Knotwork's runs this hour have used the space it can give them. New runs can start at ${at} UTC.`;
+    }
+  }
   return null;
 }
+
+/** Bytes a run stores when it's created: its input and its copy of the steps, plus room for outputs. */
+export function runBytes(input: unknown, steps: unknown): number {
+  return new TextEncoder().encode(JSON.stringify([input ?? null, steps])).byteLength + RUN_OVERHEAD_BYTES;
+}
+const RUN_OVERHEAD_BYTES = 8_000;
 
 export async function listRuns(c: Collections, workspaceId: string, workflowId: string | undefined, limit: number) {
   const filter = workflowId ? { workspaceId, workflowId } : { workspaceId };

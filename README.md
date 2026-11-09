@@ -74,10 +74,12 @@ taken out again if it went over.
 
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
-data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB, the queued
-and waiting runs of accounts holding 5 or more are stopped, biggest backlogs first, keeping only the
-reason; only if that isn't enough are everyone's oldest finished runs deleted, and near 450 MB any
-account's pending runs; past 450 MB it pauses new runs and sign-ups until there's room again.
+data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
+use. Past 350 MB, queued and waiting runs are stopped, keeping only the reason: first those of accounts
+holding 5 or more, biggest backlogs first, then any waiting more than a day ahead; only if that isn't
+enough are everyone's oldest finished runs deleted, and near 450 MB any pending runs. Past 450 MB it
+pauses new runs and sign-ups until there's room again. New runs may also store only so much per hour
+(their input and steps), so a burst can't fill the space between two checks.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
 needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
@@ -193,7 +195,9 @@ person from using up the free plans:
 - The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry).
   Accounts take turns, round robin: those it served longest ago go first, 2 runs each, oldest first, and
   spare slots go to busy accounts. Webhook and manual runs start in their own request.
-- 100 runs per account queued or waiting (in a delay or retry) at once.
+- 100 runs per account queued or waiting (in a delay or retry) at once. What new runs store (input and
+  steps): 4 MB per account per hour, 60 MB overall, and past half of that, accounts that stored more than
+  1 MB this hour wait for the next.
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login

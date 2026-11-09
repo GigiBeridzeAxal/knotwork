@@ -59,7 +59,8 @@ export interface WorkflowDoc extends WorkflowInput {
   lastScheduledAt: number | null;
   /** Next minute (ms) the schedule fires; null or missing means "work it out on the next tick". */
   nextFireAt?: number | null;
-  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
+  /** `error: "space"` when the storage guard stopped it. */
+  lastRun: { id: string; status: RunStatus; createdAt: number; error?: string } | null;
   createdAt: number;
   updatedAt: number;
 }

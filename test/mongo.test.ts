@@ -154,6 +154,21 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await takeRunSlot(c, "usr_fair_quiet", now, "webhook")).toBeNull();
   });
 
+  it("limits what new runs may store per hour, per account and overall", async () => {
+    await Promise.all([account("usr_bytes"), account("usr_bytes2"), account("usr_bytes3")]);
+    const now = Date.now();
+    const results = [];
+    for (let i = 0; i < 40; i++) results.push(await takeRunSlot(c, "usr_bytes", now, "schedule", 123_000));
+    // 4 MB an hour per account: 32 runs of 123 KB, then refused, with the slot given back.
+    expect(results.filter((r) => r === null)).toHaveLength(32);
+    expect(results[32]).toMatch(/4 MB/);
+    // Past half of the overall budget, an account that stored more than 1 MB this hour waits.
+    await bump(c, "runbytes:all", 3_600_000, now, 30_000_000);
+    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 900_000)).toBeNull();
+    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 200_000)).toMatch(/space/);
+    expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
+  });
+
   it("gives a new account a smaller budget, and a deleted account's workflows none", async () => {
     await account("usr_new", 3_600_000);
     const now = Date.now();
@@ -279,6 +294,29 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await guardStorage(c, stub2, Date.now())).toBe(300_000_000);
     expect(await c.runs.findOne({ _id: "run_history" })).toBeNull();
     expect(await c.runs.countDocuments({ status: "stopped" })).toBe(30);
+    await c.runs.deleteMany({});
+  });
+
+  it("shrinks runs waiting more than a day ahead before anyone's history, and checks every minute while high", async () => {
+    await c.runs.deleteMany({});
+    await c.counters.deleteMany({ _id: { $in: ["storage:high", "storage:full"] } });
+    const now = Date.now();
+    const run = (id: string, owner: string, wake: number) =>
+      ({ _id: id, ownerId: owner, workflowId: "wf_x", status: "waiting", nextRunAt: wake, steps: [], input: {}, outputs: {}, logs: [], createdAt: 1 }) as never;
+    await c.runs.insertMany([run("run_far1", "usr_f1", now + 3 * 86_400_000), run("run_far2", "usr_f2", now + 6 * 86_400_000), run("run_soon", "usr_f3", now + 60_000)]);
+    await c.runs.insertOne({ _id: "run_hist", ownerId: "usr_h", status: "succeeded", createdAt: 0 } as never);
+    const sizes = [380_000_000, 300_000_000];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db, now);
+    expect((await c.runs.find({ status: "stopped" }).toArray()).map((r) => r._id).sort()).toEqual(["run_far1", "run_far2"]);
+    expect(await c.runs.findOne({ _id: "run_hist" })).not.toBeNull();
+    // 300 MB is above the watch mark: the next tick, at a minute that isn't a multiple of 10, checks.
+    expect(await c.counters.findOne({ _id: "storage:high" })).not.toBeNull();
+    let checked = 0;
+    const watched = { stats: async () => ((checked += 1), { dataSize: 200_000_000, indexSize: 0 }) } as unknown as Db;
+    const minute = Math.floor(now / 600_000) * 600_000 + 3 * 60_000;
+    await tick(c, minute + 1_000, watched);
+    expect(checked).toBe(1);
+    expect(await c.counters.findOne({ _id: "storage:high" })).toBeNull();
     await c.runs.deleteMany({});
   });
 

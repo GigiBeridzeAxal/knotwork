@@ -70,7 +70,7 @@ export function WorkflowsPage() {
                     </span>
                     {wf.lastRun ? (
                       <span className="flex items-center gap-2">
-                        <StatusBadge status={wf.lastRun.status} />
+                        <StatusBadge status={wf.lastRun.status} error={wf.lastRun.error} />
                         {timeAgo(wf.lastRun.createdAt)}
                       </span>
                     ) : (

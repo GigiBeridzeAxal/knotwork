@@ -38,6 +38,7 @@ import {
   listRuns,
   listWorkflows,
   listWorkspaces,
+  runBytes,
   runCounter,
   runLimit,
   storageFull,
@@ -420,7 +421,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   }
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
-  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual");
+  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual", runBytes(body?.input, doc.steps));
   if (blocked) return c.json({ error: blocked }, 429);
   // A manual run's input sits under `body`, like a webhook's, so `{{ trigger.body.x }}` works for both.
   const runId = await createRun(db(c), { ...doc, id: doc._id }, "manual", { body: body?.input ?? {} });
@@ -489,7 +490,7 @@ app.all(
       body = Object.fromEntries(new URLSearchParams(text));
     }
 
-    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook");
+    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook", runBytes(text, doc.steps));
     if (blocked) return c.json({ error: blocked }, 429);
 
     const headers: Record<string, string> = {};

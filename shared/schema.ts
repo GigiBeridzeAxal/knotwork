@@ -142,7 +142,8 @@ export interface Workflow extends WorkflowInput {
   version: number;
   createdAt: number;
   updatedAt: number;
-  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
+  /** `error: "space"` when the storage guard stopped it. */
+  lastRun: { id: string; status: RunStatus; createdAt: number; error?: string } | null;
 }
 
 /** A workflow as lists show it: each step's name and type, without its settings. */
