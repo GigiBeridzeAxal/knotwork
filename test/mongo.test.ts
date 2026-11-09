@@ -1,5 +1,5 @@
 import { type Db, MongoClient } from "mongodb";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { WorkflowInput } from "../shared/schema";
 import type { Workflow } from "../shared/schema";
 import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
@@ -190,6 +190,28 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
       expect(run?.logs.map((l) => l.status)).toEqual(["ok", "ok", "ok"]);
     } finally {
       await bump(c, "runbytes:demand", 3_600_000, now, -31_000_000);
+    }
+  });
+
+  it("gives a reservation back in the hour it was made, even when the run ends in the next", async () => {
+    await account("usr_edge");
+    const { runId } = await start([transform("a", 1), transform("b", 2), transform("c", 3)], "usr_edge", "ws_edge");
+    // The clock runs on as usual, but starts 5 ms before the hour turns.
+    const realNow = Date.now.bind(Date);
+    const nextHour = (Math.floor(realNow() / 3_600_000) + 1) * 3_600_000;
+    const offset = nextHour - 5 - realNow();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    try {
+      await advance(c, runId);
+      expect(Date.now()).toBeGreaterThan(nextHour);
+    } finally {
+      clock.mockRestore();
+    }
+    expect((await c.runs.findOne({ _id: runId }))?.status).toBe("succeeded");
+    const window = nextHour / 3_600_000;
+    for (const key of ["runbytes:usr_edge", "runbytes:demand"]) {
+      expect((await c.counters.findOne({ _id: `${key}:${window}` }))?.n ?? 0, key).toBeGreaterThanOrEqual(0);
+      expect((await c.counters.findOne({ _id: `${key}:${window - 1}` }))?.n ?? 0, key).toBeGreaterThan(0);
     }
   });
 

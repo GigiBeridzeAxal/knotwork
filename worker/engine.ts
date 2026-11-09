@@ -42,8 +42,8 @@ const BIG_BACKLOG = 21;
 const SHRINK_BACKLOG_FROM = 5;
 /** When the database is nearly full, each account's newest finished runs kept until last. */
 const HISTORY_KEPT_PER_ACCOUNT = 50;
-/** Accounts whose older history one check trims (those with the most first). */
-const HISTORY_OWNERS_PER_CHECK = 20;
+/** Accounts whose older history one check trims (those with the most first): one query each. */
+const HISTORY_OWNERS_PER_CHECK = 5;
 /** Most runs the storage guard stops, or deletes, in one step of one check. */
 const SHRINK_PER_CHECK = 2_000;
 const TICK_CONCURRENCY = 3;
@@ -277,13 +277,15 @@ async function step(c: Collections, run: RunDoc, started: number) {
       nextHour,
       pausedAt && entry(pausedAt, "waiting", started, `Paused: ${why} this hour. Continues at ${at} UTC.`),
     );
-    await chargeRunBytes(c, run.ownerId, pool, used, Date.now(), false);
+    await chargeRunBytes(c, run.ownerId, pool, used, started, false);
     return;
   }
   try {
     await runSteps();
   } finally {
-    await chargeRunBytes(c, run.ownerId, pool, used - reserve, Date.now(), false);
+    // Settled in the hour the reservation was made, even if the invocation ran past the hour:
+    // otherwise giving it back would credit the next hour's budgets.
+    await chargeRunBytes(c, run.ownerId, pool, used - reserve, started, false);
   }
 
   async function runSteps() {
@@ -489,6 +491,30 @@ async function shrinkRuns(c: Collections, now: number, ids: string[], why: strin
   return ids.length;
 }
 
+async function setStorageFlags(c: Collections, used: number, now: number) {
+  // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
+  // the rest of the space between two checks.
+  if (used > STORAGE_WATCH_BYTES) {
+    await c.counters.updateOne(
+      { _id: STORAGE_HIGH },
+      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
+      { upsert: true },
+    );
+  } else {
+    await c.counters.deleteOne({ _id: STORAGE_HIGH });
+  }
+  if (used > STORAGE_FULL_BYTES) {
+    // Lasts until a little after the next check, which renews it while the database stays full.
+    await c.counters.updateOne(
+      { _id: STORAGE_FULL },
+      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
+      { upsert: true },
+    );
+  } else {
+    await c.counters.deleteOne({ _id: STORAGE_FULL });
+  }
+}
+
 export async function guardStorage(c: Collections, db: Db, now: number) {
   // Atlas counts data plus indexes toward the 512 MB. (storageSize includes space freed by deletes,
   // which an M0 cluster can't compact, so it would never come back down.)
@@ -497,6 +523,9 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     return (stats.dataSize ?? 0) + (stats.indexSize ?? 0);
   };
   let used = await measure();
+  // The flags are set from the first measurement, before the slower steps below, so they hold even
+  // if this invocation runs out of time; they're set again at the end.
+  await setStorageFlags(c, used, now);
   if (used > STORAGE_PRUNE_BYTES) {
     // Waiting runs can't simply be deleted, so accounts could fill the space with them; but ordinary
     // in-flight work shouldn't pay for old history either. In order, measuring again after each step,
@@ -525,27 +554,7 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     }
     if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
   }
-  // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
-  // the rest of the space between two checks.
-  if (used > STORAGE_WATCH_BYTES) {
-    await c.counters.updateOne(
-      { _id: STORAGE_HIGH },
-      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
-      { upsert: true },
-    );
-  } else {
-    await c.counters.deleteOne({ _id: STORAGE_HIGH });
-  }
-  if (used > STORAGE_FULL_BYTES) {
-    // Lasts until a little after the next check, which renews it while the database stays full.
-    await c.counters.updateOne(
-      { _id: STORAGE_FULL },
-      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
-      { upsert: true },
-    );
-  } else {
-    await c.counters.deleteOne({ _id: STORAGE_FULL });
-  }
+  if (used > STORAGE_PRUNE_BYTES) await setStorageFlags(c, used, now);
   return used;
 }
 
@@ -604,6 +613,15 @@ export async function tick(
     }
   }
 
+  // Every 10 minutes, check how much of the free cluster is in use; every minute once it's high. Before
+  // the due runs, so they can't use up this invocation's time first.
+  if (
+    db &&
+    (minuteOfHour % 10 === 0 || (await c.counters.findOne({ _id: STORAGE_HIGH }, { projection: { _id: 1 } })))
+  ) {
+    await guardStorage(c, db, now).catch((err) => console.error("storage check", err));
+  }
+
   const ready: Filter<RunDoc> = {
     $or: [
       { status: { $in: ["queued", "waiting"] }, nextRunAt: null },
@@ -658,14 +676,6 @@ export async function tick(
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.
   await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
-
-  // Every 10 minutes, check how much of the free cluster is in use; every minute once it's high.
-  if (
-    db &&
-    (minuteOfHour % 10 === 0 || (await c.counters.findOne({ _id: STORAGE_HIGH }, { projection: { _id: 1 } })))
-  ) {
-    await guardStorage(c, db, now).catch((err) => console.error("storage check", err));
-  }
 
   // Once an hour, make sure every index exists (a no-op when they do).
   if (minuteOfHour === 7) {
