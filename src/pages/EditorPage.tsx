@@ -36,19 +36,28 @@ export function EditorPage({ id }: { id: string | null }) {
   const [version, setVersion] = useState(0);
   const findElsewhere = useFindElsewhere();
 
+  /** True once the user has changed the draft: a late or repeated load must not replace their edit. */
+  const touched = useRef(false);
+
   useEffect(() => {
     if (!id) return;
+    let stale = false;
     api.workflow(id).then(
       (wf) => {
+        if (stale) return;
         setSaved(wf);
-        setDraft(toInput(wf));
+        if (!touched.current) setDraft(toInput(wf));
       },
       async (e) => {
+        if (stale) return;
         if (e instanceof ApiError && e.status === 404 && (await findElsewhere("workflow", id))) return;
         setMessage(e.message);
       },
     );
-    api.runs(id).then(setRuns, () => {});
+    api.runs(id).then((r) => !stale && setRuns(r), () => {});
+    return () => {
+      stale = true;
+    };
   }, [id, findElsewhere]);
 
   const dirty = useMemo(
@@ -58,7 +67,10 @@ export function EditorPage({ id }: { id: string | null }) {
 
   if (!draft) return message ? <p className="text-fail">{message}</p> : null;
 
-  const update = (patch: Partial<WorkflowInput>) => setDraft({ ...draft, ...patch });
+  const update = (patch: Partial<WorkflowInput>) => {
+    touched.current = true;
+    setDraft({ ...draft, ...patch });
+  };
   const setSteps = (steps: Step[]) => update({ steps });
 
   const stepErrors = (i: number) =>
@@ -75,6 +87,7 @@ export function EditorPage({ id }: { id: string | null }) {
       const wf = saved ? await api.updateWorkflow(saved.id, draft!, saved.version) : await api.createWorkflow(draft!);
       setSaved(wf);
       setDraft(toInput(wf));
+      touched.current = false;
       setVersion((v) => v + 1);
       if (!saved) navigate(`/workflows/${wf.id}`, { replace: true });
       setMessage("Saved");
@@ -188,6 +201,7 @@ export function EditorPage({ id }: { id: string | null }) {
               onClick={() => {
                 setSaved(conflict);
                 setDraft(toInput(conflict));
+                touched.current = false;
                 setVersion((v) => v + 1);
                 setConflict(null);
                 setMessage("");

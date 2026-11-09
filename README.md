@@ -93,6 +93,12 @@ first request after a quiet spell pays the handshake. Without the `HUB` binding 
 opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
 time, and the connect time when the request had to open the connection.
 
+Measured in production over an hour (2026-11-09): the Worker's CPU was at most 2 ms for a request and 6 ms
+for the cron tick, against the 10 ms limit. The hub's tick used about 160 ms of a Durable Object's 30
+seconds. The cron wakes the hub every minute, so it stays in memory all day: 128 MB for 86,400 seconds is
+about 11,060 GB-s of the free plan's 13,000 GB-s of Durable Object duration a day. There is only one hub,
+so that is also the most it can use. Workers & Pages > Durable Objects in the dashboard shows the usage.
+
 **Accounts.** Passwords are hashed with PBKDF2-SHA-256 over an HMAC of the password keyed with `AUTH_PEPPER`,
 a secret that is never stored in the database. The free plan's CPU budget allows only 10,000 iterations; the
 pepper is what keeps a copy of the database alone from being used to guess passwords. The session is a random

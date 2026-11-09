@@ -1,4 +1,4 @@
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Me, Workspace } from "../shared/schema";
 import { api, setCurrentWorkspace, whenSignedOut } from "./api";
 
@@ -63,32 +63,43 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     );
   }, [signedIn]);
 
+  // The actions read the latest state through a ref, so their identity never changes. Pages can
+  // then list them as effect dependencies without re-running (and re-loading) on every state change.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  const logout = useCallback(async () => {
+    await api.logout().catch(() => {});
+    setCurrentWorkspace("");
+    setState({ status: "signed-out" });
+  }, []);
+
+  const switchWorkspace = useCallback(
+    (id: string) => {
+      const now = stateRef.current;
+      if (now.status !== "signed-in") return;
+      // A workspace made on another device isn't in this list yet: fetch the list again.
+      if (now.me.workspaces.some((w) => w.id === id)) signedIn(now.me, id);
+      else api.me().then((fresh) => signedIn(fresh, id), () => {});
+    },
+    [signedIn],
+  );
+
+  const reload = useCallback(
+    async (selectId?: string) => {
+      const fresh = await api.me();
+      const now = stateRef.current;
+      signedIn(fresh, selectId ?? (now.status === "signed-in" ? now.workspaceId : ""));
+    },
+    [signedIn],
+  );
+
   const value = useMemo<SessionApi>(() => {
     const me = state.status === "signed-in" ? state.me : (null as unknown as Me);
     const workspace =
       state.status === "signed-in" ? state.me.workspaces.find((w) => w.id === state.workspaceId)! : (null as unknown as Workspace);
-    return {
-      state,
-      me,
-      workspace,
-      signedIn: (m) => signedIn(m),
-      logout: async () => {
-        await api.logout().catch(() => {});
-        setCurrentWorkspace("");
-        setState({ status: "signed-out" });
-      },
-      switchWorkspace: (id) => {
-        if (state.status !== "signed-in") return;
-        // A workspace made on another device isn't in this list yet: fetch the list again.
-        if (state.me.workspaces.some((w) => w.id === id)) signedIn(state.me, id);
-        else api.me().then((fresh) => signedIn(fresh, id), () => {});
-      },
-      reload: async (selectId) => {
-        const fresh = await api.me();
-        signedIn(fresh, selectId ?? (state.status === "signed-in" ? state.workspaceId : ""));
-      },
-    };
-  }, [state, signedIn]);
+    return { state, me, workspace, signedIn: (m) => signedIn(m), logout, switchWorkspace, reload };
+  }, [state, signedIn, logout, switchWorkspace, reload]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
