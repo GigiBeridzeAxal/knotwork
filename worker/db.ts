@@ -1,6 +1,6 @@
 import type { Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
 import { LIMITS } from "../shared/limits";
-import { giveBack, underLimit } from "./auth";
+import { bump, giveBack } from "./auth";
 import { DEMO_USER_ID } from "./demo";
 import {
   type Collections,
@@ -210,7 +210,8 @@ export async function takeRunSlot(
 ): Promise<string | null> {
   const [full, max] = await Promise.all([storageFull(c), runLimit(c, ownerId, now)]);
   if (max === null) return "This workflow's account has been deleted.";
-  const mine = await underLimit(c, runCounter(ownerId), HOUR, max, now);
+  const used = await bump(c, runCounter(ownerId), HOUR, now);
+  const mine = used <= max;
   // A refused run gives its slot back, so the counter (shown as "runs this hour") counts started runs.
   if (full || !mine) await giveBack(c, runCounter(ownerId), HOUR, now);
   if (full) return "Knotwork's free database is nearly full, so new runs are paused for a few minutes.";
@@ -224,9 +225,15 @@ export async function takeRunSlot(
   // Scheduled runs are already limited per account and by the 5-minute minimum, so the shared ceiling
   // applies only to runs anyone can start on demand: webhooks and manual runs. That way a burst of
   // webhook calls can't stop everyone's schedules.
-  if (kind !== "schedule" && !(await underLimit(c, "runs:all", HOUR, LIMITS.runsPerHourOverall, now))) {
-    await giveBack(c, runCounter(ownerId), HOUR, now);
-    return "Knotwork is busy right now. Try again in a few minutes.";
+  if (kind !== "schedule") {
+    const everyone = await bump(c, "runs:all", HOUR, now);
+    // Past half of the shared ceiling, only accounts that have used little this hour get more, so a
+    // handful of busy accounts can't use it all up for everyone else.
+    const fair = everyone <= LIMITS.runsPerHourOverall / 2 || used <= LIMITS.fairShareRunsPerHour;
+    if (everyone > LIMITS.runsPerHourOverall || !fair) {
+      await Promise.all([giveBack(c, runCounter(ownerId), HOUR, now), giveBack(c, "runs:all", HOUR, now)]);
+      return "Knotwork is busy right now. Try again in a few minutes.";
+    }
   }
   return null;
 }

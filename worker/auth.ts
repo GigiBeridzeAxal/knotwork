@@ -128,6 +128,11 @@ export function ipKey(ip: string, prefix: 48 | 64 = 64): string {
  * in MongoDB with a TTL, so they clean themselves up.
  */
 export async function underLimit(c: Collections, key: string, windowMs: number, max: number, now = Date.now(), by = 1) {
+  return (await bump(c, key, windowMs, now, by)) <= max;
+}
+
+/** Adds `by` to a fixed-window counter and returns its new value, in one atomic update. */
+export async function bump(c: Collections, key: string, windowMs: number, now = Date.now(), by = 1): Promise<number> {
   const window = Math.floor(now / windowMs);
   const add = () =>
     c.counters.findOneAndUpdate(
@@ -143,7 +148,7 @@ export async function underLimit(c: Collections, key: string, windowMs: number, 
     if ((err as { code?: number }).code !== 11000) throw err;
     doc = await add();
   }
-  return (doc?.n ?? by) <= max;
+  return doc?.n ?? by;
 }
 
 /** Gives back one unit taken by `underLimit`, e.g. when a login turned out to be right. */

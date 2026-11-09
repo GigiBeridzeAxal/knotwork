@@ -182,8 +182,13 @@ api.post("/auth/signup", async (c) => {
     await db(c).users.insertOne(user);
   } catch (err) {
     if ((err as { code?: number }).code === 11000) {
-      // No account was made, so this attempt doesn't count toward the network's hourly sign-ups.
-      await giveBack(db(c), ipCounter, HOUR, now);
+      // No account was made, so this attempt doesn't count toward the network's hourly sign-ups. It
+      // counts toward its own limit instead, so the form can't be used to test which emails exist.
+      const [, ok] = await Promise.all([
+        giveBack(db(c), ipCounter, HOUR, now),
+        underLimit(db(c), `signup:dup:${network(c)}`, HOUR, LIMITS.duplicateSignupsPerHour, now),
+      ]);
+      if (!ok) return c.json({ error: "Too many new accounts from your network. Try again in an hour." }, 429);
       return c.json({ error: "There's already an account with that email. Log in instead.", issues: [{ path: ["email"], message: "Already registered" }] }, 409);
     }
     throw err;

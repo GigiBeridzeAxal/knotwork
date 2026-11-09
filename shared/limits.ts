@@ -16,7 +16,9 @@ export const LIMITS = {
   /** The same for an account in its first 24 hours. */
   newAccountRunsPerHour: 10,
   /** Webhook and manual runs started this clock hour across every account (schedules don't count). */
-  runsPerHourOverall: 1_000,
+  runsPerHourOverall: 3_000,
+  /** Once half of that is used, accounts that have started more than this many this hour must wait. */
+  fairShareRunsPerHour: 20,
   minScheduleMinutes: 5,
   /** Runs (and their logs) are deleted this many days after they start, or after their last wait. */
   runHistoryDays: 7,
@@ -29,6 +31,8 @@ export const LIMITS = {
   demoLoginsPerIpPerHour: 30,
   /** Requests to the API and webhooks from one IP per minute, checked before any database work. */
   requestsPerIpPerMinute: 60,
+  /** Sign-ups with an email that already has an account, per network per hour (stops probing). */
+  duplicateSignupsPerHour: 10,
   /** Sessions one account can have at once; logging in again drops the oldest. */
   sessionsPerAccount: 20,
 } as const;

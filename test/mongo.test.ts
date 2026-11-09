@@ -149,6 +149,20 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await takeRunSlot(c, "usr_gone", now, "webhook")).toMatch(/deleted/);
   });
 
+  it("shares the cron's slots between accounts, in the order runs became ready", async () => {
+    const now = Date.now();
+    // 30 runs of one busy account that have been ready for a while, then one run of another account.
+    const hog = await addWorkflow("ws_hog", "usr_hog", wfInput([transform("a", 1)]));
+    for (let i = 0; i < 30; i++) {
+      const runId = await createRun(c, { ...hog, ownerId: "usr_hog" }, "manual", {});
+      await c.runs.updateOne({ _id: runId }, { $set: { nextRunAt: now - 60_000 + i } });
+    }
+    const { runId: other } = await start([transform("a", 1)], "usr_other", "ws_other");
+    await tick(c, now + 1_000);
+    expect((await c.runs.findOne({ _id: other }))?.status).toBe("succeeded");
+    expect(await c.runs.countDocuments({ ownerId: "usr_hog", status: "succeeded" })).toBe(2);
+  });
+
   it("never lets parallel saves put more workflows in a workspace than the limit", async () => {
     await workspace("ws_full", "usr_f");
     const results = await Promise.all(Array.from({ length: 14 }, () => insertWorkflow(c, "ws_full", "usr_f", wfInput([]), Date.now())));

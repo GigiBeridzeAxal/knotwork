@@ -34,6 +34,8 @@ const MAX_MESSAGE = 1_000;
 const MAX_ERROR = 1_000;
 /** Due runs one tick moves forward, and how many at once. The rest wait for the next minute. */
 const DUE_PER_TICK = 10;
+/** At most this many of one account's runs per tick, so one account can't take every slot. */
+const DUE_PER_OWNER = 2;
 const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
@@ -62,7 +64,8 @@ export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Tr
     stepIndex: 0,
     attempt: 0,
     claims: 0,
-    nextRunAt: null,
+    // Ready now: the cron takes due runs in the order they became ready.
+    nextRunAt: now,
     leaseUntil: null,
     error: null,
     logs: [],
@@ -359,7 +362,7 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
     }
   }
 
-  const due = await c.runs
+  const candidates = await c.runs
     .find(
       {
         $or: [
@@ -368,11 +371,21 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
           { status: "running", leaseUntil: { $lt: now } },
         ],
       },
-      { projection: { _id: 1 } },
+      { projection: { _id: 1, ownerId: 1 } },
     )
-    .sort({ createdAt: 1 })
-    .limit(DUE_PER_TICK)
+    // In the order they became ready. A run that used up its time in one invocation is parked with
+    // nextRunAt = now, so it goes to the back of the line instead of staying at the front.
+    .sort({ nextRunAt: 1 })
+    .limit(DUE_PER_TICK * 5)
     .toArray();
+  const perOwner = new Map<string, number>();
+  const due = candidates
+    .filter((run) => {
+      const n = perOwner.get(run.ownerId) ?? 0;
+      perOwner.set(run.ownerId, n + 1);
+      return n < DUE_PER_OWNER;
+    })
+    .slice(0, DUE_PER_TICK);
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.
   await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));

@@ -156,10 +156,12 @@ Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without
 password stop working.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
-   whose path starts with `/api/` or `/hooks/`, more than 30 per 10 seconds from one IP, block for 10 seconds.
+   whose path starts with `/api/` or `/hooks/`, more than 10 per 10 seconds from one IP, block for 10 seconds.
    The Worker's own limiter answers floods with 429, but those requests still count toward the free plan's
-   100,000 a day; the WAF rule stops them before the Worker runs. If the daily quota does run out, `/api`
-   and `/hooks` fail until 00:00 UTC while the dashboard's static files keep loading.
+   100,000 a day; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
+   plan: an IP that stays just under the rule (about 86,000 requests a day) uses most of the daily quota, so
+   two such IPs can use all of it. If that happens, `/api` and `/hooks` fail until 00:00 UTC while the
+   dashboard's static files keep loading.
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
 own domain, or remove it to use the `*.workers.dev` address.
@@ -173,11 +175,14 @@ person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
 - 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
-  first 24 hours. Webhook and manual runs across everyone: 1,000 an hour. A schedule that hits its
-  account's limit is skipped for that time.
+  first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
+  accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
+  limit is skipped for that time.
+- The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry), at
+  most 2 per account, in the order they became ready. Webhook and manual runs start in their own request.
 - 60 requests a minute per IP address; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
-  300 a day; 10 login attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour;
-  20 sessions per account.
+  300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
+  attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.
 - 32 KB per workflow and 64 KB per webhook payload or test input; 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and

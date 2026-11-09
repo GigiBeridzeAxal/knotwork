@@ -80,6 +80,12 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect(me.body.workspaces).toMatchObject([{ name: "Personal", personal: true }]);
     const again = await call("POST", "/api/auth/signup", { body: { name: "A2", email: "alice@example.com", password: "another-password" } });
     expect(again.status).toBe(409);
+    // Trying many emails that exist (to learn who has an account) is cut off.
+    const statuses = [];
+    for (let i = 0; i < 10; i++) {
+      statuses.push((await call("POST", "/api/auth/signup", { body: { name: "A2", email: "alice@example.com", password: "another-password" } })).status);
+    }
+    expect(statuses.at(-1)).toBe(429);
   });
 
   it("logs in with the right password only, and logs out", async () => {
