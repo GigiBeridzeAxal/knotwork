@@ -7,8 +7,9 @@ export { API_KEY_PREFIX_CHARS, apiKeyValid, hookKeyValid, newApiKey, newHookKey 
 /**
  * Passwords: PBKDF2-SHA-256 over HMAC-SHA-256(pepper, password), with a random salt per password.
  *
- * The Workers free plan allows about 10 ms of CPU per request, and 100,000 PBKDF2 rounds take
- * ~45 ms, so the round count is low. The pepper makes up for it: it is a Wrangler secret that never
+ * The round count is low. It was sized for a Worker on the free plan (about 10 ms of CPU per request;
+ * 100,000 rounds take ~45 ms). Hashing now runs in the hub, which has more, but with HUB_OFF it runs in
+ * the Worker again and must still fit. The pepper makes up for it: it is a Wrangler secret that never
  * enters the database, so a copy of the database alone can't be used to guess passwords. Each hash
  * stores its own round count, so it can be raised on a paid plan without breaking old accounts.
  */

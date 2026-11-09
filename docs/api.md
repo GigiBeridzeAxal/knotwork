@@ -66,6 +66,9 @@ answer as they would for anyone.
 | `PUT` | `/workflows/:id` | write | Replace a workflow |
 | `DELETE` | `/workflows/:id` | write | Delete a workflow and its runs |
 | `POST` | `/workflows/:id/run` | write | Start a run |
+| `GET` | `/workflows/:id/versions` | read | List the workflow's saved versions, newest first |
+| `GET` | `/workflows/:id/versions/:version` | read | Get one saved version with its trigger and steps |
+| `GET` | `/workflows/:id/sample` | read | Trigger data and step outputs of the newest finished run, or `null` |
 | `POST` | `/workflows/:id/hook-key` | write | Make a new webhook URL; the old one stops working |
 | `GET` | `/runs` | read | List runs, newest first |
 | `GET` | `/runs/:id` | read | Get one run with its log |

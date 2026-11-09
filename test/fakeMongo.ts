@@ -178,6 +178,7 @@ export function fakeMongo() {
     workflows: new FakeCollection(["hookKey"]),
     runs: new FakeCollection(),
     counters: new FakeCollection(),
+    versions: new FakeCollection(),
     members: new FakeCollection(),
     invites: new FakeCollection(),
     apiKeys: new FakeCollection(),

@@ -11,7 +11,7 @@ export function RunsPage() {
   useEffect(() => {
     const load = () => api.runs().then(setRuns, (e) => setError(e.message));
     load();
-    // Every 15 s while the tab is visible; each request opens a database connection.
+    // Every 15 s while the tab is visible; each request counts toward the free plan's daily requests.
     const timer = setInterval(() => document.visibilityState === "visible" && load(), 15_000);
     return () => clearInterval(timer);
   }, []);

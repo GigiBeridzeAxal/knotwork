@@ -74,8 +74,12 @@ import {
   updateWorkflow,
 } from "./db";
 import { DEMO_USER_ID, ensureDemo } from "./demo";
+// Version history, sample data and testing one step.
+import { stepTestInput } from "../shared/schema";
+import { getSample, getVersion, listVersions, saveVersion } from "./db";
+import { testStep } from "./stepTest";
 import { advance, createRun, tick } from "./engine";
-import { type ApiKeyDoc, type Env, memberId, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
+import { type ApiKeyDoc, type Env, isConnectionError, memberId, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -84,6 +88,28 @@ const MAX_API_BODY = 64 * 1024;
 /** How much of a webhook call's headers and query string a run keeps (characters). */
 const MAX_HOOK_HEADER_CHARS = 8_000;
 const MAX_HOOK_QUERY_CHARS = 2_000;
+/**
+ * How deeply JSON from a client may be nested. MongoDB refuses documents nested more than 100
+ * levels, and a workflow's step or a run's input sits a few levels inside its document.
+ */
+const MAX_JSON_DEPTH = 50;
+
+/** True when a parsed JSON value is nested more than `max` levels (no recursion: the input may be very deep). */
+export function nestedDeeperThan(value: unknown, max = MAX_JSON_DEPTH): boolean {
+  let level: unknown[] = [value];
+  for (let depth = 0; level.length; depth++) {
+    const next: unknown[] = [];
+    for (const item of level) {
+      if (item && typeof item === "object") {
+        if (depth >= max) return true;
+        for (const child of Array.isArray(item) ? item : Object.values(item)) next.push(child);
+      }
+    }
+    level = next;
+  }
+  return false;
+}
+const TOO_DEEP = `That JSON is nested more than ${MAX_JSON_DEPTH} levels deep`;
 
 type Vars = {
   mongo: Mongo;
@@ -105,6 +131,8 @@ const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 app.onError((err, c) => {
   console.error(err);
+  // Tells the hub that its connection failed, so it starts a new one. Other errors keep it.
+  if (c.env.SHARED_MONGO && isConnectionError(err)) c.env.SHARED_MONGO.broken = true;
   return c.json({ error: "Something went wrong on our side" }, 500);
 });
 
@@ -129,21 +157,21 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "local"]);
 // Webhooks are limited per hook key instead (below): senders such as GitHub, Stripe or another
 // Worker deliver for many customers from a few shared addresses, so a per-IP limit would let one
 // noisy sender block everyone else's webhooks.
-app.use("*", async (c, next) => {
-  const from = c.req.header("cf-connecting-ip") ?? "local";
-  if (!LOOPBACK.has(from) && !c.req.path.startsWith("/hooks/")) {
-    // Per address (IPv6 per /64), and per network (IPv6 per /48, which anyone can get for free and
-    // which holds 65,536 /64s).
-    const [address, network] = await Promise.all([
-      c.env.IP_LIMITER?.limit({ key: ipKey(from) }),
-      c.env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
-    ]);
-    if (address?.success === false || network?.success === false) {
-      return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
-    }
-  }
-  return next();
-});
+async function overLimit(env: Env, request: Request): Promise<Response | null> {
+  const from = request.headers.get("cf-connecting-ip") ?? "local";
+  if (LOOPBACK.has(from) || new URL(request.url).pathname.startsWith("/hooks/")) return null;
+  // Per address (IPv6 per /64), and per network (IPv6 per /48, which anyone can get for free and
+  // which holds 65,536 /64s).
+  const [address, network] = await Promise.all([
+    env.IP_LIMITER?.limit({ key: ipKey(from) }),
+    env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
+  ]);
+  if (address?.success !== false && network?.success !== false) return null;
+  return Response.json({ error: "Too many requests from your network. Wait a minute and try again." }, { status: 429 });
+}
+// Inside the hub this is skipped: the Worker already checked before forwarding, so a request that
+// is turned away costs none of the hub's daily requests.
+app.use("*", async (c, next) => (c.env.SHARED_MONGO ? null : await overLimit(c.env, c.req.raw)) ?? next());
 
 // The hub's long-lived database connection, or (without the hub) one per request, opened on first
 // use and closed once the response and any background work (a run started by this request) are done.
@@ -434,6 +462,7 @@ api.post("/auth/delete-account", async (c) => {
   // of the workspaces it owns.
   await deleteAccountAccess(db(c), ownerId);
   await db(c).workflows.deleteMany({ ownerId });
+  await db(c).versions.deleteMany({ ownerId });
   await db(c).runs.deleteMany({ ownerId });
   await db(c).workspaces.deleteMany({ ownerId });
   c.header("set-cookie", clearedCookie(secure(c)));
@@ -683,9 +712,11 @@ scoped.get("/overview", async (c) => {
 scoped.post("/workflows", async (c) => {
   const parsed = workflowInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
+  if (nestedDeeperThan(parsed.data)) return c.json({ error: TOO_DEEP }, 400);
   const res = await insertWorkflow(db(c), c.var.workspace, c.var.ownerId, parsed.data, Date.now(), await newHookKey(c.env.AUTH_PEPPER));
   if (res === "full") return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
   if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
+  await keepVersion(c, res);
   return c.json(res, 201);
 });
 
@@ -698,10 +729,14 @@ scoped.put("/workflows/:id", async (c) => {
   const body = await c.req.json().catch(() => null);
   const parsed = workflowInput.safeParse(body);
   if (!parsed.success) return c.json(issues(parsed.error), 400);
+  if (nestedDeeperThan(parsed.data)) return c.json({ error: TOO_DEEP }, 400);
   const version = workflowSave.safeParse(body);
   if (!version.success) return c.json({ error: "Missing the version this workflow was loaded at" }, 400);
   const res = await updateWorkflow(db(c), c.req.param("id"), c.var.workspace, parsed.data, version.data.version, Date.now());
-  if (res.ok) return c.json(res.workflow);
+  if (res.ok) {
+    await keepVersion(c, res.workflow);
+    return c.json(res.workflow);
+  }
   if (res.reason === "stale") {
     return c.json({ error: "This workflow was changed somewhere else since you opened it.", current: res.current }, 409);
   }
@@ -735,6 +770,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   } catch {
     return c.json({ error: "The test input isn't valid JSON" }, 400);
   }
+  if (nestedDeeperThan(body)) return c.json({ error: TOO_DEEP }, 400);
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
   const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual", runBytes(body?.input, doc.steps));
@@ -761,6 +797,77 @@ scoped.post("/runs/:id/check", async (c) => {
   if (!run) return c.json({ error: "No run with that id" }, 404);
   await advance(db(c), run._id);
   return c.json(await getRun(db(c), run._id, c.var.workspace));
+});
+
+// ---------- Version history ----------
+//
+// Each save of a workflow keeps a copy (worker/db.ts, saveVersion), so an earlier version can be
+// looked at and loaded back into the editor. The history is pruned on every save to a fixed size.
+
+/**
+ * Keeps a copy of a workflow that was just saved. The copy is written before the response, so the
+ * history is right straight away; pruning runs after it. A copy that can't be written is logged and
+ * otherwise ignored: losing a history entry must never fail the save itself.
+ */
+async function keepVersion(c: C, wf: Workflow) {
+  try {
+    // Kept under the workspace's owner, like the workflow: deleting that account removes it.
+    const saved = await saveVersion(db(c), wf, c.var.ownerId);
+    if (saved) c.var.later.push(saved.pruned);
+  } catch (err) {
+    console.error(`saving a version of ${wf.id}`, err);
+  }
+}
+
+/** Whether the workflow is in this workspace, for routes that answer about one workflow. */
+const workflowHere = async (c: C, id: string) =>
+  (await db(c).workflows.findOne({ _id: id, workspaceId: c.var.workspace }, { projection: { _id: 1 } })) !== null;
+
+scoped.get("/workflows/:id/versions", async (c) => {
+  const id = c.req.param("id");
+  const [here, versions] = await Promise.all([workflowHere(c, id), listVersions(db(c), id, c.var.workspace)]);
+  return here ? c.json(versions) : c.json({ error: "No workflow with that id" }, 404);
+});
+
+scoped.get("/workflows/:id/versions/:version", async (c) => {
+  const { id, version: text } = c.req.param();
+  if (!/^[1-9]\d{0,8}$/.test(text)) return c.json({ error: "A version is a whole number from 1 up" }, 400);
+  const [here, version] = await Promise.all([workflowHere(c, id), getVersion(db(c), id, c.var.workspace, Number(text))]);
+  if (!here) return c.json({ error: "No workflow with that id" }, 404);
+  return version ? c.json(version) : c.json({ error: "No saved version with that number" }, 404);
+});
+
+// ---------- Testing one step ----------
+
+/**
+ * The trigger data and step outputs of the workflow's newest finished run, to test steps with, or
+ * null when it has none yet. Cut down to LIMITS.sampleBytes (worker/db.ts, trimSample).
+ */
+scoped.get("/workflows/:id/sample", async (c) => {
+  const id = c.req.param("id");
+  const [here, sample] = await Promise.all([workflowHere(c, id), getSample(db(c), id, c.var.workspace)]);
+  return here ? c.json(sample) : c.json({ error: "No workflow with that id" }, 404);
+});
+
+/**
+ * Runs one step once against sample data and answers with what it did. Nothing is stored and a
+ * delay step doesn't wait. The step runs through executeStep, so its protections apply as in a real
+ * run: the private-address check on every redirect hop, the demo account's host allow-list, the 15 s
+ * timeout and the 256 KB response cap. Like every API route, this one sits behind the session check,
+ * the same-origin check for writes and the per-IP limiter; on top of that each account (or, for the
+ * shared demo account, each network) gets LIMITS.stepTestsPerHour tests an hour, counted before the
+ * body is even read, so a test can't be used to send unlimited requests.
+ */
+scoped.post("/steps/test", async (c) => {
+  const demo = c.var.session.demo;
+  const key = demo ? `steptest:demo:${network(c)}` : `steptest:${c.var.session.userId}`;
+  if (!(await underLimit(db(c), key, HOUR, LIMITS.stepTestsPerHour))) {
+    return c.json({ error: `You can test ${LIMITS.stepTestsPerHour} steps an hour, and you've used them. Try again after the hour turns.` }, 429);
+  }
+  const parsed = stepTestInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json(issues(parsed.error), 400);
+  const { step, sample, workflowName } = parsed.data;
+  return c.json(await testStep(step, sample, workflowName, { demo }));
 });
 
 api.route("/", scoped);
@@ -802,6 +909,7 @@ app.all(
       } catch {
         return c.json({ error: "The body isn't valid JSON" }, 400);
       }
+      if (nestedDeeperThan(body)) return c.json({ error: TOO_DEEP }, 400);
     } else if (type.includes("application/x-www-form-urlencoded")) {
       body = Object.fromEntries(new URLSearchParams(text));
     }
@@ -837,17 +945,44 @@ export const handle = app.fetch;
 
 export { Hub } from "./hub";
 
+/** The hub is used unless the binding is missing (tests) or switched off with HUB_OFF. */
+const useHub = (env: Env) => Boolean(env.HUB) && !env.HUB_OFF;
+
 export default {
   async fetch(request, env, ctx) {
     // The API and webhooks run in the hub, on its open database connection. (Static files never
     // reach this code; see run_worker_first in wrangler.jsonc.)
     const { pathname } = new URL(request.url);
-    if (env.HUB && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) return hub(env).fetch(request);
+    if (useHub(env) && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) {
+      const refused = await overLimit(env, request);
+      if (refused) return refused;
+      // A made-up webhook key is refused here with CPU alone, so it costs none of the hub's daily
+      // requests. (The hub checks again; this must never be the only check.)
+      const hook = /^\/hooks\/([^/]+)$/.exec(pathname);
+      if (hook && !(await hookKeyValid(hook[1], env.AUTH_PEPPER).catch(() => true))) {
+        return Response.json({ error: "Unknown webhook" }, { status: 404 });
+      }
+      try {
+        return await hub(env).fetch(request);
+      } catch (err) {
+        // The hub can't be reached: it is restarting for a deploy, or a free daily Durable Object
+        // limit is used up (those reset at 00:00 UTC).
+        console.error("hub", err);
+        return Response.json(
+          { error: "Knotwork can't take requests right now. Try again in a few minutes." },
+          { status: 503, headers: { "retry-after": "60" } },
+        );
+      }
+    }
     return app.fetch(request, env, ctx);
   },
   async scheduled(_controller, env, ctx) {
-    if (env.HUB) {
-      ctx.waitUntil(hub(env).fetch(HUB_TICK, { method: "POST" }).then((res) => res.body?.cancel()));
+    if (useHub(env)) {
+      ctx.waitUntil(
+        hub(env)
+          .fetch(HUB_TICK, { method: "POST" })
+          .then((res) => res.body?.cancel(), (err) => console.error("hub tick", err)),
+      );
       return;
     }
     const mongo = new Mongo(env);

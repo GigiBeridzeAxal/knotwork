@@ -1,4 +1,15 @@
-import type { Role, Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type {
+  Role,
+  Run,
+  RunDetail,
+  RunSample,
+  Workflow,
+  WorkflowInput,
+  WorkflowSummary,
+  WorkflowVersion,
+  WorkflowVersionDetail,
+  Workspace,
+} from "../shared/schema";
 import { LIMITS } from "../shared/limits";
 import { bump, giveBack } from "./auth";
 import { DEMO_USER_ID } from "./demo";
@@ -6,6 +17,7 @@ import {
   type Collections,
   newWorkflowId,
   type RunDoc,
+  type VersionDoc,
   type WorkflowDoc,
   type WorkspaceDoc,
 } from "./mongo";
@@ -77,6 +89,7 @@ export async function deleteWorkspace(c: Collections, id: string, ownerId: strin
   // Other people's ways in go first (members, invite links, API keys), then the data.
   await Promise.all([c.members.deleteMany({ workspaceId: id }), c.invites.deleteMany({ workspaceId: id }), c.apiKeys.deleteMany({ workspaceId: id })]);
   await c.runs.deleteMany({ workspaceId: id });
+  await c.versions.deleteMany({ workspaceId: id });
   await c.workflows.deleteMany({ workspaceId: id });
   await c.workspaces.deleteOne({ _id: id });
   await c.sessions.updateMany({ userId: ownerId }, { $pull: { workspaceIds: id } });
@@ -176,6 +189,7 @@ export async function deleteWorkflow(c: Collections, id: string, workspaceId: st
   const res = await c.workflows.deleteOne({ _id: id, workspaceId });
   if (res.deletedCount === 0) return false;
   await c.runs.deleteMany({ workflowId: id });
+  await c.versions.deleteMany({ workflowId: id, workspaceId });
   return true;
 }
 
@@ -312,4 +326,183 @@ export async function getRun(c: Collections, id: string, workspaceId: string): P
   const doc = await c.runs.findOne({ _id: id, workspaceId }, { projection: { ...RUN_SUMMARY, input: 1, logs: 1, "steps.id": 1 } });
   if (!doc) return null;
   return { ...toRun(doc), input: doc.input, logs: doc.logs, stepCount: doc.steps.length };
+}
+
+// ---------- Version history ----------
+//
+// Every save keeps a copy of the workflow as it was saved. The history is pruned on each save to the
+// newest LIMITS.versionsPerWorkflow, and to LIMITS.versionBytesPerWorkflow in all, so it can never
+// grow past a fixed size per workflow on the shared free cluster.
+
+const versionId = (workflowId: string, version: number) => `${workflowId}:${version}`;
+
+/**
+ * Keeps a copy of a workflow just saved at `wf.version`. Writing it is idempotent (the id is the
+ * workflow and version), so a retried request can't add a second copy. The copy is written before
+ * this returns, so the history is right straight away; the pruning it starts is handed back as
+ * `pruned`, for the caller to wait on or leave to run after the response. Nothing is written while the
+ * database is nearly full (the workflow itself is still saved), and then this returns null.
+ */
+export async function saveVersion(
+  c: Collections,
+  wf: Workflow,
+  ownerId: string,
+  now = Date.now(),
+): Promise<{ pruned: Promise<void> } | null> {
+  if (await storageFull(c)) return null;
+  const workflow: WorkflowInput = {
+    name: wf.name,
+    description: wf.description,
+    enabled: wf.enabled,
+    trigger: wf.trigger,
+    steps: wf.steps,
+  };
+  const doc: VersionDoc = {
+    _id: versionId(wf.id, wf.version),
+    workflowId: wf.id,
+    workspaceId: wf.workspaceId,
+    ownerId,
+    version: wf.version,
+    savedAt: now,
+    bytes: JSON.stringify(workflow).length,
+    workflow,
+  };
+  const { _id, ...fields } = doc;
+  try {
+    await c.versions.updateOne({ _id }, { $setOnInsert: fields }, { upsert: true });
+  } catch (err) {
+    // Two upserts of the same version at once: the loser's fails on the id, and the copy is there.
+    if ((err as { code?: number }).code !== 11000) throw err;
+  }
+  const pruned = pruneVersions(c, wf.id, wf.workspaceId).catch((err) => console.error(`pruning versions of ${wf.id}`, err));
+  return { pruned };
+}
+
+/** Drops the versions of one workflow that `versionsToDrop` says are past its limits. */
+async function pruneVersions(c: Collections, workflowId: string, workspaceId: string) {
+  const kept = await c.versions
+    .find({ workflowId, workspaceId }, { projection: { _id: 1, bytes: 1 } })
+    .sort({ version: -1 })
+    .toArray();
+  const drop = versionsToDrop(kept);
+  if (drop.length) await c.versions.deleteMany({ _id: { $in: drop }, workspaceId });
+}
+
+/**
+ * Which versions to delete, given a workflow's versions newest first: everything past the newest
+ * `max`, and the oldest ones while the kept ones add up to more than `maxBytes`. The newest version is
+ * always kept, whatever its size, so the history never loses the workflow as it is now.
+ */
+export function versionsToDrop(
+  newestFirst: Pick<VersionDoc, "_id" | "bytes">[],
+  max: number = LIMITS.versionsPerWorkflow,
+  maxBytes: number = LIMITS.versionBytesPerWorkflow,
+): string[] {
+  let total = 0;
+  let keep = 0;
+  for (const v of newestFirst) {
+    if (keep >= max || (keep > 0 && total + v.bytes > maxBytes)) break;
+    total += v.bytes;
+    keep += 1;
+  }
+  return newestFirst.slice(keep).map((v) => v._id);
+}
+
+/** A workflow's saved versions, newest first, with each step's name and type but not its settings. */
+export async function listVersions(c: Collections, workflowId: string, workspaceId: string): Promise<WorkflowVersion[]> {
+  const docs = await c.versions
+    .find(
+      { workflowId, workspaceId },
+      {
+        projection: {
+          version: 1, savedAt: 1, "workflow.name": 1, "workflow.trigger": 1,
+          "workflow.steps.id": 1, "workflow.steps.name": 1, "workflow.steps.type": 1,
+        },
+      },
+    )
+    .sort({ version: -1 })
+    .limit(LIMITS.versionsPerWorkflow)
+    .toArray();
+  return docs.map((d) => ({
+    version: d.version,
+    savedAt: d.savedAt,
+    name: d.workflow.name,
+    trigger: d.workflow.trigger,
+    // Only these three fields: a step type with child lists (then, else, steps) keeps them out of the list.
+    steps: (d.workflow.steps ?? []).map((s) => ({ id: s.id, name: s.name, type: s.type })),
+  }));
+}
+
+/** One saved version with everything needed to load it back into the editor, or null. */
+export async function getVersion(
+  c: Collections,
+  workflowId: string,
+  workspaceId: string,
+  version: number,
+): Promise<WorkflowVersionDetail | null> {
+  const doc = await c.versions.findOne({ _id: versionId(workflowId, version), workflowId, workspaceId });
+  return doc ? { version: doc.version, savedAt: doc.savedAt, workflow: doc.workflow } : null;
+}
+
+// ---------- Sample data for testing steps ----------
+
+/** Run statuses whose input and outputs are worth testing with: the run is over. */
+const FINISHED_SAMPLE = ["succeeded", "failed", "stopped"] as const;
+/** What a value left out of a sample is replaced with. */
+export const LEFT_OUT = "[left out: too large to show here]";
+
+/**
+ * The trigger data and step outputs of a workflow's newest finished run in this workspace, to test
+ * steps with, or null when it has none. Kept under LIMITS.sampleBytes by `trimSample`.
+ */
+export async function getSample(c: Collections, workflowId: string, workspaceId: string): Promise<RunSample | null> {
+  const [doc] = await c.runs
+    .find(
+      { workflowId, workspaceId, status: { $in: [...FINISHED_SAMPLE] } },
+      { projection: { _id: 1, createdAt: 1, input: 1, outputs: 1 } },
+    )
+    .sort({ createdAt: -1 })
+    .limit(1)
+    .toArray();
+  if (!doc) return null;
+  const { trigger, steps, trimmed } = trimSample(doc.input, doc.outputs ?? {});
+  return { runId: doc._id, createdAt: doc.createdAt, trigger, steps, trimmed };
+}
+
+const jsonBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value ?? null)).byteLength;
+
+/**
+ * Makes a run's trigger data and outputs fit in `max` bytes of JSON. A trigger that alone is over
+ * `max` is left out first; then the largest outputs are left out one at a time until the rest fit;
+ * and if they still don't (a trigger just under `max`), the trigger goes too. Anything left out is
+ * replaced with LEFT_OUT, so the step ids stay and a test can say what was missing.
+ */
+export function trimSample(
+  trigger: unknown,
+  steps: Record<string, unknown>,
+  max: number = LIMITS.sampleBytes,
+): { trigger: unknown; steps: Record<string, unknown>; trimmed: boolean } {
+  const out = { ...steps };
+  let shown = trigger ?? null;
+  let trimmed = false;
+  const placeholder = jsonBytes(LEFT_OUT);
+  let total = jsonBytes({ trigger: shown, steps: out });
+  const leaveOutTrigger = () => {
+    total -= jsonBytes(shown) - placeholder;
+    shown = LEFT_OUT;
+    trimmed = true;
+  };
+  if (shown !== LEFT_OUT && jsonBytes(shown) > max) leaveOutTrigger();
+  const sizes = new Map(Object.entries(out).map(([id, value]) => [id, jsonBytes(value)]));
+  while (total > max) {
+    let largest: string | null = null;
+    for (const [id, size] of sizes) if (size > placeholder && (largest === null || size > sizes.get(largest)!)) largest = id;
+    if (largest === null) break;
+    total -= sizes.get(largest)! - placeholder;
+    out[largest] = LEFT_OUT;
+    sizes.set(largest, placeholder);
+    trimmed = true;
+  }
+  if (total > max && shown !== LEFT_OUT) leaveOutTrigger();
+  return { trigger: shown, steps: out, trimmed };
 }

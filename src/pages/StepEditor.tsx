@@ -85,6 +85,7 @@ export function StepEditor({
   onMove,
   onRemove,
   readOnly = false,
+  embedded = false,
 }: {
   step: Step;
   index: number;
@@ -98,6 +99,8 @@ export function StepEditor({
   onRemove: () => void;
   /** For viewers: the step can be opened and read, not changed. */
   readOnly?: boolean;
+  /** Just the fields, always open, with no card around them: for the canvas, which has its own panel. */
+  embedded?: boolean;
 }) {
   const typeInfo = STEP_TYPES.find((t) => t.type === step.type)!;
   const uid = `s${index}`;
@@ -107,11 +110,11 @@ export function StepEditor({
   return (
     <div
       className={cn(
-        "rounded-2xl border bg-graphite transition-colors",
-        errors.length ? "border-fail/60" : open ? "border-spark" : "border-line",
+        !embedded && "rounded-2xl border bg-graphite transition-colors",
+        !embedded && (errors.length ? "border-fail/60" : open ? "border-spark" : "border-line"),
       )}
     >
-      <div className="flex items-center gap-3 p-4">
+      <div className={cn("flex items-center gap-3 p-4", embedded && "hidden")}>
         <button
           type="button"
           onClick={onToggle}
@@ -135,15 +138,15 @@ export function StepEditor({
       </div>
 
       {errors.length > 0 && (
-        <ul className="mx-4 mb-3 list-disc pl-5 text-[13px] text-fail">
+        <ul className={cn("mb-3 list-disc pl-5 text-[13px] text-fail", !embedded && "mx-4")}>
           {errors.map((e) => (
             <li key={e}>{e}</li>
           ))}
         </ul>
       )}
 
-      {open && (
-        <fieldset disabled={readOnly} className="flex min-w-0 flex-col gap-5 border-t border-line p-4">
+      {(open || embedded) && (
+        <fieldset disabled={readOnly} className={cn("flex min-w-0 flex-col gap-5", !embedded && "border-t border-line p-4")}>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Name" htmlFor={`${uid}-name`}>
               <input id={`${uid}-name`} className={inputClass} value={step.name} onChange={(e) => set({ name: e.target.value })} />
@@ -296,7 +299,7 @@ export function StepEditor({
           </div>
 
           {!readOnly && (
-            <div className="flex justify-end">
+            <div className={cn("flex justify-end", embedded && "hidden")}>
               <Button variant="danger" onClick={onRemove}>
                 Remove step
               </Button>

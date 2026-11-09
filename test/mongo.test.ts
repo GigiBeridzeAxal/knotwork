@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { WorkflowInput } from "../shared/schema";
 import type { Workflow } from "../shared/schema";
 import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
+import { deleteWorkflow, getSample, getVersion, LEFT_OUT, listVersions, saveVersion, STORAGE_FULL } from "../worker/db";
 import { ensureDemo } from "../worker/demo";
 import { advance, createRun, guardStorage, tick } from "../worker/engine";
 import { bump, newHookKey } from "../worker/auth";
@@ -196,11 +197,17 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   it("gives a reservation back in the hour it was made, even when the run ends in the next", async () => {
     await account("usr_edge");
     const { runId } = await start([transform("a", 1), transform("b", 2), transform("c", 3)], "usr_edge", "ws_edge");
-    // The clock runs on as usual, but starts 5 ms before the hour turns.
+    // The run starts 5 ms before the hour turns, and everything after that first reading of the
+    // clock happens in the next hour, however fast the database answers.
     const realNow = Date.now.bind(Date);
     const nextHour = (Math.floor(realNow() / 3_600_000) + 1) * 3_600_000;
-    const offset = nextHour - 5 - realNow();
-    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const begun = realNow();
+    let first = true;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => {
+      if (!first) return nextHour + 5 + (realNow() - begun);
+      first = false;
+      return nextHour - 5;
+    });
     try {
       await advance(c, runId);
       expect(Date.now()).toBeGreaterThan(nextHour);
@@ -608,5 +615,122 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await deleteWorkspace(c, "ws_x", "usr_d")).toBe(true);
     expect(await c.workflows.countDocuments({ workspaceId: "ws_x" })).toBe(0);
     expect(await c.runs.findOne({ _id: runId })).toBeNull();
+  });
+
+  // ---------- Version history ----------
+
+  /** Saves a version as the API does after a save, and waits for its pruning too. */
+  async function keep(wf: Workflow, owner: string) {
+    const saved = await saveVersion(c, wf, owner);
+    await saved?.pruned;
+    return saved;
+  }
+
+  it("keeps a version on create and on each save, newest first, in its own workspace only", async () => {
+    await c.counters.deleteOne({ _id: STORAGE_FULL });
+    const wf = await addWorkflow("ws_v", "usr_v", wfInput([transform("a", 1)]));
+    await keep(wf, "usr_v");
+    const saved = await updateWorkflow(c, wf.id, "ws_v", { ...wfInput([transform("a", 2), transform("b", 3)]), name: "Second" }, wf.version, Date.now());
+    if (!saved.ok) throw new Error("save refused");
+    await keep(saved.workflow, "usr_v");
+    // The same version saved again (a retried request) writes no second copy.
+    await keep(saved.workflow, "usr_v");
+    expect(await c.versions.countDocuments({ workflowId: wf.id })).toBe(2);
+
+    const list = await listVersions(c, wf.id, "ws_v");
+    expect(list.map((v) => v.version)).toEqual([2, 1]);
+    expect(list[0]).toMatchObject({
+      name: "Second",
+      trigger: { type: "manual" },
+      steps: [{ id: "a", name: "a", type: "transform" }, { id: "b", name: "b", type: "transform" }],
+    });
+    expect(list[0].steps[0]).not.toHaveProperty("config");
+    expect(list[0].savedAt).toBeGreaterThan(0);
+
+    const first = await getVersion(c, wf.id, "ws_v", 1);
+    expect(first).toMatchObject({ version: 1, workflow: { name: "Test", steps: [{ id: "a", config: { output: 1 } }] } });
+    expect(await getVersion(c, wf.id, "ws_v", 3)).toBeNull();
+    // Another workspace (another account's) gets nothing, even with the right workflow id.
+    expect(await listVersions(c, wf.id, "ws_a")).toEqual([]);
+    expect(await getVersion(c, wf.id, "ws_a", 1)).toBeNull();
+  });
+
+  it("writes no version while the database is nearly full, but the workflow still saves", async () => {
+    const wf = await addWorkflow("ws_vfull", "usr_v", wfInput([transform("a", 1)]));
+    await c.counters.updateOne({ _id: STORAGE_FULL }, { $set: { n: 1, expiresAt: new Date(Date.now() + 600_000) } }, { upsert: true });
+    try {
+      expect(await keep(wf, "usr_v")).toBeNull();
+      expect(await c.versions.countDocuments({ workflowId: wf.id })).toBe(0);
+      expect((await updateWorkflow(c, wf.id, "ws_vfull", wfInput([]), wf.version, Date.now())).ok).toBe(true);
+    } finally {
+      await c.counters.deleteOne({ _id: STORAGE_FULL });
+    }
+  });
+
+  it("keeps only the newest 20 versions of a workflow", async () => {
+    const wf = await addWorkflow("ws_vmany", "usr_v", wfInput([transform("a", 1)]));
+    for (let version = 1; version <= 23; version++) await keep({ ...wf, version }, "usr_v");
+    expect(await c.versions.countDocuments({ workflowId: wf.id })).toBe(20);
+    const list = await listVersions(c, wf.id, "ws_vmany");
+    expect(list.map((v) => v.version)).toEqual(Array.from({ length: 20 }, (_, i) => 23 - i));
+  });
+
+  it("drops the oldest versions while a workflow's history is over 128 KB", async () => {
+    // About 30 KB each, so four fit in 128 KB and the fifth and sixth from the top go.
+    const wf = await addWorkflow("ws_vbig", "usr_v", wfInput([transform("a", "x".repeat(30_000))]));
+    for (let version = 1; version <= 6; version++) await keep({ ...wf, version }, "usr_v");
+    const docs = await c.versions.find({ workflowId: wf.id }).sort({ version: -1 }).toArray();
+    expect(docs.map((d) => d.version)).toEqual([6, 5, 4, 3]);
+    expect(docs.reduce((sum, d) => sum + d.bytes, 0)).toBeLessThanOrEqual(128_000);
+  });
+
+  it("deletes a workflow's versions with the workflow, and with its workspace", async () => {
+    const wf = await addWorkflow("ws_vdel", "usr_v", wfInput([transform("a", 1)]));
+    await keep(wf, "usr_v");
+    // Another workspace can't delete it, or its history.
+    expect(await deleteWorkflow(c, wf.id, "ws_a")).toBe(false);
+    expect(await c.versions.countDocuments({ workflowId: wf.id })).toBe(1);
+    expect(await deleteWorkflow(c, wf.id, "ws_vdel")).toBe(true);
+    expect(await c.versions.countDocuments({ workflowId: wf.id })).toBe(0);
+
+    await c.workspaces.insertOne({ _id: "ws_vside", ownerId: "usr_v", name: "Side", personal: false, createdAt: 1 });
+    const other = await addWorkflow("ws_vside", "usr_v", wfInput([transform("a", 1)]));
+    await keep(other, "usr_v");
+    expect(await deleteWorkspace(c, "ws_vside", "usr_v")).toBe(true);
+    expect(await c.versions.countDocuments({ workflowId: other.id })).toBe(0);
+  });
+
+  // ---------- Sample data ----------
+
+  it("hands back the newest finished run's data to test steps with", async () => {
+    const { wf, runId: older } = await start([transform("a", { n: "{{ trigger.body.n }}" })], "usr_s", "ws_s");
+    await advance(c, older);
+    await c.runs.updateOne({ _id: older }, { $set: { createdAt: Date.now() - 60_000 } });
+    const newer = await createRun(c, { ...wf, ownerId: "usr_s" }, "manual", { body: { n: 2 } });
+    await advance(c, newer);
+    await c.runs.updateOne({ _id: newer }, { $set: { createdAt: Date.now() - 30_000 } });
+    // A run that hasn't finished is newer still, but isn't used.
+    await createRun(c, { ...wf, ownerId: "usr_s" }, "manual", { body: { n: 3 } });
+
+    const sample = await getSample(c, wf.id, "ws_s");
+    expect(sample).toMatchObject({ runId: newer, trigger: { body: { n: 2 } }, steps: { a: { n: 2 } }, trimmed: false });
+    expect(await getSample(c, wf.id, "ws_a")).toBeNull();
+    const fresh = await addWorkflow("ws_s", "usr_s", wfInput([]));
+    expect(await getSample(c, fresh.id, "ws_s")).toBeNull();
+  });
+
+  it("leaves the largest outputs out of a sample that is too big", async () => {
+    const { wf, runId } = await start(
+      [transform("a", "a".repeat(15_000)), transform("b", "b".repeat(12_000)), transform("c", "c".repeat(8_000))],
+      "usr_s",
+      "ws_s2",
+    );
+    await advance(c, runId);
+    expect((await c.runs.findOne({ _id: runId }))?.status).toBe("succeeded");
+    const sample = await getSample(c, wf.id, "ws_s2");
+    expect(sample?.trimmed).toBe(true);
+    expect(sample?.steps).toEqual({ a: LEFT_OUT, b: "b".repeat(12_000), c: "c".repeat(8_000) });
+    expect(sample?.trigger).toEqual({ body: { n: 1 } });
+    expect(JSON.stringify({ trigger: sample?.trigger, steps: sample?.steps }).length).toBeLessThanOrEqual(32_000);
   });
 });
