@@ -250,8 +250,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const people = await Promise.all(["P", "Q", "R", "S"].map(person));
       const results = await Promise.all(people.map((p) => accept(made.token, p)));
       expect(results.filter((r) => r.status === 200)).toHaveLength(2);
-      // The losers see "used up" (410), or "gone" (404) once the full link has been deleted.
-      expect(results.filter((r) => r.status === 410 || r.status === 404)).toHaveLength(2);
+      expect(results.filter((r) => r.status === 410)).toHaveLength(2);
       expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(2);
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
@@ -292,7 +291,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
 
-    it("a used-up link is deleted, so used-up links can't hide open ones from the limit", async () => {
+    it("a used-up link stops counting, so used-up links can't hide open ones from the limit", async () => {
       const ws = await sharedWorkspace(alice, "Limit");
       // Many links, each used up by one join.
       for (let i = 0; i < 8; i++) {
@@ -300,9 +299,10 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
         const link = await invite(alice, ws, "viewer");
         await raw.invites.updateOne({ _id: link.id }, { $set: { maxUses: 1 } });
         expect((await accept(link.token, guest)).status).toBe(200);
-        expect((await preview(link.token, mallory)).status).toBe(404);
+        expect((await preview(link.token, mallory)).status).toBe(410);
       }
-      expect(await raw.invites.countDocuments({ workspaceId: ws })).toBe(0);
+      // Each is marked expired, so the database's TTL index removes it.
+      expect(await raw.invites.countDocuments({ workspaceId: ws, expiresAt: { $gt: new Date() } })).toBe(0);
       const statuses = [];
       for (let i = 0; i < LIMITS.invitesPerWorkspace + 1; i++) {
         statuses.push((await call("POST", `/api/workspaces/${ws}/invites`, { cookie: alice.cookie, body: { role: "viewer" } })).status);

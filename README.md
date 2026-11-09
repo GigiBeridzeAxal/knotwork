@@ -197,7 +197,7 @@ whoever started the run.
 The database keeps only their SHA-256, so a copy of it holds no working links or keys. An invite link
 works for 7 days and for 10 people, and the owner can revoke it sooner. Removing someone, or making
 them a viewer, ends the link they joined with (for everyone who still holds it), so they can't walk back in
-with it from another account; a link also lets each account in only once. A used-up link is deleted. The token travels in the request body
+with it from another account; a link also lets each account in only once. A used-up link stops counting as open and is removed. The token travels in the request body
 (`POST /api/invites/preview` and `/accept`), not in an API URL, so it stays out of request logs.
 
 **API keys.** A key works in one workspace, read-only or read and write, and never has more rights than

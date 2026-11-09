@@ -135,10 +135,12 @@ export type InviteLookup =
 
 export async function findInvite(c: Collections, token: string, now: number): Promise<InviteLookup> {
   const invite = await c.invites.findOne({ _id: await sha256url(token) });
-  if (!invite || invite.expiresAt.getTime() <= now) return { ok: false, reason: "gone" };
+  if (!invite) return { ok: false, reason: "gone" };
+  // A full link is marked expired (see acceptInvite): it still answers "used up" until it's removed.
+  if (invite.uses >= invite.maxUses) return { ok: false, reason: "used" };
+  if (invite.expiresAt.getTime() <= now) return { ok: false, reason: "gone" };
   const workspace = await c.workspaces.findOne({ _id: invite.workspaceId, ownerId: invite.ownerId });
   if (!workspace || workspace.personal) return { ok: false, reason: "gone" };
-  if (invite.uses >= invite.maxUses) return { ok: false, reason: "used" };
   return { ok: true, invite, workspace };
 }
 
@@ -206,8 +208,10 @@ export async function acceptInvite(c: Collections, token: string, userId: string
     await unclaim();
     return { ok: false, reason: stillInvited && stillThere ? over! : "gone" };
   }
-  // The last place was taken: the link is done, so it goes (and stops counting as an open link).
-  await c.invites.deleteOne({ _id: invite._id, uses: { $gte: invite.maxUses } });
+  // The last place was taken: the link is done. It's marked expired, not deleted, so it stops
+  // counting as an open link and the database removes it shortly, while someone who took an
+  // earlier place at the same moment still finds it in their check above.
+  await c.invites.updateOne({ _id: invite._id, uses: { $gte: invite.maxUses } }, { $set: { expiresAt: new Date(now) } });
   return { ok: true, workspaceId: workspace._id, already: false };
 }
 
