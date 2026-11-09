@@ -24,6 +24,19 @@ attempt is written to a run log you can open in the dashboard.
 - **Templates between steps.** Any string can use `{{ trigger.body.id }}` or `{{ steps.fetch.body.items.0.name }}`.
   A string that is only one template keeps the value's type, so arrays and numbers pass through intact.
   Templates are plain lookups: nothing is evaluated, so a workflow can't run arbitrary code.
+- **A canvas editor.** The workflow is drawn as a flow you can pan and zoom: the trigger on top, each step a
+  node under it, and a **+** in every gap to add a step there. Click a node to edit it in the side panel (a
+  sheet on a phone), drag it to another **+** to move it, or use Move up and Move down. The canvas has no
+  layout of its own to save: it is drawn from the same steps as the list view, and a switch flips between the two.
+- **Test one step.** A step's Test tab runs just that step against test data you can edit, or load from the
+  last run, and shows what it returned. Nothing is saved and no run is started. A step that passes adds its
+  output to the test data, so you can test your way down the workflow.
+- **Version history.** Every save keeps a copy (the newest 20). Pick one to see it on the canvas, read-only,
+  and restore it into the editor if you want it back; it only replaces the current version when you save.
+- **Templates, import and export.** Nine ready-made workflows open on the canvas unsaved, so you can look one
+  over before pressing Create. Any workflow exports as a small JSON file (trigger and steps only: no webhook
+  URL, no history) and imports through the same checks as a save. The file holds whatever was typed into
+  the steps, API keys in headers included, so check it before sharing.
 - **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
@@ -58,6 +71,7 @@ the cron tick to the hub, which runs them on a database connection it keeps open
 | --- | --- |
 | Engine: claims a run, runs steps, retries, parks; the cron tick | [`worker/engine.ts`](worker/engine.ts) |
 | Step types, private-address and demo host checks | [`worker/steps.ts`](worker/steps.ts) |
+| Testing one step from the editor | [`worker/stepTest.ts`](worker/stepTest.ts) |
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
 | Accounts: password hashing, sessions, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
 | Queries, and the limits that need the database | [`worker/db.ts`](worker/db.ts) |
@@ -67,6 +81,8 @@ the cron tick to the hub, which runs them on a database connection it keeps open
 | Workflow schema (shared by API and dashboard) | [`shared/schema.ts`](shared/schema.ts) |
 | Limits | [`shared/limits.ts`](shared/limits.ts) |
 | Templates and cron parser | [`shared/template.ts`](shared/template.ts), [`shared/cron.ts`](shared/cron.ts) |
+| Step tree helpers (blocks that hold steps), templates | [`shared/tree.ts`](shared/tree.ts), [`shared/templates.ts`](shared/templates.ts) |
+| Canvas editor: layout, pan and zoom, side panel | [`src/canvas/`](src/canvas) |
 | Dashboard | [`src/`](src) |
 
 A run moves through `queued → running → (waiting →) succeeded | failed | stopped`. Before an invocation
@@ -79,7 +95,8 @@ Limits that two requests could race past are enforced atomically: run budgets an
 `$inc` counters with a time window, and a new workspace or workflow is inserted first, then counted, and
 taken out again if it went over.
 
-**Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
+**Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs`, `versions` (each workflow's
+saved versions) and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
@@ -89,6 +106,23 @@ Once fewer than 100 such runs are left (or right away near 450 MB), the pending 
 or more are stopped, then everyone's oldest finished runs are deleted; near 450 MB, any pending runs. A
 stopped run keeps only the reason. Past 450 MB it pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
 in all; see Limits), so even a burst can't fill the space between two checks.
+
+**Version history.** Every save of a workflow (and its creation, as version 1) also writes a copy of it to
+`versions`, with the version number as part of its id, so a retried save can't add a second copy. Each save
+then prunes that workflow's history to its newest 20 versions and to 128 KB in all (dropping the oldest
+first, but never the newest). While the database is nearly full no copies are written, and the workflow is
+still saved. Deleting a workflow, a workspace or the account deletes its versions, and so does the demo's
+daily reset. `GET /api/workflows/:id/versions` lists them newest first (each step's id, name and type
+only), and `GET /api/workflows/:id/versions/:version` returns one with everything needed to load it back.
+
+**Testing one step.** `POST /api/steps/test` runs one step once against sample data (`trigger` and earlier
+`steps` outputs) and answers with its status (`ok`, `failed`, `stopped`, or `waiting` for a delay, which
+doesn't actually wait), message (cut to 1,000 characters), output (at most 32 KB, or a note that it was
+cut) and how long it took. Nothing is stored. The step goes through the same code as in a run, so the
+private-address check on every redirect hop, the demo's host list, the 15 s timeout and the 256 KB
+response cap all apply; a step that throws is a failed test, not an error. `GET /api/workflows/:id/sample`
+hands back the trigger data and outputs of the workflow's newest finished run (or `null`), cut to 32 KB by
+leaving out the largest outputs first.
 
 **One connection, kept open.** A Worker can't reuse a socket across requests, and opening a connection to
 Atlas (DNS, TLS, SCRAM) measured 30 to 90 ms of CPU in production, several times the free plan's 10 ms. So
@@ -280,6 +314,10 @@ person from using up the free plans:
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
   64 KB per run (UTF-8 bytes); the last 50 log lines are kept.
 - Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
+- Version history: the newest 20 versions per workflow, and at most 128 KB of them (the newest is always
+  kept).
+- 60 single-step tests per account per hour (per network for the shared demo account); test answers and
+  sample data are at most 32 KB.
 - The demo account is shared by everyone who opens it, so its 60 runs an hour are shared too. Its HTTP steps
   can only call a few public test APIs, and it is reset every day at 03:00 UTC.
 
