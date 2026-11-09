@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workflowInput } from "../shared/schema";
+import { type LeafStep, workflowInput } from "../shared/schema";
 import { compare, executeStep, type Scope } from "../worker/steps";
 
 const scope: Scope = {
@@ -7,6 +7,7 @@ const scope: Scope = {
   steps: {},
   run: { id: "run_1", startedAt: "" },
   workflow: { id: "wf_1", name: "Test" },
+  secrets: {},
 };
 
 describe("filter", () => {
@@ -25,7 +26,7 @@ describe("filter", () => {
       name: "x",
       trigger: { type: "manual" },
       steps: [{ id: "f", name: "F", type: "filter", config: { left: "{{ trigger.body.amount }}", op: "gt", right: "500" } }],
-    }).steps[0];
+    }).steps[0] as LeafStep;
     const result = await executeStep(step, scope);
     expect(result.kind).toBe("stop");
   });

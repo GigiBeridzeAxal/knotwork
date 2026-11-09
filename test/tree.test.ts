@@ -121,4 +121,17 @@ describe("step tree", () => {
     expect(issueStep(["name"])).toBeNull();
     expect(issueStep(["steps"])).toBeNull();
   });
+
+  it("refuses a move that would put a step deeper than a workflow allows", () => {
+    const leaf = (id: string) => ({ id, name: id, type: "log", config: { message: "" }, retry: { retries: 0, backoffSeconds: 1 } }) as unknown as Step;
+    const loopOf = (id: string, steps: Step[]) => ({ id, name: id, type: "loop", config: { items: "" }, steps, retry: { retries: 0, backoffSeconds: 1 } }) as unknown as Step;
+    const tree = [loopOf("l1", [loopOf("l2", [loopOf("l3", [])])]), leaf("x"), loopOf("box", [leaf("y")])];
+    // Level 3 takes a plain step, level 4 takes nothing, and a block with steps doesn't fit at level 3.
+    expect(moveStep(tree, [1], [0, "steps", 0, "steps", 0])).not.toBeNull();
+    expect(moveStep(tree, [1], [0, "steps", 0, "steps", 0, "steps", 0])).toBeNull();
+    expect(moveStep(tree, [2], [0, "steps", 0, "steps", 0])).toBeNull();
+    expect(moveStep(tree, [2], [0, "steps", 0])).not.toBeNull();
+    // An empty block doesn't fit at level 3 either: it could never be given a step there.
+    expect(moveStep([...tree, loopOf("empty", [])], [3], [0, "steps", 0, "steps", 0])).toBeNull();
+  });
 });

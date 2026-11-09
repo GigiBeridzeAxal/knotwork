@@ -40,7 +40,7 @@ const WORD: Record<Kind, { text: string; color: string }> = {
 };
 
 const TRIGGER: Record<Trigger["type"], string> = { webhook: "Webhook", schedule: "Schedule", manual: "Manual" };
-const STEP: Record<StepType, string> = { http: "HTTP", transform: "Transform", filter: "Filter", delay: "Delay", log: "Log" };
+const STEP: Record<StepType, string> = { http: "HTTP", transform: "Transform", filter: "Filter", delay: "Delay", log: "Log", if: "If", loop: "Loop" };
 
 const eyebrow = "font-mono text-[11px] tracking-[0.12em] text-muted uppercase";
 

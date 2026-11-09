@@ -1,9 +1,9 @@
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { LIMITS } from "../../shared/limits";
-import { PASSWORD_MIN } from "../../shared/schema";
+import { canEdit, PASSWORD_MIN, SECRET_NAME, type SecretInfo } from "../../shared/schema";
 import { api, ApiError } from "../api";
 import { Avatar } from "../components/AppShell";
-import { Button, Card, Field, inputClass, PageTitle } from "../components/ui";
+import { Button, Card, Field, inputClass, PageTitle, timeAgo } from "../components/ui";
 import { navigate } from "../router";
 import { useSession } from "../session";
 import { useWorkspace } from "../workspace";
@@ -79,6 +79,148 @@ function WorkspaceSettings() {
             Delete workspace
           </Button>
         </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * The workspace's secrets: names only. A value can be replaced or deleted, never read back, so the
+ * form that sets one is the last place it is visible.
+ */
+function SecretsSettings({ demo, readOnly }: { demo: boolean; readOnly: boolean }) {
+  const [secrets, setSecrets] = useState<SecretInfo[] | null>(null);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    let stale = false;
+    api.secrets().then(
+      (list) => !stale && setSecrets(list),
+      (err) => !stale && setNote({ ok: false, text: (err as Error).message }),
+    );
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  const exists = secrets?.some((x) => x.name === name) ?? false;
+  const nameOk = SECRET_NAME.test(name);
+  const full = (secrets?.length ?? 0) >= LIMITS.secretsPerWorkspace && !exists;
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setNote(null);
+    try {
+      await api.setSecret(name, value);
+      setSecrets(await api.secrets());
+      setNote({ ok: true, text: exists ? `${name} has its new value.` : `${name} is saved. Use it as {{ secrets.${name} }}.` });
+      setName("");
+      setValue("");
+    } catch (err) {
+      const issue = err instanceof ApiError && err.status === 400 ? err.issues[0]?.message : undefined;
+      setNote({ ok: false, text: issue ?? (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(secret: string) {
+    if (!confirm(`Delete ${secret}? Steps that use {{ secrets.${secret} }} will fail until it is added again.`)) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      await api.deleteSecret(secret);
+      setSecrets(await api.secrets());
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      {secrets && secrets.length > 0 && (
+        <ul aria-label="Secrets">
+          {secrets.map((x) => (
+            <li key={x.name} className="flex min-h-14 items-center gap-3 border-b border-line py-2 pr-2 pl-5">
+              <span className="min-w-0 flex-1 truncate font-mono text-sm">{x.name}</span>
+              <span className="hidden text-[13px] text-muted sm:block">set {timeAgo(x.updatedAt)}</span>
+              {!demo && !readOnly && (
+                <>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setName(x.name);
+                      setValue("");
+                      setNote(null);
+                      document.getElementById("secret-value")?.focus();
+                    }}
+                  >
+                    Replace
+                  </Button>
+                  <Button variant="ghost" className="text-fail hover:text-fail" disabled={busy} aria-label={`Delete ${x.name}`} onClick={() => remove(x.name)}>
+                    Delete
+                  </Button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {readOnly && !demo ? (
+        <p className="p-5 text-[13px] text-muted sm:p-6">
+          {secrets?.length === 0 ? "This workspace has no secrets. " : ""}Viewers can see which secrets exist, but not set or delete them.
+        </p>
+      ) : demo ? (
+        <p className="p-5 text-[13px] text-muted sm:p-6">
+          The demo account is shared with everyone who opens it, so it can't keep secrets. Create a free account to use them.
+        </p>
+      ) : (
+        <form onSubmit={save} className="flex flex-col gap-4 p-5 sm:p-6">
+          {secrets?.length === 0 && (
+            <p className="text-[13px] text-muted">
+              No secrets yet. Add an API key or token here, and steps can use it as <code className="font-mono text-soft">{"{{ secrets.NAME }}"}</code> without it being part of the workflow.
+            </p>
+          )}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Name" htmlFor="secret-name" error={name && !nameOk ? "Capital letters, digits and _, starting with a letter" : undefined}>
+              <input
+                id="secret-name"
+                maxLength={40}
+                placeholder="SLACK_URL"
+                autoComplete="off"
+                spellCheck={false}
+                value={name}
+                onChange={(e) => setName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "_"))}
+                className={`${inputClass} font-mono`}
+              />
+            </Field>
+            <Field label={exists ? "New value" : "Value"} htmlFor="secret-value" hint={`${LIMITS.secretMinChars} characters or more. It can't be shown again after saving.`}>
+              <input
+                id="secret-value"
+                type="password"
+                autoComplete="off"
+                maxLength={LIMITS.secretMaxChars}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                className={`${inputClass} font-mono`}
+              />
+            </Field>
+          </div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <p className={note ? (note.ok ? "text-[13px] text-soft" : "text-[13px] text-fail") : "text-[13px] text-muted"} role="status">
+              {note ? note.text : full ? `This workspace has its ${LIMITS.secretsPerWorkspace} secrets. Delete one to add another.` : ""}
+            </p>
+            <Button type="submit" className="shrink-0 sm:ml-auto" disabled={busy || !nameOk || value.length < LIMITS.secretMinChars || full}>
+              {exists ? "Replace value" : "Add secret"}
+            </Button>
+          </div>
+        </form>
       )}
     </Card>
   );
@@ -230,6 +372,13 @@ export function SettingsPage() {
       </Section>
 
       <Section
+        title="Secrets"
+        blurb={`API keys and tokens for ${workspace.name}'s workflows. They are stored encrypted, hidden in run logs, and never shown again.`}
+      >
+        <SecretsSettings key={workspace.id} demo={me.user.demo} readOnly={!canEdit(workspace.role)} />
+      </Section>
+
+      <Section
         title="Members"
         blurb="The owner manages who is in a workspace. Editors change workflows and start runs. Viewers only look, but they can read every step's settings, including anything pasted into headers."
       >
@@ -271,6 +420,9 @@ export function SettingsPage() {
           <Row label="Your workspaces" value={`${me.workspaces.filter((w) => w.role === "owner").length} / ${LIMITS.workspacesPerAccount}`} />
           <Row label={workspace.role === "owner" ? "Runs this hour (whole account)" : "Runs this hour (owner's account)"} value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
+          <Row label="Items per loop" value={`up to ${LIMITS.loopItems}`} />
+          <Row label="Steps one run can take" value={`up to ${LIMITS.stepRunsPerRun}`} />
+          <Row label="Secrets per workspace" value={`up to ${LIMITS.secretsPerWorkspace}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>
       </Section>

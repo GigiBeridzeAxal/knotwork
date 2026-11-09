@@ -106,7 +106,7 @@ describe("http steps", () => {
 
   it("from the demo account only call the allowed hosts", async () => {
     const step = { id: "a", name: "Call", type: "http" as const, retry: { max: 0, backoffSeconds: 5 }, config: { method: "GET" as const, url: "https://evil.example.net/x", headers: {}, failOnError: true } };
-    const scope = { trigger: null, steps: {}, run: { id: "r", startedAt: "" }, workflow: { id: "w", name: "w" } };
+    const scope = { trigger: null, steps: {}, run: { id: "r", startedAt: "" }, workflow: { id: "w", name: "w" }, secrets: {} };
     const result = await executeStep(step, scope, { allowHosts: DEMO_HOSTS });
     expect(result).toMatchObject({ kind: "fail", message: expect.stringMatching(/demo account can only call/) });
   });
@@ -125,7 +125,7 @@ describe("templates", () => {
 
   it("make a step fail with a clear message, not crash", async () => {
     const step = { id: "a", name: "Log", type: "log" as const, retry: { max: 0, backoffSeconds: 5 }, config: { message: "{{trigger}}".repeat(181) } };
-    const scope = { trigger: "y".repeat(60_000), steps: {}, run: { id: "r", startedAt: "" }, workflow: { id: "w", name: "w" } };
+    const scope = { trigger: "y".repeat(60_000), steps: {}, run: { id: "r", startedAt: "" }, workflow: { id: "w", name: "w" }, secrets: {} };
     await expect(executeStep(step, scope)).rejects.toThrow(/more than 64 KB/);
   });
 

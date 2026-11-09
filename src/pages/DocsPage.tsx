@@ -16,6 +16,8 @@ const SECTIONS = [
   { id: "editor", label: "The editor" },
   { id: "triggers", label: "Triggers" },
   { id: "steps", label: "Steps" },
+  { id: "blocks", label: "If / else and loops" },
+  { id: "secrets", label: "Secrets" },
   { id: "templates", label: "Templates" },
   { id: "retries", label: "Retries and delays" },
   { id: "runs", label: "Runs" },
@@ -28,7 +30,12 @@ const SECTIONS = [
 const LIMIT_ROWS: [string, string][] = [
   ["Workspaces per account", `${LIMITS.workspacesPerAccount} (Personal plus ${LIMITS.workspacesPerAccount - 1})`],
   ["Workflows per workspace", String(LIMITS.workflowsPerWorkspace)],
-  ["Steps per workflow", String(LIMITS.stepsPerWorkflow)],
+  ["Steps per workflow", `${LIMITS.stepsPerWorkflow}, counting the ones inside blocks`],
+  ["Blocks inside blocks", `${LIMITS.stepDepth} levels`],
+  ["Items per loop", String(LIMITS.loopItems)],
+  ["Steps one run can take", `${LIMITS.stepRunsPerRun} (every step in every loop pass counts, and every retry)`],
+  ["Requests to other sites per run", `${LIMITS.httpCallsPerGo} in one go (redirects count), then it carries on, usually within a minute`],
+  ["Secrets per workspace", `${LIMITS.secretsPerWorkspace}, each ${LIMITS.secretMinChars} to ${LIMITS.secretMaxChars.toLocaleString("en")} characters`],
   ["Size of a saved workflow", `${LIMITS.workflowBytes / 1000} KB`],
   ["Saved versions per workflow", `the newest ${LIMITS.versionsPerWorkflow}`],
   ["Step tests per hour", String(LIMITS.stepTestsPerHour)],
@@ -43,7 +50,7 @@ const LIMIT_ROWS: [string, string][] = [
   ["Run history", `${LIMITS.runHistoryDays} days`],
   ["Template output per step", "64 KB"],
   ["Demo sign-ins per network", `${LIMITS.demoLoginsPerIpPerHour} an hour`],
-  ["Kept per run", "16 KB of output per step, 64 KB per run, the last 50 log lines"],
+  ["Kept per run", "16 KB of output per step, 64 KB per run, the last 100 log lines"],
 ];
 
 export function DocsPage() {
@@ -146,7 +153,9 @@ export function DocsPage() {
                 Press a step, open its <b>Test</b> tab and press <b>Test this step</b>. Only that step runs, against the test
                 data shown, which you can type or fill with <b>Use the last run's data</b>. Nothing is saved, no run is
                 started, and a delay doesn't wait. A step that passes adds its output to the test data, so you can test your
-                way down. You get {LIMITS.stepTestsPerHour} tests an hour.
+                way down. Testing an if says which way it would go; testing a loop says what it would go through and
+                sets its first item as <code>loop.item</code>, so the steps inside can be tested next. A step that uses a
+                secret really sends it; the answer shows <code>[secret NAME]</code>. You get {LIMITS.stepTestsPerHour} tests an hour.
               </dd>
               <dt>Version history</dt>
               <dd>
@@ -191,6 +200,16 @@ export function DocsPage() {
   -H 'content-type: application/json' \\
   -d '{"id": "order_1", "amount": 120}'`}</pre>
               </dd>
+              <dt>Webhook with a signature check</dt>
+              <dd>
+                A webhook can refuse every call that wasn't signed by <b>GitHub</b> or <b>Stripe</b>. Save the signing
+                secret under Settings, then Secrets, and pick it in the trigger next to <b>Check the sender's signature</b>.
+                On GitHub: the repository's Settings, Webhooks, Add webhook, with this workflow's URL, content type{" "}
+                <code>application/json</code> and the same secret. On Stripe: Developers, Webhooks, add an endpoint with the
+                URL and save its signing secret (<code>whsec_…</code>, the whole text). A call without a valid signature
+                answers <code>401</code> and starts no run, so nothing shows here; GitHub's Recent Deliveries and Stripe's
+                delivery attempts show the answer and why.
+              </dd>
               <dt>Schedule</dt>
               <dd>
                 A cron expression with five fields (minute, hour, day of month, month, weekday), always in <b>UTC</b>. The
@@ -228,6 +247,64 @@ export function DocsPage() {
             </dl>
           </Section>
 
+          <Section id="blocks" title="If / else and loops">
+            <p>Two steps are blocks: they hold steps of their own. Blocks can sit inside blocks, {LIMITS.stepDepth} levels deep.</p>
+            <dl>
+              <dt>If / else</dt>
+              <dd>
+                Checks a condition (the same ones a filter has) and runs its <b>Then</b> steps when it holds, its <b>Else</b>{" "}
+                steps when it doesn't. Either side can be empty. Later steps can read <code>steps.&lt;id&gt;.result</code>{" "}
+                (true or false). Unlike a filter, the run carries on after the block either way.
+              </dd>
+              <dt>Loop</dt>
+              <dd>
+                Runs its steps once for each item of a list, up to {LIMITS.loopItems} items. Give it one template that is a
+                list, like <code>{"{{ trigger.body.orders }}"}</code>. Inside, <code>{"{{ loop.item }}"}</code> is the
+                current item, <code>{"{{ loop.index }}"}</code> its position counted from 0, and{" "}
+                <code>{"{{ loop.count }}"}</code> the length of the list. A longer list, or something that isn't a list,
+                fails the step; nothing is cut short silently.
+              </dd>
+            </dl>
+            <p>
+              Each pass starts clean: a step inside a loop holds its result for the current item only, and after the loop
+              only the last pass is left. To keep something from every item, send it somewhere inside the loop. A filter
+              inside a block still stops the whole run; to skip one item, use an if.
+            </p>
+            <p>
+              A run can take {LIMITS.stepRunsPerRun} steps in all. Every time a step runs counts: each step in each pass of
+              a loop, each retry, each if check and each start of a loop. So {LIMITS.loopItems} items with 3 steps inside is
+              151, and with 4 steps it is 201, one too many. A run also makes at most {LIMITS.httpCallsPerGo} requests to
+              other sites in one go (a redirect counts as one more): a longer loop of requests pauses, says so, and carries
+              on, usually within a minute (longer when many runs are making requests at once).
+            </p>
+            <p>An example that takes a signed GitHub push, and posts each commit by someone other than a bot to a chat:</p>
+            <pre>{`Trigger: Webhook, signature check: GitHub, secret GH_SIGNING
+1. If       {{ trigger.headers.x-github-event }} equals push
+   Then:
+   2. Loop  {{ trigger.body.commits }}
+      3. If {{ loop.item.author.name }} not_equals dependabot[bot]
+         Then:
+         4. HTTP request  POST {{ secrets.CHAT_URL }}
+            body { "text": "{{ loop.item.message }}" }`}</pre>
+          </Section>
+
+          <Section id="secrets" title="Secrets">
+            <p>
+              Keep API keys, tokens and chat webhook URLs under <b>Settings, then Secrets</b>, not in the workflow. A step
+              uses one as <code>{"{{ secrets.SLACK_URL }}"}</code>. Names are capitals, digits and <code>_</code>. A value is
+              stored encrypted and can't be shown again; to change it, save it again. In a team, the owner and editors
+              manage secrets and viewers see only their names. Anyone who can edit a workflow can use a secret in a
+              request to any address, so after removing an editor, replace the secrets they could use.
+            </p>
+            <p>
+              Wherever a secret's value would show up in a run (a log line, an output, an error), you see{" "}
+              <code>[secret SLACK_URL]</code> instead. Later steps see the mark too, so use the secret where it is needed,
+              not through another step's output. Two things are not hidden: what the trigger received (a webhook's body
+              and headers are kept as they arrived) and what a step sends out. A step that names a secret that isn't set
+              fails and says which one. Each workspace has its own secrets, and the shared demo account can't keep any.
+            </p>
+          </Section>
+
           <Section id="templates" title="Templates">
             <p>
               Put <code>{"{{ path }}"}</code> in any text field to use data from the trigger or an earlier step. Paths are dotted,
@@ -259,11 +336,12 @@ export function DocsPage() {
             <p>
               A run is <b>Queued</b>, then <b>Running</b>, maybe <b>Waiting</b> (in a delay or before a retry), and ends{" "}
               <b>Passed</b>, <b>Failed</b> or <b>Stopped by filter</b>. The run page lists every attempt of every step,
-              with its output, its message and how long it took, and the input that started it.
+              with its output, its message and how long it took, and the input that started it. <b>Run again</b> on a
+              finished run starts a new one with the same input, on the workflow as it is now; it counts as a manual run.
             </p>
             <p>
-              A run saves its place after every step. If anything cuts it off halfway, it continues from that step on the next
-              minute. If your account has used its storage budget for the hour, a run shows <b>Paused</b> before its next step
+              A run saves its place as it goes, always before and after a step that reaches outside. If anything cuts it
+              off halfway, it continues from there on the next minute. If your account has used its storage budget for the hour, a run shows <b>Paused</b> before its next step
               (the run page says why) and tries again within 10 minutes or at the next hour. Runs are kept for{" "}
               {LIMITS.runHistoryDays} days after they start, or after they wake from their last wait; workflows stay until you
               delete them.
@@ -319,6 +397,27 @@ export function DocsPage() {
               <dd>The URL changed or the workflow's trigger isn't Webhook any more. Copy the URL from the editor again.</dd>
               <dt>My webhook answers 409</dt>
               <dd>The workflow is turned off.</dd>
+              <dt>My webhook answers 401</dt>
+              <dd>
+                Its signature check refused the call: the signing secret here and in the service differ, the secret isn't
+                in this workspace, or (Stripe) the call was signed more than 5 minutes ago. The answer says which. Save the
+                secret again on both sides.
+              </dd>
+              <dt>A step fails with "The secret … isn't set"</dt>
+              <dd>
+                The step names a secret this workspace doesn't have. Add it under Settings, then Secrets; each workspace has
+                its own. If it says the secret "can't be read any more", save its value again.
+              </dd>
+              <dt>A run says "Paused: … as many requests as fit"</dt>
+              <dd>
+                It made {LIMITS.httpCallsPerGo} requests in one go, or many runs were making requests in the same minute.
+                Nothing is lost: it carries on from the same step, usually within a minute and a little later when many runs are busy.
+              </dd>
+              <dt>A run fails with "The run reached {LIMITS.stepRunsPerRun} steps"</dt>
+              <dd>
+                Every step in every pass of a loop counts, and every retry. Loop over fewer items, put fewer steps inside,
+                or split the work over several runs.
+              </dd>
               <dt>A run answers 429 or won't start</dt>
               <dd>You reached a limit above. Runs per hour reset at the start of each clock hour.</dd>
               <dt>Saving says "This workflow was saved somewhere else"</dt>

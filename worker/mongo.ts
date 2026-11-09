@@ -136,6 +136,8 @@ export interface LogDoc {
   output: unknown;
   startedAt: number;
   durationMs: number;
+  depth?: number;
+  pass?: string;
 }
 
 export interface RunDoc {
@@ -152,8 +154,13 @@ export interface RunDoc {
   /** Each finished step's output, by step id. Set one key at a time, never rewritten whole. */
   outputs: Record<string, unknown>;
   outputBytes: number;
+  /** Where the run is: an index into the steps flattened by worker/program.ts. */
   stepIndex: number;
   attempt: number;
+  /** Steps run so far, counting every pass of every loop (missing on runs from before loops). */
+  stepRuns?: number;
+  /** The run this one repeats ("Run again"). */
+  rerunOf?: string;
   /** Claims in a row that ended without saving progress. Too many and the run is failed. */
   claims: number;
   nextRunAt: number | null;
@@ -164,6 +171,19 @@ export interface RunDoc {
   finishedAt: number | null;
   /** A TTL index deletes the run at this time, finished or not. */
   expiresAt: Date;
+}
+
+/** A workspace secret. `_id` is `<workspaceId>:<name>`; the value is encrypted (worker/secrets.ts). */
+export interface SecretDoc {
+  _id: string;
+  workspaceId: string;
+  ownerId: string;
+  name: string;
+  /** AES-GCM nonce and ciphertext, base64. */
+  iv: string;
+  data: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 /**
@@ -195,6 +215,7 @@ export interface Collections {
   workspaces: Collection<WorkspaceDoc>;
   workflows: Collection<WorkflowDoc>;
   runs: Collection<RunDoc>;
+  secrets: Collection<SecretDoc>;
   counters: Collection<CounterDoc>;
   versions: Collection<VersionDoc>;
   members: Collection<MemberDoc>;
@@ -209,6 +230,7 @@ export function collections(db: Db): Collections {
     workspaces: db.collection("workspaces"),
     workflows: db.collection("workflows"),
     runs: db.collection("runs"),
+    secrets: db.collection("secrets"),
     counters: db.collection("counters"),
     versions: db.collection("versions"),
     members: db.collection("members"),
@@ -362,6 +384,8 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.runs.createIndex({ ownerId: 1, status: 1, createdAt: -1 }),
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.secrets.createIndex({ workspaceId: 1, name: 1 }),
+    c.secrets.createIndex({ ownerId: 1 }),
     c.versions.createIndex({ workflowId: 1, version: -1 }),
     c.members.createIndex({ userId: 1, createdAt: 1 }),
     c.members.createIndex({ workspaceId: 1, createdAt: 1 }),

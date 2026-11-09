@@ -10,6 +10,7 @@ import type {
   Run,
   RunDetail,
   RunSample,
+  SecretInfo,
   Step,
   StepSample,
   StepTestResult,
@@ -125,6 +126,12 @@ export const api = {
   },
   run: (id: string) => request<RunDetail>(`/runs/${id}`),
   checkRun: (id: string) => request<RunDetail>(`/runs/${id}/check`, post()),
+  rerun: (id: string) => request<{ runId: string }>(`/runs/${id}/rerun`, post()),
+
+  secrets: () => request<SecretInfo[]>("/secrets"),
+  setSecret: (name: string, value: string) =>
+    request<SecretInfo>(`/secrets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ value }) }),
+  deleteSecret: (name: string) => request<void>(`/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
 
   versions: (workflowId: string) => request<WorkflowVersion[]>(`/workflows/${workflowId}/versions`),
   version: (workflowId: string, version: number) => request<WorkflowVersionDetail>(`/workflows/${workflowId}/versions/${version}`),

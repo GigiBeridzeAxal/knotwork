@@ -1,17 +1,40 @@
-import type { FilterOp, Step } from "../shared/schema";
+import { LIMITS } from "../shared/limits";
+import type { FilterOp, IfStep, LeafStep, LoopStep, Step } from "../shared/schema";
 import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
+import { secretRefs } from "./secrets";
 
 export type StepResult =
-  | { kind: "ok"; output: unknown; message?: string }
+  | { kind: "ok"; output: unknown; message?: string; calls?: number }
   | { kind: "wait"; seconds: number; output: unknown; message: string }
   | { kind: "stop"; message: string }
-  | { kind: "fail"; message: string; output?: unknown };
+  | {
+      kind: "fail";
+      message: string;
+      output?: unknown;
+      calls?: number;
+      /** The platform refused another outgoing request in this invocation. Set only from the thrown error, never from text a step wrote. */
+      outOfCalls?: boolean;
+      /** The run's own request allowance ran out part-way (a redirect). Set only by the http step itself. */
+      noRoom?: boolean;
+    };
 
 export interface Scope {
   trigger: unknown;
   steps: Record<string, unknown>;
   run: { id: string; startedAt: string };
   workflow: { id: string; name: string };
+  /** The workspace secrets this run's steps mention, by name. */
+  secrets: Record<string, string>;
+  /** Inside a loop: the innermost loop's current item, its position (from 0) and the list's length. */
+  loop?: LoopFrame;
+}
+
+/** What a loop's own output holds while it runs; afterwards only `count` is left. */
+export interface LoopFrame {
+  item: unknown;
+  index: number;
+  count: number;
+  items: unknown[];
 }
 
 const HTTP_TIMEOUT_MS = 15_000;
@@ -28,12 +51,31 @@ export const DEMO_HOSTS = ["api.github.com", "httpbin.org", "jsonplaceholder.typ
 export interface StepOptions {
   /** When set, http steps may only call these hosts. */
   allowHosts?: readonly string[];
+  /**
+   * Asked before every outgoing request, redirects too: takes one from the caller's allowance, or
+   * says no. Taking before the request (not counting after) keeps runs that go at the same time
+   * inside the allowance they share.
+   */
+  take?: () => boolean;
+}
+
+/**
+ * The same scope with each secret's value swapped for its mark, `[secret NAME]`. Everything a step
+ * says about itself (log lines, errors) is written from this copy, so a secret never reaches a message
+ * in any shape: whole, cut short, or taken apart by the URL parser. (Outputs still go through the
+ * engine's redactor; this covers what the redactor can't recognise.)
+ */
+function forShow(scope: Scope): Scope {
+  const names = Object.keys(scope.secrets);
+  if (!names.length) return scope;
+  return { ...scope, secrets: Object.fromEntries(names.map((name) => [name, `[secret ${name}]`])) };
 }
 
 /** Cuts text that will be stored or shown (log lines, errors), so no step can make them huge. */
 export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-export async function executeStep(step: Step, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
+/** Runs one step that isn't a block. (The engine walks `if` and `loop` itself, with the two functions below.) */
+export async function executeStep(step: LeafStep, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
   // One budget for everything this step renders (URL, headers, body, output, message).
   const budget = newBudget();
   switch (step.type) {
@@ -52,7 +94,9 @@ export async function executeStep(step: Step, scope: Scope, options: StepOptions
       };
     case "log": {
       const message = renderText(step.config.message, scope, budget);
-      return { kind: "ok", output: { message }, message: clip(message, 2_000) };
+      const show = forShow(scope);
+      const shown = show === scope ? message : renderText(step.config.message, show, newBudget());
+      return { kind: "ok", output: { message }, message: clip(shown, 2_000) };
     }
   }
 }
@@ -66,16 +110,32 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
   const { config } = step;
   const url = renderText(config.url, scope, budget).trim();
   if (url.length > MAX_URL) return { kind: "fail", message: `The URL is longer than ${MAX_URL} characters` };
+  // How the address is written in log lines and errors: with secrets as their marks.
+  const show = forShow(scope);
+  const shownUrl = show === scope ? url : renderText(config.url, show, newBudget()).trim();
+  // Host and path come from the parser, the same one that decides where the request goes, so the log
+  // can't name another host than the one called. The query stays out, as always. When the copy with
+  // marks doesn't parse (the address, or its start, is a secret), it is shown as written, mark and all.
+  let shownHost = clip(shownUrl.split(/[?#]/)[0], 200);
+  let shownPath = "";
+  try {
+    const shown = new URL(shownUrl);
+    shownHost = shown.host;
+    // The parser percent-encodes the space in a mark; put it back.
+    shownPath = clip(shown.pathname.replace(/\[secret%20([A-Z0-9_]+)\]/g, "[secret $1]"), 200);
+  } catch {
+    // Shown as written.
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { kind: "fail", message: `"${clip(url, 200)}" is not a valid URL` };
+    return { kind: "fail", message: `"${clip(shownUrl, 200)}" is not a valid URL` };
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return { kind: "fail", message: "Only http and https URLs can be called" };
   }
-  if (privateHost(parsed.hostname)) return { kind: "fail", message: `${parsed.hostname} is a private address, which steps can't call` };
+  if (privateHost(parsed.hostname)) return { kind: "fail", message: `${shownHost} is a private address, which steps can't call` };
   const blocked = notAllowed(parsed.hostname, options);
   if (blocked) return { kind: "fail", message: blocked };
 
@@ -83,6 +143,9 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
   for (const [name, value] of Object.entries(config.headers)) {
     headers.set(name, renderText(value, scope, budget));
   }
+  // What was filled in from a secret is meant for the address the step names, and nobody else.
+  const secretHeaders = Object.entries(config.headers).filter(([, value]) => secretRefs(value).size).map(([name]) => name);
+  const secretBody = secretRefs(config.body).size > 0;
 
   let body: string | undefined;
   if (config.body !== undefined && config.body !== "" && config.method !== "GET") {
@@ -97,32 +160,48 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
 
   // Redirects are followed by hand, so every hop is checked against private addresses too.
   let res: Response;
+  let calls = 0;
   const signal = AbortSignal.timeout(HTTP_TIMEOUT_MS);
   try {
     let target = parsed;
     let method: string = config.method;
     let sendBody = body;
     for (let hop = 0; ; hop++) {
+      if (options.take && !options.take()) {
+        return { kind: "fail", message: `${config.method} ${shownHost} paused: no requests left in this go`, calls, noRoom: true };
+      }
+      calls += 1;
       res = await fetch(target.toString(), { method, headers, body: sendBody, redirect: "manual", signal });
       const location = res.headers.get("location");
       if (res.status < 300 || res.status > 399 || !location) break;
-      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${parsed.host} redirected more than ${MAX_REDIRECTS} times` };
+      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${shownHost} redirected more than ${MAX_REDIRECTS} times`, calls };
       const next = new URL(location, target);
       if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
-        return { kind: "fail", message: `${target.host} redirected to ${next.host}, which steps can't call` };
+        return { kind: "fail", message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}, which steps can't call`, calls };
       }
-      // Credentials set for one origin must not be handed to another one (another host, or http).
-      if (next.origin !== target.origin) for (const name of CREDENTIAL_HEADERS) headers.delete(name);
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
         method = "GET";
         sendBody = undefined;
+      }
+      // Credentials set for one origin must not be handed to another one (another host, or http).
+      if (next.origin !== target.origin) {
+        for (const name of [...CREDENTIAL_HEADERS, ...secretHeaders]) headers.delete(name);
+        if (secretBody && sendBody !== undefined) {
+          await res.body?.cancel();
+          return {
+            kind: "fail",
+            message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}; the body holds a secret, so it was not sent on`,
+            calls,
+          };
+        }
       }
       await res.body?.cancel();
       target = next;
     }
   } catch (err) {
     const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
-    return { kind: "fail", message: `${config.method} ${parsed.host} failed: ${reason}` };
+    const outOfCalls = /too many subrequests/i.test((err as Error).message ?? "");
+    return { kind: "fail", message: `${config.method} ${shownHost} failed: ${clip(reason, 300)}`, calls, ...(outOfCalls ? { outOfCalls } : {}) };
   }
 
   const text = await readLimited(res, MAX_RESPONSE_BYTES);
@@ -140,9 +219,9 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     headers: { "content-type": res.headers.get("content-type") ?? "" },
     body: responseBody,
   };
-  const message = `${config.method} ${parsed.host}${clip(parsed.pathname, 200)} → ${res.status}`;
-  if (!res.ok && config.failOnError) return { kind: "fail", message, output };
-  return { kind: "ok", output, message };
+  const message = `${config.method} ${shownHost}${shownPath} → ${res.status}`;
+  if (!res.ok && config.failOnError) return { kind: "fail", message, output, calls };
+  return { kind: "ok", output, message, calls };
 }
 
 async function readLimited(res: Response, limit: number): Promise<string> {
@@ -174,15 +253,50 @@ const OP_WORDS: Record<FilterOp, string> = {
   not_exists: "is empty",
 };
 
-function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: Budget): StepResult {
-  const { left, op, right } = step.config;
+/** Works out a condition (a filter's, or an if's) and puts it in words for the log. */
+function check(config: { left: string; op: FilterOp; right: string }, scope: Scope, budget: Budget) {
+  const { left, op, right } = config;
   const leftValue = renderString(left, scope, budget);
   const rightText = renderText(right, scope, budget);
   const passed = compare(leftValue, op, rightText);
-  const shown = clip(typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing", 300);
-  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightText, 300)}"`}`;
+  // Put in words from the copy with secrets as marks, so cutting the text can't leave part of one.
+  const show = forShow(scope);
+  const leftShown = show === scope ? leftValue : renderString(left, show, newBudget());
+  const rightShown = show === scope ? rightText : renderText(right, show, newBudget());
+  const shown = clip(typeof leftShown === "string" ? `"${leftShown}"` : JSON.stringify(leftShown) ?? "nothing", 300);
+  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightShown, 300)}"`}`;
+  return { passed, description };
+}
+
+function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: Budget): StepResult {
+  const { passed, description } = check(step.config, scope, budget);
   if (!passed) return { kind: "stop", message: `Stopped: ${description} is false` };
   return { kind: "ok", output: { passed: true }, message: `Passed: ${description}` };
+}
+
+/** Which branch an `if` takes. Its output is `{ result, branch }`, so later steps can ask `{{ steps.<id>.result }}`. */
+export function evaluateIf(step: IfStep, scope: Scope): { passed: boolean; message: string; description: string } {
+  const { passed, description } = check(step.config, scope, newBudget());
+  const branch = passed ? step.then : step.else;
+  const name = passed ? "Then" : "Else";
+  const runs = branch.length === 0 ? `${name} is empty` : `${name} runs (${branch.length} ${branch.length === 1 ? "step" : "steps"})`;
+  return { passed, description, message: `${passed ? "True" : "False"}: ${description}. ${runs}` };
+}
+
+/**
+ * The list a loop goes through, or why it can't. The template must give a list itself
+ * (`{{ trigger.body.orders }}`); text that happens to look like one is not parsed.
+ */
+export function loopItems(step: LoopStep, scope: Scope): { items: unknown[] } | { problem: string } {
+  const value = renderString(step.config.items.trim(), scope, newBudget());
+  if (!Array.isArray(value)) {
+    const got = value === undefined || value === null || value === "" ? "nothing" : typeof value === "object" ? "an object" : `${typeof value === "string" ? "text" : `a ${typeof value}`}`;
+    return { problem: `${clip(step.config.items, 200)} gave ${got}, not a list` };
+  }
+  if (value.length > LIMITS.loopItems) {
+    return { problem: `The list has ${value.length} items, and a loop can go through at most ${LIMITS.loopItems}` };
+  }
+  return { items: value };
 }
 
 export function compare(left: unknown, op: FilterOp, right: string): boolean {

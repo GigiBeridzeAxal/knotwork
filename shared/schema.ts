@@ -73,17 +73,75 @@ export const logStep = z.object({
   }),
 });
 
-export const stepSchema = z.discriminatedUnion("type", [
-  httpStep,
-  transformStep,
-  filterStep,
-  delayStep,
-  logStep,
-]);
+const condition = {
+  left: z.string().max(500),
+  op: z.enum(filterOps),
+  right: z.string().max(500).default(""),
+};
+
+const leafSteps = [httpStep, transformStep, filterStep, delayStep, logStep] as const;
+export type LeafStep = z.infer<(typeof leafSteps)[number]>;
+type Base = Pick<LeafStep, "id" | "name" | "retry">;
+
+/**
+ * Blocks: steps that hold steps. An `if` runs `then` when its condition holds and `else` when it
+ * doesn't; a `loop` runs `steps` once per item of a list. Their child lists sit beside `config`
+ * (read them with `childLists`). The schema refers to itself, so these types are written out.
+ */
+export type IfStep = Base & { type: "if"; config: { left: string; op: FilterOp; right: string }; then: Step[]; else: Step[] };
+export type LoopStep = Base & { type: "loop"; config: { items: string }; steps: Step[] };
+export type Step = LeafStep | IfStep | LoopStep;
+
+const children = z.lazy(() => z.array(stepSchema)).default([]);
+
+export const ifStep = z.object({
+  ...base,
+  type: z.literal("if"),
+  config: z.object(condition),
+  then: children,
+  else: children,
+});
+
+export const loopStep = z.object({
+  ...base,
+  type: z.literal("loop"),
+  config: z.object({
+    /** A template that gives a list, e.g. `{{ trigger.body.orders }}`. */
+    items: z.string().min(1, "Say which list to go through").max(500),
+  }),
+  steps: children,
+});
+
+export const stepSchema: z.ZodType<Step> = z.discriminatedUnion("type", [...leafSteps, ifStep, loopStep]);
+
+/** A secret's name, as templates use it: `{{ secrets.SLACK_URL }}`. */
+export const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
+export const secretName = z.string().regex(SECRET_NAME, "Use capital letters, digits and _, starting with a letter (like SLACK_URL)");
+
+export const secretInput = z.object({
+  /** Short values could match ordinary words, and they are hidden wherever they show up in a run. */
+  value: z
+    .string()
+    // Spaces at the ends are never part of a key, and services drop them, so the hidden value would not match.
+    .trim()
+    .min(LIMITS.secretMinChars, `Use at least ${LIMITS.secretMinChars} characters`)
+    .max(LIMITS.secretMaxChars, `Use at most ${LIMITS.secretMaxChars} characters`),
+});
+
+/** Services whose webhook signatures Knotwork can check. */
+export const signatureProviders = ["github", "stripe"] as const;
+export type SignatureProvider = (typeof signatureProviders)[number];
 
 export const triggerSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("manual") }),
-  z.object({ type: z.literal("webhook") }),
+  z.object({
+    type: z.literal("webhook"),
+    /**
+     * Check that each call was signed by the sender, with the signing secret kept as a workspace
+     * secret. Calls without a valid signature are refused before a run starts.
+     */
+    verify: z.object({ provider: z.enum(signatureProviders), secret: secretName }).optional(),
+  }),
   z.object({
     type: z.literal("schedule"),
     cron: z
@@ -108,22 +166,54 @@ export const workflowInput = z
     description: z.string().max(500).default(""),
     enabled: z.boolean().default(true),
     trigger: triggerSchema,
-    steps: z.array(stepSchema).max(MAX_STEPS),
+    steps: z.array(stepSchema),
   })
   .superRefine((wf, ctx) => {
     if (JSON.stringify(wf).length > LIMITS.workflowBytes) {
       ctx.addIssue({ code: "custom", path: ["steps"], message: `A workflow can be at most ${LIMITS.workflowBytes / 1000} KB. Trim long step settings.` });
     }
+    // Ids are unique across the whole tree, because `{{ steps.<id> }}` has no notion of nesting.
     const seen = new Set<string>();
-    wf.steps.forEach((step, i) => {
-      if (seen.has(step.id)) {
-        ctx.addIssue({ code: "custom", path: ["steps", i, "id"], message: `Step id "${step.id}" is used twice` });
-      }
+    let count = 0;
+    let tooDeep = false;
+    walkSteps(wf.steps, (step, path, depth) => {
+      count += 1;
+      if (seen.has(step.id)) ctx.addIssue({ code: "custom", path: [...path, "id"], message: `Step id "${step.id}" is used twice` });
       seen.add(step.id);
+      if (depth > LIMITS.stepDepth && !tooDeep) {
+        tooDeep = true;
+        ctx.addIssue({ code: "custom", path, message: `Steps can sit at most ${LIMITS.stepDepth} levels deep` });
+      }
     });
+    if (count > MAX_STEPS) {
+      ctx.addIssue({ code: "custom", path: ["steps"], message: `A workflow can have at most ${MAX_STEPS} steps, counting the ones inside blocks` });
+    }
   });
 
-export type Step = z.infer<typeof stepSchema>;
+/** The child lists of a block step, by the name of the field that holds each; none for other steps. */
+export function childLists(step: Step): [name: "then" | "else" | "steps", steps: Step[]][] {
+  if (step.type === "if") return [["then", step.then], ["else", step.else]];
+  if (step.type === "loop") return [["steps", step.steps]];
+  return [];
+}
+
+/**
+ * Calls `visit` for every step in the tree, parents before children. `path` is where the step sits in
+ * the workflow (`["steps", 2, "then", 0]`), the same path validation issues carry; `depth` is 1 at the top.
+ */
+export function walkSteps(
+  steps: Step[],
+  visit: (step: Step, path: (string | number)[], depth: number) => void,
+  path: (string | number)[] = ["steps"],
+  depth = 1,
+) {
+  steps.forEach((step, i) => {
+    const at = [...path, i];
+    visit(step, at, depth);
+    for (const [name, list] of childLists(step)) walkSteps(list, visit, [...at, name], depth + 1);
+  });
+}
+
 export type StepType = Step["type"];
 export type Trigger = z.infer<typeof triggerSchema>;
 export type WorkflowInput = z.infer<typeof workflowInput>;
@@ -313,6 +403,8 @@ export interface Run {
   error: string | null;
   createdAt: number;
   finishedAt: number | null;
+  /** Set when this run was started with "Run again": the run whose input it reuses. */
+  rerunOf?: string;
 }
 
 export interface StepLog {
@@ -326,13 +418,26 @@ export interface StepLog {
   output: unknown;
   startedAt: number;
   durationMs: number;
+  /** How many blocks the step sits inside (0 or missing at the top), for indenting the log. */
+  depth?: number;
+  /** Inside a loop: which pass this was, e.g. "2 of 5". */
+  pass?: string;
+}
+
+/** A secret as the dashboard sees it. The value never leaves the server. */
+export interface SecretInfo {
+  name: string;
+  updatedAt: number;
 }
 
 export interface RunDetail extends Run {
   /** What started the run: the webhook request, the manual test input, or the scheduled minute. */
   input: unknown;
   logs: StepLog[];
+  /** Top-level steps. With `blocks`, how many log lines are still to come isn't known ahead. */
   stepCount: number;
+  /** True when the workflow has if or loop steps. */
+  blocks: boolean;
 }
 
 export interface Overview {
@@ -371,6 +476,8 @@ export interface WorkflowVersionDetail {
 export const stepSample = z.object({
   trigger: z.unknown().optional(),
   steps: z.record(z.string(), z.unknown()).default({}),
+  /** For a step inside a loop: what `{{ loop.item }}`, `{{ loop.index }}` and `{{ loop.count }}` hold. */
+  loop: z.object({ item: z.unknown().optional(), index: z.number().int().min(0).default(0), count: z.number().int().min(0).default(1) }).optional(),
 });
 
 export const stepTestInput = z.object({

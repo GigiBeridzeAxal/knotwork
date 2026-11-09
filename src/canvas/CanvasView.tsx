@@ -49,12 +49,15 @@ export function CanvasView({
   issues,
   resetKey,
   update,
+  secretNames = [],
   triggerEditor,
   sampleInput,
   onRestore,
   onDelete,
 }: {
   draft: WorkflowInput;
+  /** The workspace's secrets, offered next to the other things a template can use. */
+  secretNames?: string[];
   saved: Workflow | null;
   runs: Run[];
   issues: Issue[];
@@ -259,7 +262,7 @@ export function CanvasView({
                   step={step}
                   index={index}
                   total={siblings}
-                  refs={refsFor(steps, stepPath)}
+                  refs={[...refsFor(steps, stepPath), ...secretNames.map((name) => `secrets.${name}`)]}
                   errors={stepIssues.get(pathKey(stepPath)) ?? []}
                   open
                   onToggle={() => {}}

@@ -1,7 +1,8 @@
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { STEP_TYPES } from "../../shared/examples";
 import type { Step, StepType, Trigger } from "../../shared/schema";
-import { moveStep, type Path, pathKey, samePath } from "../../shared/tree";
+import { LIMITS } from "../../shared/limits";
+import { levelOf, moveStep, type Path, pathKey, samePath } from "../../shared/tree";
 import { PlusIcon } from "../components/icons";
 import { cn } from "../components/ui";
 import { describeStep, describeTrigger, Glyph, typeLabel } from "./describe";
@@ -74,7 +75,8 @@ export function Canvas({
   const [picker, setPicker] = useState<Slot | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const plan = useMemo(() => layout(steps), [steps]);
-  const stepSlots = readOnly ? [] : plan.slots;
+  // No "+" where a step would sit deeper than a workflow allows.
+  const stepSlots = readOnly ? [] : plan.slots.filter((slot) => levelOf(slot.path) <= LIMITS.stepDepth);
   const lastSlot = stepSlots.find((s) => s.path.length === 1 && s.path[0] === steps.length);
 
   const fit = useCallback(() => {
@@ -409,6 +411,7 @@ export function Canvas({
           left={clamp(picker.x * view.k + view.x - 140, 8, Math.max(8, size.w - 288))}
           top={picker.y * view.k + view.y + 20}
           boardHeight={size.h}
+          blocks={levelOf(picker.path) < LIMITS.stepDepth}
           onClose={() => setPicker(null)}
           onPick={(type) => {
             const slot = picker.path;
@@ -445,6 +448,7 @@ function StepPicker({
   left,
   top,
   boardHeight,
+  blocks,
   onPick,
   onClose,
 }: {
@@ -452,6 +456,8 @@ function StepPicker({
   left: number;
   top: number;
   boardHeight: number;
+  /** False at the deepest level, where a block would have nowhere to keep its steps. */
+  blocks: boolean;
   onPick: (type: StepType) => void;
   onClose: () => void;
 }) {
@@ -483,7 +489,7 @@ function StepPicker({
       style={narrow ? { maxHeight: boardHeight - 16 } : { left, top: flip ? Math.max(8, top - height - 40) : top, maxHeight: height }}
     >
       <p className="px-2.5 pt-1.5 pb-2 font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Add a step</p>
-      {STEP_TYPES.map((t) => (
+      {STEP_TYPES.filter((t) => blocks || (t.type !== "if" && t.type !== "loop")).map((t) => (
         <button
           key={t.type}
           type="button"

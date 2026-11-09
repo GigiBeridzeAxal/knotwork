@@ -1,5 +1,6 @@
 import type { Step, StepSample, StepTestResult } from "../shared/schema";
-import { clip, DEMO_HOSTS, executeStep, type Scope, type StepResult } from "./steps";
+import { redactor, secretRefs } from "./secrets";
+import { clip, DEMO_HOSTS, evaluateIf, executeStep, loopItems, type Scope, type StepResult } from "./steps";
 
 /**
  * Testing one step from the editor: the step runs once against sample data and the answer goes
@@ -62,20 +63,72 @@ export async function testStep(
   step: Step,
   sample: StepSample,
   workflowName: string,
-  { demo = false, now = Date.now() }: { demo?: boolean; now?: number } = {},
+  {
+    demo = false,
+    now = Date.now(),
+    secrets = {},
+    unreadable = new Set<string>(),
+  }: {
+    demo?: boolean;
+    now?: number;
+    /** The workspace secrets the step names, already decrypted. They are hidden in the answer, as in a run. */
+    secrets?: Record<string, string>;
+    /** Names that are saved but can't be decrypted (the server's key changed). */
+    unreadable?: Set<string>;
+  } = {},
 ): Promise<StepTestResult> {
+  const missing = [...secretRefs(step.config)].filter((name) => !Object.hasOwn(secrets, name));
+  const lost = missing.filter((name) => unreadable.has(name));
+  if (lost.length) {
+    return toTestResult(
+      {
+        kind: "fail",
+        message: `The secret ${lost.join(", ")} is saved but can't be read any more (the server's key changed). Set its value again under Settings, then Secrets.`,
+      },
+      0,
+    );
+  }
+  if (missing.length) {
+    return toTestResult(
+      { kind: "fail", message: `The secret ${missing.join(", ")} isn't set in this workspace. Add it under Settings, then Secrets.` },
+      0,
+    );
+  }
+  const clean = redactor(secrets);
   const scope: Scope = {
     trigger: sample.trigger ?? {},
     steps: sample.steps,
     run: { id: "run_test", startedAt: new Date(now).toISOString() },
     workflow: { id: "wf_test", name: workflowName },
+    secrets,
+    ...(sample.loop ? { loop: { item: sample.loop.item, index: sample.loop.index, count: sample.loop.count, items: [] } } : {}),
   };
   const started = Date.now();
   let result: StepResult;
   try {
-    result = await executeStep(step, scope, demo ? { allowHosts: DEMO_HOSTS } : {});
+    if (step.type === "if") {
+      // A block is tested on its own: an "if" says which way it would go, a loop what it would go through.
+      // The steps inside aren't sent along with a test, so it says where a run would go, not how many it holds.
+      const { passed, description } = evaluateIf(step, scope);
+      const message = `${passed ? "True" : "False"}: ${description}. A run would take ${passed ? "Then" : "Else"}`;
+      result = { kind: "ok", output: { result: passed, branch: passed ? "then" : "else" }, message };
+    } else if (step.type === "loop") {
+      const list = loopItems(step, scope);
+      result =
+        "problem" in list
+          ? { kind: "fail", message: list.problem }
+          : {
+              kind: "ok",
+              output: { count: list.items.length, index: 0, item: list.items[0] },
+              message: `Would go through ${list.items.length} ${list.items.length === 1 ? "item" : "items"}`,
+            };
+    } else {
+      result = await executeStep(step, scope, demo ? { allowHosts: DEMO_HOSTS } : {});
+    }
   } catch (err) {
     result = { kind: "fail", message: (err as Error)?.message || "The step crashed" };
   }
+  if ("message" in result && result.message !== undefined) result = { ...result, message: clean(result.message) };
+  if ("output" in result) result = { ...result, output: clean(result.output) } as StepResult;
   return toTestResult(result, Date.now() - started);
 }

@@ -8,7 +8,7 @@
 ---
 
 Knotwork wires a **trigger** (a webhook, a schedule, or a button) to a list of **steps** (HTTP calls,
-transforms, filters, delays, log lines). When a step fails it waits and tries again with backoff, and every
+transforms, filters, delays, log lines, and `if` and `loop` blocks that hold steps of their own). When a step fails it waits and tries again with backoff, and every
 attempt is written to a run log you can open in the dashboard.
 
 **Try it:** [open the live demo](https://knotwork.gigiberidze.com/demo) (one click, no account) ·
@@ -19,8 +19,17 @@ attempt is written to a run log you can open in the dashboard.
 ## What it does
 
 - **Three triggers.** A private webhook URL per workflow, a cron schedule (UTC), or a manual run with test input.
-- **Five step types.** `http` calls any API, `transform` reshapes data, `filter` stops a run unless a
-  condition holds, `delay` parks the run and picks it up later, and `log` writes a line.
+  A webhook can also **check the sender's signature** (GitHub or Stripe) and refuse calls that don't carry one.
+- **Seven step types.** `http` calls any API, `transform` reshapes data, `filter` stops a run unless a
+  condition holds, `delay` parks the run and picks it up later, and `log` writes a line. Two are blocks:
+  `if` runs one list of steps when a condition holds and another when it doesn't, and `loop` runs its steps
+  once per item of a list, with `{{ loop.item }}`, `{{ loop.index }}` (counted from 0) and `{{ loop.count }}`.
+  Blocks can sit inside blocks.
+- **Secrets.** Each workspace keeps API keys and tokens under Settings. Steps use them as
+  `{{ secrets.SLACK_URL }}`, so the value is never part of the workflow. Values are stored encrypted, are
+  never shown again after saving, and are replaced by `[secret SLACK_URL]` wherever they would appear in a run's log.
+- **Run again.** A finished run can be started again with the same input, on the workflow as it is now. It
+  counts as a manual run, and isn't possible once the run's input was removed to free space.
 - **Templates between steps.** Any string can use `{{ trigger.body.id }}` or `{{ steps.fetch.body.items.0.name }}`.
   A string that is only one template keeps the value's type, so arrays and numbers pass through intact.
   Templates are plain lookups: nothing is evaluated, so a workflow can't run arbitrary code.
@@ -30,14 +39,18 @@ attempt is written to a run log you can open in the dashboard.
   layout of its own to save: it is drawn from the same steps as the list view, and a switch flips between the two.
 - **Test one step.** A step's Test tab runs just that step against test data you can edit, or load from the
   last run, and shows what it returned. Nothing is saved and no run is started. A step that passes adds its
-  output to the test data, so you can test your way down the workflow.
+  output to the test data, so you can test your way down the workflow. Testing an `if` says which way it
+  would go and testing a `loop` what it would go through (its first item becomes `loop.item` for testing
+  the steps inside); the steps a block holds don't run. A step that uses a secret really sends it, and the
+  answer hides it the way a run's log does.
 - **Version history.** Every save keeps a copy (the newest 20). Pick one to see it on the canvas, read-only,
   and restore it into the editor if you want it back; it only replaces the current version when you save.
 - **Templates, import and export.** Nine ready-made workflows open on the canvas unsaved, so you can look one
   over before pressing Create. Any workflow exports as a small JSON file (trigger and steps only: no webhook
   URL, no history) and imports through the same checks as a save. The file holds whatever was typed into
   the steps, API keys in headers included, so check it before sharing.
-- **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
+- **Durable runs.** A run saves its place in the database as it goes: before and after every step that
+  reaches outside, and every few steps in between. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
 - **Run history.** Every attempt, a preview of its output, and how long it took. History is kept for 7 days
@@ -77,7 +90,10 @@ the cron tick to the hub, which runs them on a database connection it keeps open
 | Part | Where |
 | --- | --- |
 | Engine: claims a run, runs steps, retries, parks; the cron tick | [`worker/engine.ts`](worker/engine.ts) |
+| Flattens `if` and `loop` blocks into one list with jumps | [`worker/program.ts`](worker/program.ts) |
 | Step types, private-address and demo host checks | [`worker/steps.ts`](worker/steps.ts) |
+| Secrets: encryption, and hiding values in what runs store | [`worker/secrets.ts`](worker/secrets.ts) |
+| Webhook signature checks (GitHub, Stripe) | [`worker/signature.ts`](worker/signature.ts) |
 | Testing one step from the editor | [`worker/stepTest.ts`](worker/stepTest.ts) |
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
 | Accounts: password hashing, sessions, recovery codes, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
@@ -104,8 +120,74 @@ Limits that two requests could race past are enforced atomically: run budgets an
 `$inc` counters with a time window, and a new workspace or workflow is inserted first, then counted, and
 taken out again if it went over.
 
-**Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs`, `versions` (each workflow's
-saved versions), `counters` (rate limits), `members`, `invites` and `apiKeys`.
+**Blocks.** A workflow's steps are a tree, but a run saves its place as one number. Before a run moves,
+its steps are flattened into a list of operations with jumps ([`worker/program.ts`](worker/program.ts)): an
+`if` becomes a test that goes on or jumps to its else part, a `loop` becomes a start, its steps, and a
+"next item" that jumps back. The place is an index into that list. A workflow without blocks flattens to
+its own steps, so nothing changes for it. While a loop runs, its output holds the list and the position
+(`{{ steps.<loop id>.item }}` reaches an outer loop's item from inside an inner one); when it ends, only
+`{ count }` is left. An `if` step's output is `{ result, branch }`, so later steps can ask
+`{{ steps.<if id>.result }}`. Each pass of a loop starts clean: the steps inside write their output again,
+a step the pass skips (the other side of an `if`) has none, and the run's 64 KB counts what is stored now.
+To collect something from every item, send it somewhere inside the loop. A `filter` inside a block still
+stops the whole run; to skip one item, use an `if`. A loop takes at most 50 items (a longer list fails the
+step, nothing is cut silently), and a run takes at most 200 steps, where every time a step runs counts:
+each pass of a loop, each retry, each `if` check and each start of a loop (so 50 items with 3 steps inside
+is 151). A loop inside a loop can't run away.
+
+**Saving as it goes.** A step that reaches outside (an `http` call, a `delay`) starts from a saved place and
+is saved right after, so a Worker that stops before the step can't make it happen twice (one that stops
+between the request and its save repeats that one request). If the requests run out between a redirect's
+hops, the step starts over at the next turn, so its first request is sent again. Steps that only compute (`if`,
+`transform`, `filter`, `log`, a loop moving on) are saved together, every 25 log lines or every second,
+whichever comes first; if the Worker
+stops in between they run again and give the same result. A 50-item loop of such steps costs a handful of
+database writes, not 150. A run makes at most 30 requests to other sites in one go, and the runs woken in
+the same minute at most 40 together, because Cloudflare's free plan allows 50 outgoing requests per
+invocation; every redirect followed counts as a request. A run that reaches either number says so and
+carries on at the next minute's turn (later when many runs are making requests at once), so a loop of 50
+requests takes a minute or two longer.
+
+**Secrets.** A secret's value is encrypted with AES-256-GCM before it is stored. The key is derived
+(HKDF-SHA-256) from `AUTH_PEPPER`, which only the Worker has, with the workspace id as salt, so a copy of the
+database alone can't be read and each workspace has its own key; the workspace id and the secret's name are
+bound into the ciphertext, so a stored value can't be moved to another name or workspace. The API lists
+names and dates and never sends a value back. A run reads and decrypts only the secrets its steps name. Every
+output, log line and error a run stores goes through one function that replaces each secret's value (as it
+is, as it looks inside JSON text, URL-encoded, and, for a secret that is a web address, without its scheme,
+as its path alone, or as one of its query values or path pieces of 8 characters or more; also with JSON's `\/`
+and with `+` read back as a space) with `[secret NAME]`, also in what later steps see. What a step says about itself in
+the log (the address it called, the two sides of a condition) is written with the secret already swapped
+for its mark, so cutting or parsing the text can't leave part of one: a Slack webhook URL kept as a secret
+logs as `POST [secret SLACK_URL] → 200`. A value changed some other way (hashed, base64) can't be
+recognised, so don't send a secret to a service that transforms and echoes it. Two things are not hidden:
+the trigger's own input (a webhook body or header is stored as it arrived, so have callers sign their calls
+instead of sending a shared token in a header), and whatever a step sends out, which is the point of a
+secret. When a service redirects to another site, headers and bodies filled in from a secret are not sent
+on. A step that names a secret that isn't set fails saying which one, instead of sending an empty value.
+Values are trimmed when saved. The shared demo account can't keep secrets.
+
+**Signed webhooks.** With the check on, the Worker computes HMAC-SHA-256 over the request's bytes exactly as
+they arrived, with the signing secret kept as a workspace secret, and compares in constant time: GitHub's
+`X-Hub-Signature-256`, or Stripe's `Stripe-Signature` (whose signed time must be within 5 minutes, so a
+captured call can't be replayed later; GitHub's signature carries no time, so change the secret if a signed
+call may have been captured). A call that fails answers 401, starts no run and uses none of the account's
+run budget. Nothing shows in Knotwork for a refused call: look at the webhook's Recent Deliveries on GitHub,
+or the event's delivery attempts in Stripe, where the answer says why.
+
+Setting one up:
+
+1. Save the signing secret under Settings, then Secrets (for example `GH_SIGNING`), and pick it in the
+   workflow's trigger next to "Check the sender's signature".
+2. **GitHub:** in the repository, Settings, then Webhooks, then Add webhook. Payload URL: the workflow's
+   webhook URL. Content type: `application/json` (GitHub's default, form encoding, also works while the GitHub
+   check is on: Knotwork unwraps its `payload` field). Secret: the same value. GitHub sends a `ping` event when the webhook is created,
+   which starts a run; an `if` on `{{ trigger.headers.x-github-event }}` can skip it.
+3. **Stripe:** Developers, then Webhooks, add an endpoint with the workflow's webhook URL, and save its
+   signing secret (`whsec_…`, the whole text).
+
+**Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs`, `secrets`, `versions` (each
+workflow's saved versions), `counters` (rate limits), `members`, `invites` and `apiKeys`.
 TTL indexes delete runs after 7 days, sessions after 30 (1 for the demo) and invite links when they expire,
 so nothing has to scan for old data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
@@ -127,7 +209,8 @@ only), and `GET /api/workflows/:id/versions/:version` returns one with everythin
 **Testing one step.** `POST /api/steps/test` runs one step once against sample data (`trigger` and earlier
 `steps` outputs) and answers with its status (`ok`, `failed`, `stopped`, or `waiting` for a delay, which
 doesn't actually wait), message (cut to 1,000 characters), output (at most 32 KB, or a note that it was
-cut) and how long it took. Nothing is stored. The step goes through the same code as in a run, so the
+cut) and how long it took. Nothing is stored. A step that isn't a block goes through the same code as in a
+run (a block answers with its condition or its list, without running what it holds), so the
 private-address check on every redirect hop, the demo's host list, the 15 s timeout and the 256 KB
 response cap all apply; a step that throws is a failed test, not an error. `GET /api/workflows/:id/sample`
 hands back the trigger data and outputs of the workflow's newest finished run (or `null`), cut to 32 KB by
@@ -170,7 +253,7 @@ account keeps at most 20 sessions.
 
 **Steps.** Everything one step renders from templates (URL, headers, body, output, message) adds up to at
 most 64 KB, so naming a big value many times (`{{ trigger }}` × 1,000) fails the step instead of producing
-megabytes. Log lines and errors are cut to 1 KB (UTF-8 bytes), and a run keeps its last 50 log lines. HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
+megabytes. Log lines and errors are cut to 1 KB (UTF-8 bytes), and a run keeps its last 100 log lines. HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
 every redirect is checked too, and a redirect to another origin drops credential headers. The shared demo
 account's HTTP steps can only call a few public test APIs (`DEMO_HOSTS` in `worker/steps.ts`).
 
@@ -214,6 +297,13 @@ sheet. Using one signs out every device and revokes the account's API keys; the 
 does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
 new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
 email and IP per 15 minutes.
+
+**Secrets in a team.** The owner and editors add, replace and delete a workspace's secrets; viewers see
+their names only, and an API key can't list or change them at all. Nobody is shown a value again, but
+anyone who can edit a workflow (an editor, or a write key) can put `{{ secrets.NAME }}` in a request to a
+server of their own, so the right to edit is in effect the right to read every secret. After removing an
+editor or revoking a write key, replace the secrets they could use. A secret is kept under the workspace's
+owner whoever saved it, and is deleted with the workspace or the owner's account.
 
 **Webhook URLs.** A webhook URL starts runs for whoever has it, so viewers and read-only keys get workflows
 with an empty `hookKey`. Editors do see them, so after removing an editor the owner can press **New URL**
@@ -265,7 +355,9 @@ Every pull request and every push to `main` runs [`.github/workflows/ci.yml`](.g
 - **Build and tests**: the type-check, the build, and all tests against a throwaway MongoDB.
 - **Browser scenarios**: several test accounts, each in its own browser (Chromium, Firefox and WebKit, one of
   them as an iPhone), play multi-user stories against a local Knotwork: two accounts that must not see each
-  other's data, two people saving the same workflow, sign-up and the demo, limits, the phone layout. The
+  other's data, two people saving the same workflow, sign-up and the demo, limits, the phone layout, secrets,
+  the canvas, templates, version history, blocks built in the editor, and a signed webhook with a run started
+  again. The
   scenarios and their small runner are in [`e2e/`](e2e); the report shows on the run's summary page.
 
 To run the scenarios yourself, start a local MongoDB and `npm run dev` as above, then in a second terminal:
@@ -302,11 +394,15 @@ npm run deploy
 ```
 
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
-password, webhook URL, API key and recovery code stop working.
+password, webhook URL, API key, recovery code and stored secret stop working. After a change, each secret
+still shows under Settings but can't be read; steps that use one say so, and its value has to be entered
+again (Replace).
 
 A later deploy that adds collections or indexes needs no `db:setup`: the cron creates any missing index
 within the hour (at minute 7). Until then the new collections are nearly empty, so nothing is slow.
-Running `db:setup` anyway does no harm.
+Running `db:setup` anyway does no harm. The release that added secrets, blocks and signed webhooks needs no
+new setting, secret or migration: it reuses `AUTH_PEPPER`, and old workflows and runs in flight carry on as
+they were.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
@@ -349,7 +445,12 @@ Anyone can sign up on a deployment. Webhook URLs are public; the random key in e
 Because anyone can sign up, there are limits ([`shared/limits.ts`](shared/limits.ts)) that keep one
 person from using up the free plans:
 
-- 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
+- 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow (counting the steps inside
+  blocks, which nest at most 3 levels deep).
+- 50 items per loop, and 200 steps per run. Every time a step runs counts: each pass of a loop, each retry,
+  each `if` check and each start of a loop. Moving a loop to its next item doesn't.
+- 30 requests to other sites per run in one go; a run that makes more carries on usually within a minute, later when many runs make requests at once.
+- 20 secrets per workspace, each 8 to 4,000 characters.
 - JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400,
   and so does a field name containing a null character. Neither counts as a run. A step output like
   that is replaced by a note saying it couldn't be saved.
@@ -380,7 +481,8 @@ person from using up the free plans:
 - Schedules run at most every 5 minutes, in UTC.
 - 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8,000 characters of headers and 2,000 of query); 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
-  64 KB per run (UTF-8 bytes); the last 50 log lines are kept.
+  64 KB per run (UTF-8 bytes); the last 100 log lines are kept. The list a loop goes through counts as its
+  output, so it can be at most 16 KB.
 - Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
 - Version history: the newest 20 versions per workflow, and at most 128 KB of them (the newest is always
   kept).
@@ -391,14 +493,11 @@ person from using up the free plans:
 
 ## Roadmap
 
-Built: teams with invite links and roles, recovery codes, and API keys (2026-11-09; live from the next deploy).
+Built: teams with invite links and roles, recovery codes, and API keys; secrets, if / else and loop steps,
+signed webhooks and run again (2026-11-09; live from the next deploy).
 
-- Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
-- Branching (if / else) and loops over arrays
-- Signed webhooks (GitHub, Stripe), replaying a past run, and an "on failure" step
-- A visual canvas editor, templates, version history
+- An "on failure" step, so a workflow can report that it broke
 - Ready-made Slack, Discord, Telegram and GitHub steps
-- Teams: invite links with roles, recovery codes, API keys
 
 ## License
 

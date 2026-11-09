@@ -67,4 +67,39 @@ describe("testing one step", () => {
     expect(ok.sample).toEqual({ steps: {} });
     expect(ok.workflowName).toBe("Untitled workflow");
   });
+
+  it("tests a block on its own: which way an if goes, and what a loop would go through", async () => {
+    const branch = await testStep(
+      { id: "big", name: "Big", type: "if", retry, config: { left: "{{ trigger.body.n }}", op: "gt", right: "10" }, then: [], else: [] },
+      { trigger: { body: { n: 50 } }, steps: {} },
+      "W",
+    );
+    expect(branch).toMatchObject({ status: "ok", output: { result: true, branch: "then" } });
+    // The steps inside are not sent with a test, so it must not claim the branch is empty.
+    expect(branch.message).toMatch(/A run would take Then$/);
+    const loop = { id: "each", name: "Each", type: "loop" as const, retry, config: { items: "{{ trigger.body.list }}" }, steps: [] };
+    expect(await testStep(loop, { trigger: { body: { list: ["a", "b"] } }, steps: {} }, "W")).toMatchObject({
+      status: "ok",
+      message: "Would go through 2 items",
+      output: { count: 2, index: 0, item: "a" },
+    });
+    expect(await testStep(loop, { trigger: { body: { list: "no" } }, steps: {} }, "W")).toMatchObject({ status: "failed" });
+  });
+
+  it("gives a step inside a loop the sample's loop item", async () => {
+    const parsed = stepTestInput.parse({
+      step: { id: "t", name: "T", type: "log", config: { message: "{{ loop.item }} is {{ loop.index }} of {{ loop.count }}" } },
+      sample: { steps: {}, loop: { item: "a", index: 0, count: 2 } },
+    });
+    expect((await testStep(parsed.step, parsed.sample, "W")).message).toBe("a is 0 of 2");
+  });
+
+  it("fills in the workspace's secrets, hides them in the answer, and says when one isn't set", async () => {
+    const step = { id: "t", name: "T", type: "transform" as const, retry, config: { output: { key: "{{ secrets.API_KEY }}" } } };
+    const res = await testStep(step, { steps: {} }, "W", { secrets: { API_KEY: "sk_live_0123456789" } });
+    expect(res).toMatchObject({ status: "ok", output: { key: "[secret API_KEY]" } });
+    const missing = await testStep(step, { steps: {} }, "W");
+    expect(missing.status).toBe("failed");
+    expect(missing.message).toMatch(/API_KEY isn't set/);
+  });
 });

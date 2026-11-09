@@ -1,4 +1,4 @@
-import type { Run, RunStatus, Step, StepLog, Trigger, Workflow } from "../shared/schema";
+import { type Run, type RunStatus, type Step, type StepLog, type Trigger, walkSteps, type Workflow } from "../shared/schema";
 import { cronMatches, nextFire, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
 import type { Db, Filter } from "mongodb";
@@ -6,11 +6,16 @@ import { giveBack, underLimit } from "./auth";
 import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc, unstorable } from "./mongo";
-import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
+import { compile, type Op } from "./program";
+import { loadSecrets, redactor, secretRefs } from "./secrets";
+import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loopItems, type Scope, type StepResult } from "./steps";
 
 /**
- * The engine. A run moves forward one step at a time and saves its place after every step, so
- * nothing is lost if the Worker stops. When a step fails it is retried later with backoff; a delay
+ * The engine. A run moves forward one step at a time and saves its place before and after every step
+ * that reaches outside (a request, a wait), so nothing is lost or sent twice if the Worker stops.
+ * Steps that only compute are saved a few at a time; if the Worker stops in between, they run again
+ * and give the same result. Steps inside `if` and `loop` blocks are flattened into one list
+ * first (worker/program.ts), so the place is still a single number. When a step fails it is retried later with backoff; a delay
  * step parks the run. The cron trigger (every minute) wakes parked runs up again.
  *
  * One bad run must never stop the others: everything a run does after it is claimed is caught and
@@ -21,6 +26,11 @@ import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
 const LEASE_MS = 60_000;
 /** Stop after this long in one invocation and let the next tick carry on. */
 const TIME_BUDGET_MS = 25_000;
+const PAUSED_OWN = "Paused: this run made as many requests as fit in one go. It carries on at the next minute's turn.";
+const PAUSED_SHARED = "Paused: Knotwork made as many requests as fit in this minute. This run carries on when there is room, usually within a minute.";
+/** Steps that only compute are saved together: after this long, or this many log lines. */
+const SAVE_EVERY_MS = 1_000;
+const SAVE_EVERY_LINES = 25;
 /** Claims in a row that end without saving progress before the run is given up on. */
 const MAX_CLAIMS = 3;
 /** Biggest single step output kept, and biggest total of all outputs in one run. */
@@ -28,7 +38,7 @@ const MAX_OUTPUT_BYTES = 16_000;
 const MAX_RUN_OUTPUT_BYTES = 64_000;
 /** A log line keeps only a preview of the step's output; the full output is in `outputs`. */
 const LOG_PREVIEW_BYTES = 1_000;
-const MAX_LOGS = 50;
+const MAX_LOGS = 100;
 /** Longest log message and run error kept, in UTF-8 bytes. Both show up in lists, so they stay short. */
 const MAX_MESSAGE = 1_000;
 const MAX_ERROR = 1_000;
@@ -63,7 +73,14 @@ const expiry = (from: number) => new Date(from + LIMITS.runHistoryDays * DAY);
 
 type WorkflowRef = Pick<Workflow, "id" | "name" | "steps" | "workspaceId"> & { ownerId: string };
 
-export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Trigger["type"], input: unknown) {
+export async function createRun(
+  c: Collections,
+  wf: WorkflowRef,
+  triggerType: Trigger["type"],
+  input: unknown,
+  /** For "Run again": the run whose input this one reuses. */
+  rerunOf?: string,
+) {
   const now = Date.now();
   const run: RunDoc = {
     _id: newRunId(),
@@ -79,6 +96,8 @@ export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Tr
     outputBytes: 0,
     stepIndex: 0,
     attempt: 0,
+    stepRuns: 0,
+    ...(rerunOf ? { rerunOf } : {}),
     claims: 0,
     // Ready now: the cron takes due runs in the order they became ready.
     nextRunAt: now,
@@ -130,8 +149,19 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
   // Sizes are UTF-8 bytes, as stored: a character can take up to 4.
   const bytes = utf8Bytes(text);
   if (bytes > max) {
-    const preview = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, max)).replace(/\uFFFD$/, "");
-    return { value: { truncated: true, preview }, bytes: max + 40 };
+    // The preview is text inside JSON, where quotes and backslashes take two bytes: cut until what is
+    // stored fits, so the size charged is the size kept.
+    const all = new TextEncoder().encode(text);
+    let cut = max;
+    for (;;) {
+      const preview = new TextDecoder().decode(all.slice(0, cut)).replace(/\uFFFD$/, "");
+      const size = utf8Bytes(JSON.stringify(preview));
+      if (size <= max) {
+        const value = { truncated: true, preview };
+        return { value, bytes: utf8Bytes(JSON.stringify(value)) };
+      }
+      cut = Math.floor((cut * max) / size) - 8;
+    }
   }
   const copy = JSON.parse(text);
   // The database refuses very deep values and names with a null character; an http step can return either.
@@ -191,8 +221,11 @@ async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, 
   await updateLastRun(c, run, "failed");
 }
 
-/** Move a run forward as far as it can go right now. Never throws. */
-export async function advance(c: Collections, runId: string): Promise<void> {
+/**
+ * Move a run forward as far as it can go right now. Never throws. `pepper` (AUTH_PEPPER) decrypts the
+ * workspace secrets the run uses; without it, steps that name a secret fail.
+ */
+export async function advance(c: Collections, runId: string, pepper = "", allowance: Allowance = { calls: LIMITS.httpCallsPerGo }): Promise<void> {
   let run: Awaited<ReturnType<typeof claim>> = null;
   try {
     const started = Date.now();
@@ -202,95 +235,209 @@ export async function advance(c: Collections, runId: string): Promise<void> {
       await failRun(c, run, "The run stopped making progress, so Knotwork gave up on it");
       return;
     }
-    await step(c, run, started);
+    await step(c, run, started, pepper, allowance);
   } catch (err) {
     console.error(`run ${runId}`, err);
     if (run) await failRun(c, run, "Knotwork hit an internal error while running this step").catch(() => {});
   }
 }
 
-async function step(c: Collections, run: RunDoc, started: number) {
-  const steps = run.steps;
+/**
+ * How many requests to other sites may still be made in this invocation. The runs a tick wakes share
+ * one, so a loop full of requests can't use up the platform's allowance for everyone else's runs.
+ */
+export interface Allowance {
+  calls: number;
+}
+
+/** A loop's output while it runs, as stored: the list and where the loop is in it. */
+interface StoredFrame {
+  items: unknown[];
+  index: number;
+  count: number;
+}
+
+const isFrame = (value: unknown): value is StoredFrame =>
+  typeof value === "object" && value !== null && Array.isArray((value as StoredFrame).items) && Number.isInteger((value as StoredFrame).index);
+
+/** A loop's output as templates see it: with the current item, so `{{ loop.item }}` works. */
+const withItem = (frame: StoredFrame): LoopFrame => ({ ...frame, item: frame.items[frame.index] });
+
+async function step(c: Collections, run: RunDoc, started: number, pepper: string, allowance: Allowance) {
+  const ops = compile(run.steps);
+  // Only the secrets this run's steps name are read and decrypted, and only when it names any.
+  const refs = secretRefs(run.steps);
+  const unreadable = new Set<string>();
+  // A run that can only pause again (its next step is a request and none are left) reads none.
+  const first = ops[run.stepIndex];
+  const stuck = allowance.calls <= 0 && first?.kind === "step" && first.step.type === "http";
+  const secrets = refs.size && !stuck ? await loadSecrets(c, pepper, run.workspaceId, refs, unreadable) : {};
+  /** Hides secret values. Everything this run stores or passes on goes through it. */
+  const clean = redactor(secrets);
   const scope: Scope = {
     trigger: run.input,
     steps: { ...run.outputs },
     run: { id: run._id, startedAt: new Date(run.createdAt).toISOString() },
     workflow: { id: run.workflowId, name: run.workflowName },
+    secrets,
   };
+  // Loops the run is in the middle of: give their outputs the current item back.
+  for (const op of ops) {
+    if (op.kind === "loop" && isFrame(scope.steps[op.step.id])) scope.steps[op.step.id] = withItem(scope.steps[op.step.id] as StoredFrame);
+  }
+  const frame = (loopId: string | undefined) => (loopId && isFrame(scope.steps[loopId]) ? (scope.steps[loopId] as LoopFrame) : undefined);
+
   let index = run.stepIndex;
   let attempt = run.attempt;
   let outputBytes = run.outputBytes;
-  // Log ids only need to be unique and increasing within a run; one invocation logs fewer than 100.
-  let logId = started * 100;
+  let stepRuns = run.stepRuns ?? 0;
+  /** Requests this run may still make in this invocation, whatever is left of the shared allowance. */
+  let mine: number = LIMITS.httpCallsPerGo;
+  // Log ids only need to be unique and increasing within a run; an invocation logs at most
+  // LIMITS.stepRunsPerRun lines, and the next one starts at least a millisecond later.
+  let logId = started * 1000;
 
-  const entry = (s: Step, status: StepLog["status"], at: number, message: string | null, output?: unknown): LogDoc => ({
-    id: logId++,
-    stepId: s.id,
-    stepName: s.name,
-    stepType: s.type,
-    attempt: attempt + 1,
-    status,
-    message: message === null ? null : clipBytes(message, MAX_MESSAGE),
-    output: keepable(output, LOG_PREVIEW_BYTES).value,
-    startedAt: at,
-    durationMs: Date.now() - at,
-  });
-  const pool = run.triggerType === "schedule" ? "schedule" : "demand";
+  type Place = { step: Step; loops: string[]; depth: number };
+  const entry = (at: Place, status: StepLog["status"], startedAt: number, message: string | null, output?: unknown): LogDoc => {
+    const pass = at.loops
+      .map((id) => frame(id))
+      .map((f) => (f ? `${f.index + 1} of ${f.count}` : ""))
+      .filter(Boolean)
+      .join(", ");
+    return {
+      id: logId++,
+      stepId: at.step.id,
+      stepName: at.step.name,
+      stepType: at.step.type,
+      attempt: attempt + 1,
+      status,
+      message: message === null ? null : clipBytes(clean(message), MAX_MESSAGE),
+      output: keepable(clean(output), LOG_PREVIEW_BYTES).value,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      ...(at.depth ? { depth: at.depth } : {}),
+      ...(pass ? { pass } : {}),
+    };
+  };
+  // A rerun is started by hand, so it counts with the on-demand runs even when it repeats a scheduled one.
+  const pool = run.triggerType === "schedule" && !run.rerunOf ? "schedule" : "demand";
   // What this invocation stores (outputs, logs) counts against the hourly byte budgets. The most it
   // can store is reserved up front, in one charge, and what it didn't use is given back at the end.
   let used = 0;
-  const pushLog = (log: LogDoc) => {
-    used += logBytes(log);
-    return { logs: { $each: [log], $slice: -MAX_LOGS } };
+  let logsCharged = 0;
+
+  /** The ids of every step inside a loop, however deep. */
+  const inside = new Map<string, string[]>();
+  const bodyOf = (loop: Extract<Step, { type: "loop" }>) => {
+    let ids = inside.get(loop.id);
+    if (!ids) {
+      ids = [];
+      walkSteps(loop.steps, (s) => ids!.push(s.id));
+      inside.set(loop.id, ids);
+    }
+    return ids;
   };
 
+  // What has happened but isn't saved yet. Steps that reach outside are saved at once; the others
+  // (an "if", a transform, a loop moving on) wait here and go to the database together.
+  const pending = { set: {} as Record<string, unknown>, unset: new Set<string>(), logs: [] as LogDoc[], since: Date.now() };
+  const keep = (log: LogDoc) => {
+    // The run keeps its last MAX_LOGS lines, so lines past that replace older ones and add nothing.
+    if (logsCharged++ < MAX_LOGS) used += logBytes(log);
+    pending.logs.push(log);
+  };
+  const forget = (id: string) => {
+    delete pending.set[`outputs.${id}`];
+    delete pending.set[`outputs.${id}.index`];
+    pending.unset.delete(`outputs.${id}`);
+  };
+  const setOutput = (id: string, value: unknown) => {
+    forget(id);
+    pending.set[`outputs.${id}`] = value;
+  };
+  /** A loop moving on: only its position changes, so the list isn't written again. */
+  const setPosition = (id: string, position: number) => {
+    const whole = pending.set[`outputs.${id}`];
+    if (isFrame(whole)) pending.set[`outputs.${id}`] = { ...whole, index: position };
+    else pending.set[`outputs.${id}.index`] = position;
+  };
+  const dropOutput = (id: string) => {
+    forget(id);
+    pending.unset.add(`outputs.${id}`);
+  };
+  /** Saves everything pending in one write, with `more` on top. */
+  const save = async (more: Record<string, unknown> = {}) => {
+    const set = { ...pending.set, ...more };
+    const update: Record<string, unknown> = {};
+    if (Object.keys(set).length) update.$set = set;
+    if (pending.unset.size) update.$unset = Object.fromEntries([...pending.unset].map((key) => [key, ""]));
+    if (pending.logs.length) update.$push = { logs: { $each: pending.logs, $slice: -MAX_LOGS } };
+    pending.set = {};
+    pending.unset = new Set();
+    pending.logs = [];
+    pending.since = Date.now();
+    if (Object.keys(update).length) await c.runs.updateOne({ _id: run._id }, update);
+  };
+  const unsaved = () => Object.keys(pending.set).length > 0 || pending.unset.size > 0 || pending.logs.length > 0;
+
+  // A step inside a loop writes its output again on every pass, replacing the last one. What counts
+  // toward the run's 64 KB is what is stored now, so a replaced output gives its bytes back.
+  const sizes = new Map<string, number>();
+  const sizeOf = (id: string) =>
+    sizes.get(id) ?? (Object.hasOwn(run.outputs, id) ? utf8Bytes(JSON.stringify(run.outputs[id]) ?? "null") : 0);
+
   const finish = async (status: Run["status"], error: string | null, log?: LogDoc) => {
-    await c.runs.updateOne(
-      { _id: run._id },
-      {
-        $set: {
-          status,
-          error: error === null ? null : clipBytes(error, MAX_ERROR),
-          stepIndex: index,
-          attempt,
-          claims: 0,
-          leaseUntil: null,
-          nextRunAt: null,
-          finishedAt: Date.now(),
-        },
-        ...(log ? { $push: pushLog(log) } : {}),
-      },
-    );
+    if (log) keep(log);
+    await save({
+      status,
+      error: error === null ? null : clipBytes(clean(error), MAX_ERROR),
+      stepIndex: index,
+      attempt,
+      stepRuns,
+      outputBytes,
+      claims: 0,
+      leaseUntil: null,
+      nextRunAt: null,
+      finishedAt: Date.now(),
+    });
     await updateLastRun(c, run, status);
   };
 
   // A waiting run is kept for the full history period after it wakes up, so a week-long delay
   // can't outlive its own run.
   const park = async (nextRunAt: number, log?: LogDoc, note: string | null = null) => {
-    await c.runs.updateOne(
-      { _id: run._id },
-      {
-        $set: {
-          status: "waiting",
-          error: note,
-          stepIndex: index,
-          attempt,
-          claims: 0,
-          leaseUntil: null,
-          nextRunAt,
-          expiresAt: expiry(nextRunAt),
-        },
-        ...(log ? { $push: pushLog(log) } : {}),
-      },
-    );
+    if (log) keep(log);
+    await save({
+      status: "waiting",
+      error: note,
+      stepIndex: index,
+      attempt,
+      stepRuns,
+      outputBytes,
+      claims: 0,
+      leaseUntil: null,
+      nextRunAt,
+      expiresAt: expiry(nextRunAt),
+    });
     await updateLastRun(c, run, "waiting", note);
   };
-  const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
+  /** Every request, redirects too, is taken from this run's share and from what the tick's runs share, before it is made. */
+  const take = () => {
+    if (mine <= 0 || allowance.calls <= 0) return false;
+    mine -= 1;
+    allowance.calls -= 1;
+    return true;
+  };
+  const options = { take, ...(run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {}) };
 
-  const stepsLeft = steps.length - index;
+  // Without loops each step writes once. With them, the most the run can still write is what is left
+  // of its step allowance.
+  const writesLeft = ops.some((op) => op.kind === "loop")
+    ? Math.max(1, LIMITS.stepRunsPerRun - stepRuns)
+    : ops.length - index;
   const reserve =
-    Math.max(0, Math.min(MAX_RUN_OUTPUT_BYTES + MAX_OUTPUT_BYTES - outputBytes, stepsLeft * (MAX_OUTPUT_BYTES + 40))) +
-    Math.min(stepsLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
+    Math.max(0, Math.min(MAX_RUN_OUTPUT_BYTES + MAX_OUTPUT_BYTES - outputBytes, writesLeft * (MAX_OUTPUT_BYTES + 40))) +
+    Math.min(writesLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
   const noRoom = await chargeRunBytes(c, run.ownerId, pool, reserve, started);
   if (noRoom) {
     // No step has run in this invocation yet, so nothing is repeated: the run waits, and says why. It
@@ -312,22 +459,141 @@ async function step(c: Collections, run: RunDoc, started: number) {
     await chargeRunBytes(c, run.ownerId, pool, used - reserve, started, false);
   }
 
+  /**
+   * What one operation came to. `next` is where the run goes after an "ok"; `logged` is what the log
+   * line shows when that isn't the stored output (a loop stores its list, the log shows the count).
+   */
+  type Outcome = StepResult & { next?: number; logged?: unknown };
+
+  async function work(op: Exclude<Op, { kind: "jump" | "next" }>): Promise<Outcome> {
+    // A step that names a secret nobody has set fails saying so, instead of sending an empty value.
+    const missing = [...secretRefs(op.step.config)].filter((name) => !Object.hasOwn(secrets, name));
+    const lost = missing.filter((name) => unreadable.has(name));
+    if (lost.length) {
+      return {
+        kind: "fail",
+        message: `The secret ${lost.join(", ")} is saved but can't be read any more (the server's key changed). Set its value again under Settings, then Secrets.`,
+      };
+    }
+    if (missing.length) {
+      return { kind: "fail", message: `The secret ${missing.join(", ")} isn't set in this workspace. Add it under Settings, then Secrets.` };
+    }
+    switch (op.kind) {
+      case "step":
+        return executeStep(op.step, scope, options);
+      case "if": {
+        const { passed, message } = evaluateIf(op.step, scope);
+        return { kind: "ok", output: { result: passed, branch: passed ? "then" : "else" }, message, next: passed ? index + 1 : op.elseAt };
+      }
+      case "loop": {
+        const list = loopItems(op.step, scope);
+        if ("problem" in list) return { kind: "fail", message: list.problem };
+        const count = list.items.length;
+        if (count === 0) return { kind: "ok", output: { count }, message: "The list is empty, so there is nothing to go through", next: op.endAt };
+        const stored: StoredFrame = { items: list.items, index: 0, count };
+        return { kind: "ok", output: stored, logged: { count }, message: `Going through ${count} ${count === 1 ? "item" : "items"}`, next: index + 1 };
+      }
+    }
+  }
+
+  /**
+   * A loop reached the end of its steps: take the next item and go round again, or leave. Nothing
+   * outside is touched, so it isn't a step run and writes no log line. Returns false if the loop's
+   * place is gone.
+   */
+  function moveOn(op: Extract<Op, { kind: "next" }>): boolean {
+    const id = op.step.id;
+    const at = frame(id);
+    if (!at) return false;
+    if (at.index + 1 < at.count) {
+      // The steps inside start the new pass clean: one that is skipped this time (an "if" going the
+      // other way) must not show the last item's result.
+      for (const inner of bodyOf(op.step)) {
+        if (!Object.hasOwn(scope.steps, inner)) continue;
+        outputBytes = Math.max(0, outputBytes - sizeOf(inner));
+        sizes.set(inner, 0);
+        delete scope.steps[inner];
+        dropOutput(inner);
+      }
+      scope.steps[id] = withItem({ items: at.items, index: at.index + 1, count: at.count });
+      setPosition(id, at.index + 1);
+      // The stored place grows by a byte when its number gains a digit (9 to 10); keep the count exact.
+      const longer = String(at.index + 1).length - String(at.index).length;
+      if (longer) {
+        outputBytes += longer;
+        sizes.set(id, sizeOf(id) + longer);
+      }
+      index = op.bodyAt;
+    } else {
+      const done = { count: at.count };
+      const bytes = utf8Bytes(JSON.stringify(done));
+      outputBytes = Math.max(0, outputBytes + bytes - sizeOf(id));
+      sizes.set(id, bytes);
+      scope.steps[id] = done;
+      setOutput(id, done);
+      index += 1;
+    }
+    attempt = 0;
+    Object.assign(pending.set, { outputBytes, stepIndex: index, attempt: 0 });
+    return true;
+  }
+
   async function runSteps() {
     if (run.error) await c.runs.updateOne({ _id: run._id }, { $set: { error: null } }); // a pause note
     await updateLastRun(c, run, "running");
 
-    while (index < steps.length) {
+    while (index < ops.length) {
+      const op = ops[index];
+      if (op.kind === "jump") {
+        index = op.to;
+        continue;
+      }
       if (Date.now() - started > TIME_BUDGET_MS) {
         // Out of time for this invocation: hand the run to the next tick.
         await park(Date.now());
         return;
       }
+      // Don't sit on unsaved work for long: the run page follows along, and the lease must stay fresh.
+      if (unsaved() && (Date.now() - pending.since > SAVE_EVERY_MS || pending.logs.length >= SAVE_EVERY_LINES)) {
+        await save({ leaseUntil: Date.now() + LEASE_MS });
+      }
 
-      const current = steps[index];
+      const current = op.step;
+      scope.loop = frame(op.loops.at(-1));
       const at = Date.now();
-      let result;
+      if (op.kind === "next") {
+        if (!moveOn(op)) {
+          await finish("failed", `${current.name}: the loop lost its place`, entry(op, "failed", at, "The loop lost its place"));
+          return;
+        }
+        continue;
+      }
+      if (stepRuns >= LIMITS.stepRunsPerRun) {
+        await finish(
+          "failed",
+          `The run reached ${LIMITS.stepRunsPerRun} steps, the most one run can take (every step in every pass of a loop counts, and every retry)`,
+          entry(op, "failed", at, "Too many steps"),
+        );
+        return;
+      }
+      // A step that reaches outside starts from a saved place, so a crash can't make it happen twice.
+      const outside = op.kind === "step" && (current.type === "http" || current.type === "delay");
+      if (op.kind === "step" && current.type === "http") {
+        // Its own share first, then what the runs woken together may still make between them.
+        if (mine <= 0) {
+          await park(Date.now(), undefined, PAUSED_OWN);
+          return;
+        }
+        if (allowance.calls <= 0) {
+          await park(Date.now(), undefined, PAUSED_SHARED);
+          return;
+        }
+      }
+      if (outside && unsaved()) await save({ leaseUntil: Date.now() + LEASE_MS });
+
+      let result: Outcome;
       try {
-        result = await executeStep(current, scope, options);
+        result = await work(op);
       } catch (err) {
         result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
       }
@@ -335,58 +601,82 @@ async function step(c: Collections, run: RunDoc, started: number) {
       switch (result.kind) {
         case "ok":
         case "wait": {
-          const kept = keepable(result.output);
-          outputBytes += kept.bytes;
-          if (outputBytes > MAX_RUN_OUTPUT_BYTES) {
+          const kept = keepable(clean(result.output));
+          const looping = op.kind === "loop";
+          if (looping && isFrame(result.output) && !isFrame(kept.value)) {
+            await finish(
+              "failed",
+              `${current.name}: the list is larger than ${MAX_OUTPUT_BYTES / 1000} KB, the most a loop can go through`,
+              entry(op, "failed", at, "List too large"),
+            );
+            return;
+          }
+          const grow = kept.bytes - sizeOf(current.id);
+          if (outputBytes + grow > MAX_RUN_OUTPUT_BYTES) {
             await finish(
               "failed",
               `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`,
-              entry(current, "failed", at, "Output too large"),
+              entry(op, "failed", at, "Output too large"),
             );
             return;
           }
-          const log = entry(current, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, kept.value);
-          used += kept.bytes;
-          scope.steps[current.id] = kept.value;
-          index += 1;
+          outputBytes = Math.max(0, outputBytes + grow);
+          sizes.set(current.id, kept.bytes);
+          used += Math.max(0, grow);
+          keep(entry(op, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, result.logged ?? kept.value));
+          scope.steps[current.id] = looping && isFrame(kept.value) ? withItem(kept.value) : kept.value;
+          index = result.kind === "ok" && result.next !== undefined ? result.next : index + 1;
           attempt = 0;
-          const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };
+          stepRuns += 1;
+          setOutput(current.id, kept.value);
+          Object.assign(pending.set, { outputBytes, stepIndex: index, attempt: 0, claims: 0, stepRuns });
           if (result.kind === "wait") {
             const nextRunAt = Date.now() + result.seconds * 1000;
-            await c.runs.updateOne(
-              { _id: run._id },
-              {
-                $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) },
-                $push: pushLog(log),
-              },
-            );
+            await save({ status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) });
             await updateLastRun(c, run, "waiting");
             return;
           }
-          await c.runs.updateOne(
-            { _id: run._id },
-            { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, $push: pushLog(log) },
-          );
+          if (outside) {
+            // A loop's move right after it touches nothing outside: save it in the same write.
+            const after = ops[index];
+            if (after?.kind === "next") moveOn(after);
+            await save({ leaseUntil: Date.now() + LEASE_MS });
+          }
           break;
         }
         case "stop": {
-          const log = entry(current, "stopped", at, result.message);
+          const log = entry(op, "stopped", at, result.message);
           index += 1;
+          stepRuns += 1;
           await finish("stopped", null, log);
           return;
         }
         case "fail": {
+          stepRuns += 1; // every try counts, so retries can't multiply what a run may do
+          // The platform's own cap on outgoing requests, not the step's fault: carry on next minute. The
+          // sign comes from the thrown error only (never from text a step wrote), and the try still
+          // counts as a step run, so a run can't sit in this state for ever.
+          if (result.outOfCalls) {
+            allowance.calls = 0;
+            await park(Date.now(), undefined, PAUSED_SHARED);
+            return;
+          }
+          // The allowance ran out between a redirect's hops: the step starts over when there is room.
+          if (result.noRoom) {
+            await park(Date.now(), undefined, mine <= 0 ? PAUSED_OWN : PAUSED_SHARED);
+            return;
+          }
           if (attempt < current.retry.max) {
             const wait = current.retry.backoffSeconds * 4 ** attempt;
             const message = `${result.message}. Trying again in ${formatSeconds(wait)} (${attempt + 1} of ${current.retry.max} retries)`;
-            const log = entry(current, "retrying", at, message, result.output);
+            const log = entry(op, "retrying", at, message, result.output);
             attempt += 1;
             await park(Date.now() + wait * 1000, log);
           } else {
             await finish(
               "failed",
               `${current.name}: ${result.message}`,
-              entry(current, "failed", at, result.message, result.output),
+              entry(op, "failed", at, result.message, result.output),
             );
           }
           return;
@@ -718,7 +1008,8 @@ export async function tick(
   }
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.
-  await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
+  const allowance: Allowance = { calls: LIMITS.httpCallsPerTick };
+  await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id, pepper, allowance));
 
   // Once an hour, make sure every index exists (a no-op when they do).
   if (minuteOfHour === 7) {
