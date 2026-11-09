@@ -81,6 +81,15 @@ describe("slack", () => {
     expect(sentBody(calls[1]).text).toContain("<!channel>");
   });
 
+  it("quiets each string in blocks on its own, so a mention split across fields can't merge them", async () => {
+    const calls = mockFetch(() => new Response("ok"));
+    const blocks = [{ type: "section", text: { type: "mrkdwn", text: "x <!channel|" } }, { type: "section", text: { type: "mrkdwn", text: "y> <!here>" } }];
+    await executeStep(parse({ id: "s", name: "S", type: "slack", config: { webhookUrl: SLACK, text: "hi", blocks } }), scope);
+    const sent = sentBody(calls[0]).blocks;
+    expect(sent).toHaveLength(2);
+    expect(sent[1].text.text).toBe("y> @here");
+  });
+
   it("names the secret to check when a credential renders empty", async () => {
     const calls = mockFetch(() => new Response("ok"));
     const noSecrets = { ...scope, secrets: {} };

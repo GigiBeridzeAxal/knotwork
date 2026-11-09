@@ -50,14 +50,14 @@ export async function callService(
   secrets: string[],
   reason: (body: unknown) => string | undefined,
 ): Promise<Answer> {
-  const headers = new Headers(init.headers);
-  let body: string | undefined;
-  if (init.json !== undefined) {
-    body = JSON.stringify(init.json);
-    headers.set("content-type", "application/json");
-  }
   let sent;
   try {
+    const headers = new Headers(init.headers);
+    let body: string | undefined;
+    if (init.json !== undefined) {
+      body = JSON.stringify(init.json);
+      headers.set("content-type", "application/json");
+    }
     sent = await send({ method: init.method ?? "POST", url, headers, body, maxRedirects: 0 }, options);
   } catch (err) {
     // A bad header value or similar thrown before the request goes out; its text may quote the credential.

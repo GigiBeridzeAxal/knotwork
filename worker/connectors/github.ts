@@ -20,7 +20,8 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
     return { kind: "fail", message: `"${clip(repo, 120)}" isn't a repository name like owner/name` };
   }
   const token = renderText(config.token, scope, budget).trim();
-  if (!token && config.action !== "get_repo") {
+  // An empty token is fine for reading a public repository, but not when the setting named a secret that's missing.
+  if (!token && (config.action !== "get_repo" || config.token.trim())) {
     return { kind: "fail", message: missingCredential("GitHub", "token", config.token, token) ?? "GitHub needs a token to write" };
   }
   if (token && !TOKEN.test(token)) return { kind: "fail", message: "The GitHub token has spaces, line breaks or other characters a token can't have" };

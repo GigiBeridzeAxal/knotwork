@@ -19,7 +19,7 @@ export async function slack(step: Extract<Step, { type: "slack" }>, scope: Scope
   const payload: Record<string, unknown> = { text };
   if (config.blocks !== undefined && config.blocks !== "") {
     const blocks = render(config.blocks, scope, budget);
-    payload.blocks = config.mentions ? blocks : JSON.parse(quietSlack(JSON.stringify(blocks)));
+    payload.blocks = config.mentions ? blocks : quietEach(blocks);
   }
 
   const answer = await callService("Slack", url, { json: payload }, options, [hook, url.href, url.pathname], () => undefined);
@@ -30,4 +30,12 @@ export async function slack(step: Extract<Step, { type: "slack" }>, scope: Scope
 /** Turns Slack's channel-wide and group mentions into plain text. */
 export function quietSlack(text: string): string {
   return text.replace(/<!(channel|here|everyone)(\|[^>]*)?>/gi, "@$1").replace(/<!subteam\^[^>]*>/gi, "@group");
+}
+
+/** quietSlack on every string inside the blocks, so a mention can't be split across two fields. */
+function quietEach(value: unknown): unknown {
+  if (typeof value === "string") return quietSlack(value);
+  if (Array.isArray(value)) return value.map(quietEach);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, quietEach(v)]));
+  return value;
 }
