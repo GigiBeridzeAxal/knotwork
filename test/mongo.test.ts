@@ -385,6 +385,28 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({});
   });
 
+  it("keeps a quiet account's recent runs while busier accounts still have older history to trim", async () => {
+    await c.runs.deleteMany({});
+    const history = (owner: string, n: number) =>
+      Array.from({ length: n }, (_, i) => ({ _id: `run_${owner}_${i}`, ownerId: owner, status: "succeeded", createdAt: 1_000 + i }) as never);
+    // Six accounts with 60 finished runs each (more than one check trims), and a quiet one with 10 older runs.
+    await c.runs.insertMany([...["a", "b", "c", "d", "e", "f"].flatMap((x) => history(`usr_busy_${x}`, 60)), ...history("usr_quiet", 10).map((r: any) => ({ ...r, createdAt: 0 }))]);
+    await guardStorage(c, { stats: async () => ({ dataSize: 380 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, Date.now());
+    expect(await c.runs.countDocuments({ ownerId: "usr_quiet" })).toBe(10);
+    await c.runs.deleteMany({});
+  });
+
+  it("clears the full flag in the same check that frees the space", async () => {
+    await c.runs.deleteMany({});
+    await c.counters.deleteMany({ _id: { $in: ["storage:high", "storage:full"] } });
+    await c.runs.insertOne({ _id: "run_wait_far", ownerId: "usr_far", status: "waiting", nextRunAt: Date.now() + 3 * 86_400_000, createdAt: 1 } as never);
+    const sizes = [460 * 1024 * 1024, 340 * 1024 * 1024];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 340 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, Date.now());
+    expect(await c.counters.findOne({ _id: "storage:full" })).toBeNull();
+    expect(await c.counters.findOne({ _id: "storage:high" })).not.toBeNull();
+    await c.runs.deleteMany({});
+  });
+
   it("stops many mid-sized backlogs before anyone loses their newest 50 finished runs", async () => {
     await c.runs.deleteMany({});
     const now = Date.now();

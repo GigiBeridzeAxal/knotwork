@@ -429,7 +429,7 @@ const FINISHED: RunStatus[] = ["succeeded", "failed", "stopped"];
  * the most history, so trimming old history costs every account its oldest runs before anyone loses
  * their recent ones. Returns how many runs it deleted.
  */
-async function trimHistories(c: Collections): Promise<number> {
+async function trimHistories(c: Collections): Promise<{ deleted: number; more: boolean }> {
   const heavy = await c.runs
     .aggregate<{
       _id: string;
@@ -448,7 +448,8 @@ async function trimHistories(c: Collections): Promise<number> {
     ids.push(...extra.map((r) => r._id));
   }
   if (ids.length) await c.runs.deleteMany({ _id: { $in: ids } });
-  return ids.length;
+  // A full batch of accounts means others may still have older history to trim.
+  return { deleted: ids.length, more: heavy.length === HISTORY_OWNERS_PER_CHECK };
 }
 
 /** Runs waiting more than a day ahead (long delays are what filling the database with waits needs), latest first. */
@@ -523,6 +524,7 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     return (stats.dataSize ?? 0) + (stats.indexSize ?? 0);
   };
   let used = await measure();
+  const first = used;
   // The flags are set from the first measurement, before the slower steps below, so they hold even
   // if this invocation runs out of time; they're set again at the end.
   await setStorageFlags(c, used, now);
@@ -534,14 +536,21 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     //   2. shrink the pending runs of accounts holding far more than usual, biggest backlogs first;
     //   3. delete finished runs beyond each account's newest 50, the longest histories first;
     //   4. shrink the pending runs of accounts holding several;
-    //   5. delete everyone's oldest finished runs;
+    //   5. delete everyone's oldest finished runs, once no account has history beyond 50 left to trim;
     //   6. near the full mark, shrink any pending runs, the biggest backlogs first.
     // So many mid-sized backlogs can cost other accounts their older history, but not their recent runs.
     if (await shrinkLongWaits(c, now)) used = await measure();
     if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, BIG_BACKLOG))) used = await measure();
-    if (used > STORAGE_PRUNE_BYTES && (await trimHistories(c))) used = await measure();
-    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
+    let moreHistory = false;
     if (used > STORAGE_PRUNE_BYTES) {
+      const trimmed = await trimHistories(c);
+      moreHistory = trimmed.more;
+      if (trimmed.deleted) used = await measure();
+    }
+    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
+    // While other accounts still have history beyond their newest 50, the next check (a minute away)
+    // trims that before anyone's recent runs go.
+    if (used > STORAGE_PRUNE_BYTES && !moreHistory) {
       const old = await c.runs
         .find({ status: { $in: FINISHED } }, { projection: { _id: 1 } })
         .sort({ createdAt: 1 })
@@ -554,7 +563,7 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     }
     if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
   }
-  if (used > STORAGE_PRUNE_BYTES) await setStorageFlags(c, used, now);
+  if (first > STORAGE_PRUNE_BYTES) await setStorageFlags(c, used, now);
   return used;
 }
 
