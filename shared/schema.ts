@@ -122,6 +122,8 @@ export const secretInput = z.object({
   /** Short values could match ordinary words, and they are hidden wherever they show up in a run. */
   value: z
     .string()
+    // Spaces at the ends are never part of a key, and services drop them, so the hidden value would not match.
+    .trim()
     .min(LIMITS.secretMinChars, `Use at least ${LIMITS.secretMinChars} characters`)
     .max(LIMITS.secretMaxChars, `Use at most ${LIMITS.secretMaxChars} characters`),
 });

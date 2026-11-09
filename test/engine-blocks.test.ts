@@ -171,8 +171,8 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     expect(run.outputs.each).toEqual({ count: 3 });
     // (`outside` rendered to nothing, so it isn't stored.)
     expect(run.outputs.after).toEqual({ loop: { count: 3 }, last: "zzz" });
-    // The loop's start, 3 passes of 2 steps, 3 moves to the next item (the last one ends the loop), and "after".
-    expect(run.stepRuns).toBe(1 + 3 * 2 + 3 + 1);
+    // The loop's start, 3 passes of 2 steps (the last one ends the loop), and "after".
+    expect(run.stepRuns).toBe(1 + 3 * 2 + 1);
   });
 
   it("keeps only the last pass's outputs and counts their size as stored now, not summed", async () => {
@@ -256,7 +256,8 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
       ["t", "ok", "1 of 3"],
       ["not_b", "stopped", "2 of 3"],
     ]);
-    expect(run.outputs.t).toBe("a");
+    // The second pass started clean, so the first pass's result isn't left behind as if it were this one's.
+    expect(run.outputs).not.toHaveProperty("t");
     expect(run.outputs).not.toHaveProperty("after");
   });
 
@@ -277,7 +278,9 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     await resume(runId);
     run = await load(runId);
     expect(run.status).toBe("waiting");
-    expect(run.outputs.after_wait).toBe(1);
+    expect(run.logs.filter((l) => l.stepId === "after_wait").map((l) => l.output)).toEqual([1]);
+    // The second pass starts clean: the step after the wait hasn't run for this item yet.
+    expect(run.outputs).not.toHaveProperty("after_wait");
     expect(run.outputs.each).toEqual({ items: [1, 2], index: 1, count: 2 });
     expect(run.outputs.before).toBe(2);
 
@@ -315,9 +318,37 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     expect(run.outputs).toEqual({ outer: { count: 2 }, inner: { count: 1 }, pair: "1:c:1" });
   });
 
-  it("allows a run exactly 200 step runs, counting every pass and every move to the next item", async () => {
-    // 1 + 1 + 33 × (5 steps + 1 move) = 200.
-    const inner = ["s1", "s2", "s3", "s4", "s5"].map((id) => transform(id, "{{ loop.index }}"));
+  it("lets a loop over 50 items with 3 steps finish: moving to the next item is not a step run", async () => {
+    const inner = ["s1", "s2", "s3"].map((id) => transform(id, "{{ loop.index }}"));
+    const list = Array.from({ length: 50 }, (_, i) => i);
+    const { runId } = await start([loop("each", "{{ trigger.body.list }}", inner), transform("after", 1)], { body: { list } });
+    await advance(c, runId);
+    const run = await load(runId);
+    expect(run.status).toBe("succeeded");
+    expect(run.stepRuns).toBe(1 + 50 * 3 + 1);
+    expect(run.outputs).toMatchObject({ each: { count: 50 }, s3: 49, after: 1 });
+  });
+
+  it("saves steps that only compute together, not one write each", async () => {
+    const inner = ["s1", "s2", "s3"].map((id) => transform(id, "{{ loop.index }}"));
+    const list = Array.from({ length: 50 }, (_, i) => i);
+    const { runId } = await start([loop("each", "{{ trigger.body.list }}", inner)], { body: { list } });
+    const real = c.runs.updateOne.bind(c.runs);
+    let writes = 0;
+    c.runs.updateOne = ((...args: Parameters<typeof real>) => (writes++, real(...args))) as typeof real;
+    try {
+      await advance(c, runId);
+    } finally {
+      c.runs.updateOne = real;
+    }
+    expect((await load(runId)).status).toBe("succeeded");
+    // 151 step runs; the claim, a save every 25 log lines and the finish. It was one write per step.
+    expect(writes).toBeLessThan(15);
+  });
+
+  it("allows a run exactly 200 step runs, counting every pass", async () => {
+    // 1 + 1 + 33 × 6 steps = 200.
+    const inner = ["s1", "s2", "s3", "s4", "s5", "s6"].map((id) => transform(id, "{{ loop.index }}"));
     const list = Array.from({ length: 33 }, (_, i) => i);
     const { runId } = await start([transform("first", 1), loop("each", "{{ trigger.body.list }}", inner)], { body: { list } });
     await advance(c, runId);
@@ -327,8 +358,8 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
   });
 
   it("fails a run once it has taken 200 step runs", async () => {
-    // 1 + 50 × (3 steps + 1 move) = 201: the last move to the end is one too many.
-    const inner = ["s1", "s2", "s3"].map((id) => transform(id, "{{ loop.index }}"));
+    // 1 + 50 × 4 steps = 201: the last step of the last pass is one too many.
+    const inner = ["s1", "s2", "s3", "s4"].map((id) => transform(id, "{{ loop.index }}"));
     const list = Array.from({ length: 50 }, (_, i) => i);
     const { runId } = await start([loop("each", "{{ trigger.body.list }}", inner), transform("after", 1)], { body: { list } });
     await advance(c, runId);
@@ -338,7 +369,7 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     expect(run.stepRuns).toBe(LIMITS.stepRunsPerRun);
     expect(run.outputs.s3).toBe(49);
     expect(run.outputs).not.toHaveProperty("after");
-    expect(run.logs.at(-1)).toMatchObject({ stepId: "each", status: "failed" });
+    expect(run.logs.at(-1)).toMatchObject({ stepId: "s4", status: "failed", pass: "50 of 50" });
   });
 
   it("counts step runs across waits, so a parked run can't start its allowance over", async () => {
@@ -380,7 +411,9 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
       ["seen", "3 of 3", 1],
     ]);
     expect(run.logs.filter((l) => l.stepId === "seen").map((l) => l.output)).toEqual(["else", "then", "else"]);
-    expect(run.outputs).toMatchObject({ high: "50 is big", low: "7 is small", seen: "else" });
+    // What is left is the last pass: the branch it didn't take holds nothing from an earlier item.
+    expect(run.outputs).toMatchObject({ low: "7 is small", seen: "else" });
+    expect(run.outputs).not.toHaveProperty("high");
   });
 
   it("retries a failed step inside a loop on the same item", async () => {
@@ -571,5 +604,181 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
   it("refuses a secret for a workspace that doesn't exist", async () => {
     expect(await putSecret(c, PEPPER, "ws_nowhere", "usr_x", "API_KEY", "some-value-1", Date.now())).toBe("gone");
     expect(await c.secrets.countDocuments({ workspaceId: "ws_nowhere" })).toBe(0);
+  });
+
+  // ---------- secrets on their way out ----------
+
+  /** Runs `work` with `fetch` answered by `answer`, and returns the requests that were made. */
+  async function withFetch(answer: (url: string, init: RequestInit) => Response, work: () => Promise<void>) {
+    const calls: { url: string; headers: Record<string, string>; body: unknown }[] = [];
+    const real = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = String(input);
+      calls.push({ url, headers: Object.fromEntries(new Headers(init.headers).entries()), body: init.body });
+      return answer(url, init);
+    }) as typeof fetch;
+    try {
+      await work();
+    } finally {
+      globalThis.fetch = real;
+    }
+    return calls;
+  }
+  const post = (id: string, url: string, headers: Record<string, string> = {}, body?: unknown, max = 0): Step => ({
+    id,
+    name: id,
+    type: "http",
+    retry: { max, backoffSeconds: 5 },
+    config: { method: "POST", url, headers, body, failOnError: true },
+  });
+
+  it("never writes a chat webhook URL kept as a secret into the log or the error, whole or in part", async () => {
+    const ws = `ws_sec_${++n}`;
+    const owner = `usr_sec_${n}`;
+    const url = "https://hooks.slack.example/services/T01ABCDEF/B02GHIJKL/xoxTokenValue123456";
+    await secret(ws, owner, "SLACK_URL", url);
+    for (const status of [200, 404]) {
+      const { runId } = await start([post("say", "{{ secrets.SLACK_URL }}", {}, { text: "hi" })], { body: {} }, ws, owner);
+      const calls = await withFetch(
+        (to) => new Response(JSON.stringify({ echoed: to }), { status, headers: { "content-type": "application/json" } }),
+        () => advance(c, runId, PEPPER),
+      );
+      expect(calls.map((call) => call.url)).toEqual([url]);
+      const run = await load(runId);
+      expect(run.status).toBe(status === 200 ? "succeeded" : "failed");
+      expect(run.logs[0].message).toBe(`POST [secret SLACK_URL] → ${status}`);
+      const stored = JSON.stringify(run);
+      for (const part of ["xoxTokenValue123456", "T01ABCDEF", "hooks.slack.example"]) expect(stored).not.toContain(part);
+    }
+  });
+
+  it("shows where a request went with only the secret part hidden", async () => {
+    const ws = `ws_sec_${++n}`;
+    const owner = `usr_sec_${n}`;
+    await secret(ws, owner, "BOT_TOKEN", "123456:AAbotTokenValue");
+    const { runId } = await start([post("say", "https://api.chat.example/bot{{ secrets.BOT_TOKEN }}/send")], { body: {} }, ws, owner);
+    await withFetch(() => new Response("ok"), () => advance(c, runId, PEPPER));
+    const run = await load(runId);
+    expect(run.logs[0].message).toBe("POST api.chat.example/bot[secret BOT_TOKEN]/send → 200");
+    expect(JSON.stringify(run)).not.toContain("AAbotTokenValue");
+  });
+
+  it("doesn't leave the start of a long secret in an if's or a filter's log line", async () => {
+    const ws = `ws_sec_${++n}`;
+    const owner = `usr_sec_${n}`;
+    const long = `eyJ${"aB3dE6gH9".repeat(60)}`;
+    await secret(ws, owner, "API_JWT", long);
+    const { runId } = await start(
+      [
+        ifStep("check", "{{ trigger.body.token }}", "equals", "{{ secrets.API_JWT }}", [transform("in", 1)]),
+        filter("gate", "{{ secrets.API_JWT }}", "equals", "guess"),
+      ],
+      { body: { token: "guess" } },
+      ws,
+      owner,
+    );
+    await advance(c, runId, PEPPER);
+    const run = await load(runId);
+    expect(run.logs.map((l) => l.message)).toEqual([
+      'False: "guess" equals "[secret API_JWT]". Else is empty',
+      'Stopped: "[secret API_JWT]" equals "guess" is false',
+    ]);
+    expect(JSON.stringify(run)).not.toContain(long.slice(0, 20));
+  });
+
+  it("hides a secret that a service echoes back without the spaces around it", async () => {
+    const { redactor } = await import("../worker/secrets");
+    const clean = redactor({ TOKEN: " tok_live_abcdef123456\t" });
+    expect(clean("Bearer tok_live_abcdef123456")).toBe("Bearer [secret TOKEN]");
+    const hook = redactor({ HOOK: "https://Discord.example:443/api/webhooks/1234/AbCdEfGh" });
+    expect(hook("POST discord.example/api/webhooks/1234/AbCdEfGh → 404")).toBe("POST [secret HOOK] → 404");
+    expect(hook("see /api/webhooks/1234/AbCdEfGh")).toBe("see [secret HOOK]");
+  });
+
+  it("doesn't pass a secret on when the service redirects to another site", async () => {
+    const ws = `ws_sec_${++n}`;
+    const owner = `usr_sec_${n}`;
+    await secret(ws, owner, "TOKEN", "tok_live_abcdef123456");
+    const answer = (to: string) =>
+      to.startsWith("https://good.example") ? new Response(null, { status: 307, headers: { location: "https://other.example/in" } }) : new Response("ok");
+
+    // In a header that isn't one of the usual credential headers: dropped, the request goes on.
+    let started = await start([post("call", "https://good.example/a", { "x-auth-token": "{{ secrets.TOKEN }}", "x-plain": "1" })], { body: {} }, ws, owner);
+    let calls = await withFetch(answer, () => advance(c, started.runId, PEPPER));
+    expect(calls.map((call) => [call.url, call.headers["x-auth-token"], call.headers["x-plain"]])).toEqual([
+      ["https://good.example/a", "tok_live_abcdef123456", "1"],
+      ["https://other.example/in", undefined, "1"],
+    ]);
+
+    // In the body, which a 307 would send again: the step fails instead.
+    started = await start([post("call", "https://good.example/a", {}, { key: "{{ secrets.TOKEN }}" })], { body: {} }, ws, owner);
+    calls = await withFetch(answer, () => advance(c, started.runId, PEPPER));
+    expect(calls.map((call) => call.url)).toEqual(["https://good.example/a"]);
+    const run = await load(started.runId);
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/redirected to other\.example; the body holds a secret/);
+  });
+
+  it("says so when a saved secret can't be read any more, instead of calling it missing", async () => {
+    const ws = `ws_sec_${++n}`;
+    const owner = `usr_sec_${n}`;
+    await secret(ws, owner, "API_KEY", "value-under-old-pepper");
+    const { runId } = await start([transform("needs", "{{ secrets.API_KEY }}")], { body: {} }, ws, owner);
+    await advance(c, runId, "another-pepper-0123456789abcdef");
+    expect((await load(runId)).error).toMatch(/API_KEY is saved but can't be read any more/);
+  });
+
+  // ---------- requests and limits ----------
+
+  it("counts every retry as a step run", async () => {
+    const { runId } = await start([post("call", "https://flaky.example/a", {}, undefined, 2)]);
+    await withFetch(() => new Response("no", { status: 500 }), async () => {
+      await advance(c, runId);
+      await resume(runId);
+      await resume(runId);
+    });
+    const run = await load(runId);
+    expect(run.status).toBe("failed");
+    expect(run.stepRuns).toBe(3);
+  });
+
+  it("steps aside after 30 requests in one go and carries on from the same item", async () => {
+    const list = Array.from({ length: 35 }, (_, i) => i);
+    const { runId } = await start([loop("each", "{{ trigger.body.list }}", [post("call", "https://api.example/item/{{ loop.item }}")])], { body: { list } });
+    const calls = await withFetch(() => new Response("ok"), async () => {
+      await advance(c, runId);
+      const parked = await load(runId);
+      expect(parked.status).toBe("waiting");
+      expect(parked.error).toMatch(/as many requests as fit in one go/);
+      expect(parked.outputs.each).toMatchObject({ index: LIMITS.httpCallsPerGo, count: 35 });
+      await resume(runId);
+    });
+    const run = await load(runId);
+    expect([run.status, run.error]).toEqual(["succeeded", null]);
+    expect(calls.map((call) => call.url)).toEqual(list.map((i) => `https://api.example/item/${i}`));
+  });
+
+  it("shares one request allowance between the runs woken together", async () => {
+    const list = Array.from({ length: 25 }, (_, i) => i);
+    const steps = [loop("each", "{{ trigger.body.list }}", [post("call", "https://api.example/x")])];
+    const a = await start(steps, { body: { list } });
+    const b = await start(steps, { body: { list } });
+    const shared = { calls: 40 };
+    const calls = await withFetch(() => new Response("ok"), async () => {
+      await advance(c, a.runId, "", shared);
+      await advance(c, b.runId, "", shared);
+    });
+    expect(calls.length).toBe(40);
+    expect((await load(a.runId)).status).toBe("succeeded");
+    expect((await load(b.runId)).status).toBe("waiting");
+  });
+
+  it("charges a cut-off output what it really stores, so rewriting it can't hide other outputs", async () => {
+    const { keepable } = await import("../worker/engine");
+    const kept = keepable('"'.repeat(20_000));
+    expect(kept.value).toMatchObject({ truncated: true });
+    const stored = new TextEncoder().encode(JSON.stringify(kept.value)).byteLength;
+    expect(stored).toBeLessThanOrEqual(16_000 + 40);
+    expect(kept.bytes).toBe(stored);
   });
 });

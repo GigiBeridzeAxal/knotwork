@@ -10,7 +10,7 @@ import type { Collections, SecretDoc } from "./mongo";
  * AUTH_PEPPER, which only the Worker has, with the workspace id as salt: a copy of the database alone
  * can't be decrypted, and each workspace has its own key. The workspace id and the secret's name are
  * bound into the ciphertext, so a stored value can't be moved to another name or workspace. Values are
- * never sent back to the dashboard, and the engine hides them in everything a run stores (`redact`).
+ * never sent back to the dashboard, and the engine hides them in everything a run stores (`redactor`).
  */
 
 const enc = new TextEncoder();
@@ -98,7 +98,14 @@ export async function deleteSecret(c: Collections, workspaceId: string, name: st
  * The values of the named secrets, for one run. A name that isn't set, or a value that can't be
  * decrypted (stored under another AUTH_PEPPER), is left out; the step that needs it then fails saying so.
  */
-export async function loadSecrets(c: Collections, pepper: string, workspaceId: string, names: Iterable<string>): Promise<Record<string, string>> {
+export async function loadSecrets(
+  c: Collections,
+  pepper: string,
+  workspaceId: string,
+  names: Iterable<string>,
+  /** Filled with the names that are saved but can't be decrypted, when given. */
+  unreadable?: Set<string>,
+): Promise<Record<string, string>> {
   const ids = [...names].filter((n) => SECRET_NAME.test(n)).map((n) => secretId(workspaceId, n));
   const values: Record<string, string> = {};
   if (!ids.length || !pepper) return values;
@@ -109,6 +116,7 @@ export async function loadSecrets(c: Collections, pepper: string, workspaceId: s
     try {
       values[doc.name] = await unseal(key, workspaceId, doc.name, doc);
     } catch {
+      unreadable?.add(doc.name);
       console.error(`secret ${doc._id} could not be decrypted`);
     }
   }
@@ -135,12 +143,37 @@ export function secretRefs(value: unknown, into = new Set<string>()): Set<string
  * service that echoes a request back doesn't put the key in the run log. A value changed in another
  * way (hashed, base64, cut in pieces) can't be recognised.
  */
+/** The shapes one secret value can take in text. */
+function shapes(value: string): Set<string> {
+  const found = new Set<string>();
+  const add = (text: string) => {
+    if (!text) return;
+    for (const form of [text, JSON.stringify(text).slice(1, -1), encodeURIComponent(text)]) found.add(form);
+  };
+  add(value);
+  // Header values and URLs are trimmed on their way out, so a service may echo the value without its edges.
+  add(value.trim());
+  // A secret that is a web address (a chat webhook URL) also shows up without its scheme, as the
+  // parser rewrites it, and as its path alone, which is where the key sits.
+  if (/^https?:\/\//i.test(value.trim())) {
+    try {
+      const url = new URL(value.trim());
+      add(url.href);
+      add(url.host + url.pathname + url.search);
+      if (url.pathname.length >= 8) add(url.pathname + url.search), add(url.pathname);
+    } catch {
+      // Not an address after all.
+    }
+  }
+  return found;
+}
+
 export function redactor(secrets: Record<string, string>): <T>(value: T) => T {
   const forms: [string, string][] = [];
   for (const [name, value] of Object.entries(secrets)) {
     if (!value) continue;
     const mark = `[secret ${name}]`;
-    for (const form of new Set([value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value)])) forms.push([form, mark]);
+    for (const form of shapes(value)) forms.push([form, mark]);
   }
   if (!forms.length) return (value) => value;
   // Longest first, so a secret that contains another one is replaced whole.

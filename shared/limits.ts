@@ -12,8 +12,18 @@ export const LIMITS = {
   stepDepth: 3,
   /** Items one loop goes through. A longer list fails the step instead of being cut short. */
   loopItems: 50,
-  /** Steps one run may run in total, counting every pass of every loop. */
+  /**
+   * Steps one run may run in total. Every time a step runs counts: each pass of a loop, each retry,
+   * each "if" check and each start of a loop. Moving a loop to its next item does not.
+   */
   stepRunsPerRun: 200,
+  /**
+   * Requests to other sites one run makes before it steps aside until the next minute, and the most
+   * all the runs woken in one minute make together. Cloudflare's free plan allows 50 outgoing requests
+   * per invocation; redirects use some of them too.
+   */
+  httpCallsPerGo: 30,
+  httpCallsPerTick: 40,
   secretsPerWorkspace: 20,
   secretMinChars: 8,
   secretMaxChars: 4_000,

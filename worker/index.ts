@@ -568,7 +568,17 @@ app.all(
         return c.json({ error: "The body isn't valid JSON" }, 400);
       }
     } else if (type.includes("application/x-www-form-urlencoded")) {
-      body = Object.fromEntries(new URLSearchParams(text));
+      const form = Object.fromEntries(new URLSearchParams(text));
+      body = form;
+      // GitHub's default content type wraps the event as JSON text in a "payload" field. Unwrapped,
+      // `{{ trigger.body.ref }}` works whichever content type the webhook was created with.
+      if (doc.trigger.type === "webhook" && doc.trigger.verify?.provider === "github" && typeof form.payload === "string") {
+        try {
+          body = JSON.parse(form.payload);
+        } catch {
+          // Not JSON after all; keep the form fields.
+        }
+      }
     }
 
     // Headers and query are kept for templates, up to a few KB each; the whole input counts toward the

@@ -1,6 +1,7 @@
 import { LIMITS } from "../shared/limits";
 import type { FilterOp, IfStep, LeafStep, LoopStep, Step } from "../shared/schema";
 import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
+import { secretRefs } from "./secrets";
 
 export type StepResult =
   | { kind: "ok"; output: unknown; message?: string }
@@ -43,6 +44,18 @@ export interface StepOptions {
   allowHosts?: readonly string[];
 }
 
+/**
+ * The same scope with each secret's value swapped for its mark, `[secret NAME]`. Everything a step
+ * says about itself (log lines, errors) is written from this copy, so a secret never reaches a message
+ * in any shape: whole, cut short, or taken apart by the URL parser. (Outputs still go through the
+ * engine's redactor; this covers what the redactor can't recognise.)
+ */
+function forShow(scope: Scope): Scope {
+  const names = Object.keys(scope.secrets);
+  if (!names.length) return scope;
+  return { ...scope, secrets: Object.fromEntries(names.map((name) => [name, `[secret ${name}]`])) };
+}
+
 /** Cuts text that will be stored or shown (log lines, errors), so no step can make them huge. */
 export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
@@ -66,7 +79,9 @@ export async function executeStep(step: LeafStep, scope: Scope, options: StepOpt
       };
     case "log": {
       const message = renderText(step.config.message, scope, budget);
-      return { kind: "ok", output: { message }, message: clip(message, 2_000) };
+      const show = forShow(scope);
+      const shown = show === scope ? message : renderText(step.config.message, show, newBudget());
+      return { kind: "ok", output: { message }, message: clip(shown, 2_000) };
     }
   }
 }
@@ -80,16 +95,24 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
   const { config } = step;
   const url = renderText(config.url, scope, budget).trim();
   if (url.length > MAX_URL) return { kind: "fail", message: `The URL is longer than ${MAX_URL} characters` };
+  // How the address is written in log lines and errors: with secrets as their marks.
+  const show = forShow(scope);
+  const shownUrl = show === scope ? url : renderText(config.url, show, newBudget()).trim();
+  // Host and path as written (the parser would percent-encode a mark); the query stays out, as always.
+  const written = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)([^?#]*)/i.exec(shownUrl);
+  // No scheme and host to be seen: the address, or its start, is a secret. It is shown as its mark.
+  const shownHost = written ? written[1].replace(/^.*@/, "") : clip(shownUrl.split(/[?#]/)[0], 200);
+  const shownPath = written ? clip(written[2], 200) : "";
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { kind: "fail", message: `"${clip(url, 200)}" is not a valid URL` };
+    return { kind: "fail", message: `"${clip(shownUrl, 200)}" is not a valid URL` };
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return { kind: "fail", message: "Only http and https URLs can be called" };
   }
-  if (privateHost(parsed.hostname)) return { kind: "fail", message: `${parsed.hostname} is a private address, which steps can't call` };
+  if (privateHost(parsed.hostname)) return { kind: "fail", message: `${shownHost} is a private address, which steps can't call` };
   const blocked = notAllowed(parsed.hostname, options);
   if (blocked) return { kind: "fail", message: blocked };
 
@@ -97,6 +120,9 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
   for (const [name, value] of Object.entries(config.headers)) {
     headers.set(name, renderText(value, scope, budget));
   }
+  // What was filled in from a secret is meant for the address the step names, and nobody else.
+  const secretHeaders = Object.entries(config.headers).filter(([, value]) => secretRefs(value).size).map(([name]) => name);
+  const secretBody = secretRefs(config.body).size > 0;
 
   let body: string | undefined;
   if (config.body !== undefined && config.body !== "" && config.method !== "GET") {
@@ -120,23 +146,32 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
       res = await fetch(target.toString(), { method, headers, body: sendBody, redirect: "manual", signal });
       const location = res.headers.get("location");
       if (res.status < 300 || res.status > 399 || !location) break;
-      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${parsed.host} redirected more than ${MAX_REDIRECTS} times` };
+      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${shownHost} redirected more than ${MAX_REDIRECTS} times` };
       const next = new URL(location, target);
       if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
-        return { kind: "fail", message: `${target.host} redirected to ${next.host}, which steps can't call` };
+        return { kind: "fail", message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}, which steps can't call` };
       }
-      // Credentials set for one origin must not be handed to another one (another host, or http).
-      if (next.origin !== target.origin) for (const name of CREDENTIAL_HEADERS) headers.delete(name);
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
         method = "GET";
         sendBody = undefined;
+      }
+      // Credentials set for one origin must not be handed to another one (another host, or http).
+      if (next.origin !== target.origin) {
+        for (const name of [...CREDENTIAL_HEADERS, ...secretHeaders]) headers.delete(name);
+        if (secretBody && sendBody !== undefined) {
+          await res.body?.cancel();
+          return {
+            kind: "fail",
+            message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}; the body holds a secret, so it was not sent on`,
+          };
+        }
       }
       await res.body?.cancel();
       target = next;
     }
   } catch (err) {
     const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
-    return { kind: "fail", message: `${config.method} ${parsed.host} failed: ${reason}` };
+    return { kind: "fail", message: `${config.method} ${shownHost} failed: ${reason}` };
   }
 
   const text = await readLimited(res, MAX_RESPONSE_BYTES);
@@ -154,7 +189,7 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     headers: { "content-type": res.headers.get("content-type") ?? "" },
     body: responseBody,
   };
-  const message = `${config.method} ${parsed.host}${clip(parsed.pathname, 200)} → ${res.status}`;
+  const message = `${config.method} ${shownHost}${shownPath} → ${res.status}`;
   if (!res.ok && config.failOnError) return { kind: "fail", message, output };
   return { kind: "ok", output, message };
 }
@@ -194,8 +229,12 @@ function check(config: { left: string; op: FilterOp; right: string }, scope: Sco
   const leftValue = renderString(left, scope, budget);
   const rightText = renderText(right, scope, budget);
   const passed = compare(leftValue, op, rightText);
-  const shown = clip(typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing", 300);
-  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightText, 300)}"`}`;
+  // Put in words from the copy with secrets as marks, so cutting the text can't leave part of one.
+  const show = forShow(scope);
+  const leftShown = show === scope ? leftValue : renderString(left, show, newBudget());
+  const rightShown = show === scope ? rightText : renderText(right, show, newBudget());
+  const shown = clip(typeof leftShown === "string" ? `"${leftShown}"` : JSON.stringify(leftShown) ?? "nothing", 300);
+  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightShown, 300)}"`}`;
   return { passed, description };
 }
 

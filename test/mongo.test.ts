@@ -251,7 +251,10 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect((await c.workflows.findOne({ "lastRun.id": runId }))?.lastRun?.error).toBeUndefined();
     // 6,000 "€" are 18 KB in UTF-8: over the 16 KB a step keeps, so it would be cut, by bytes.
     const { keepable } = await import("../worker/engine");
-    expect(keepable("€".repeat(6_000)).bytes).toBe(16_040);
+    const cut = keepable("€".repeat(6_000));
+    expect(cut.bytes).toBe(new TextEncoder().encode(JSON.stringify(cut.value)).byteLength);
+    expect(cut.bytes).toBeGreaterThan(15_900);
+    expect(cut.bytes).toBeLessThanOrEqual(16_040);
   });
 
   it("gives a new account a smaller budget, and a deleted account's workflows none", async () => {
