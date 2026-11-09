@@ -76,9 +76,9 @@ taken out again if it went over.
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
-the pending runs of accounts holding more than 20 (biggest backlogs first), then everyone's oldest
-finished runs are deleted, then the pending runs of accounts holding 5 or more are stopped, and near
-450 MB any pending runs. A stopped run keeps only the reason. Past 450 MB it
+the pending runs of accounts holding more than 20 (biggest backlogs first), then each account's finished
+runs beyond its newest 50 are deleted (longest histories first), then the pending runs of accounts holding
+5 or more are stopped, then everyone's oldest finished runs are deleted, and near 450 MB any pending runs. A stopped run keeps only the reason. Past 450 MB it
 pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
 in all; see Limits), so even a burst can't fill the space between two checks.
 
@@ -103,7 +103,7 @@ account keeps at most 20 sessions.
 
 **Steps.** Everything one step renders from templates (URL, headers, body, output, message) adds up to at
 most 64 KB, so naming a big value many times (`{{ trigger }}` × 1,000) fails the step instead of producing
-megabytes. Log lines and errors are cut to 1 KB, and a run keeps its last 50 log lines. HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
+megabytes. Log lines and errors are cut to 1 KB (UTF-8 bytes), and a run keeps its last 50 log lines. HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
 every redirect is checked too, and a redirect to another origin drops credential headers. The shared demo
 account's HTTP steps can only call a few public test APIs (`DEMO_HOSTS` in `worker/steps.ts`).
 
@@ -199,9 +199,10 @@ person from using up the free plans:
 - 100 runs per account queued or waiting (in a delay or retry) at once.
 - What runs store (input, steps, outputs and logs, in UTF-8 bytes): 4 MB per account per hour; 60 MB for
   webhook and manual runs together and 30 MB for scheduled runs, each a pool of its own; past half of a
-  pool, accounts that stored more than 200 KB this hour wait for the next. A new run is charged for its
-  input and steps; each time it moves, it reserves the most its remaining steps could write and gives back
-  what they didn't. A run that can't reserve fails with the reason. Workflows with big outputs can reach
+  pool, accounts that had stored more than 200 KB this hour wait for the next. A new run is charged for
+  its input and steps; each time it moves, it reserves the most its remaining steps could write and gives
+  back what they didn't. A run that started but can't reserve waits for the next hour, before its next
+  step, with the reason in its log; it never fails after a step has done its work. Workflows with big outputs can reach
   the 4 MB before the 60 runs an hour (about 60 KB per run on average).
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and

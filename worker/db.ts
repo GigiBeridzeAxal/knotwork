@@ -286,7 +286,9 @@ export async function chargeRunBytes(
   const cap = pool === "schedule" ? LIMITS.scheduleRunBytesPerHour : LIMITS.runBytesPerHourOverall;
   const [mine, all] = await Promise.all([bump(c, `runbytes:${ownerId}`, HOUR, now, bytes), bump(c, poolKey, HOUR, now, bytes)]);
   if (!enforce) return null;
-  const fair = all <= cap / 2 || mine <= LIMITS.fairShareRunBytesPerHour;
+  // The fair share looks at what the account had stored before this charge, so one run's reservation
+  // alone can't put an account over it.
+  const fair = all <= cap / 2 || mine - bytes <= LIMITS.fairShareRunBytesPerHour;
   if (mine <= LIMITS.runBytesPerAccountPerHour && all <= cap && fair) return null;
   await Promise.all([bump(c, `runbytes:${ownerId}`, HOUR, now, -bytes), bump(c, poolKey, HOUR, now, -bytes)]);
   const at = new Date((Math.floor(now / HOUR) + 1) * HOUR).toISOString().slice(11, 16);

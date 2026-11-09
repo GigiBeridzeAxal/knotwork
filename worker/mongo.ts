@@ -201,6 +201,7 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.runs.createIndex({ status: 1, createdAt: 1 }),
     c.runs.createIndex({ status: 1, nextRunAt: 1, ownerId: 1 }),
     c.runs.createIndex({ ownerId: 1, status: 1, nextRunAt: 1 }),
+    c.runs.createIndex({ ownerId: 1, status: 1, createdAt: -1 }),
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
   ]);

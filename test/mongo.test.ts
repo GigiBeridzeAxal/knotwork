@@ -162,13 +162,35 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     // 4 MB an hour per account: 32 runs of 123 KB, then refused, with the slot given back.
     expect(results.filter((r) => r === null)).toHaveLength(32);
     expect(results[32]).toMatch(/4 MB/);
-    // Past half of the webhook and manual pool, an account that stored more than 200 KB this hour waits ...
+    // Past half of the webhook and manual pool, an account that had stored more than 200 KB this hour
+    // waits ...
     await bump(c, "runbytes:demand", 3_600_000, now, 30_000_000);
-    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 150_000)).toBeNull();
-    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 100_000)).toMatch(/your account.s runs have already stored 200 KB/);
-    // ... but its schedules, in their own pool, and a quiet account still run.
-    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 10_000)).toBeNull();
-    expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
+    try {
+      expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 150_000)).toBeNull();
+      expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 100_000)).toBeNull();
+      expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 10_000)).toMatch(/your account.s runs have already stored 200 KB/);
+      // ... but its schedules, in their own pool, and a quiet account still run.
+      expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 10_000)).toBeNull();
+      expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
+    } finally {
+      await bump(c, "runbytes:demand", 3_600_000, now, -30_000_000);
+    }
+  });
+
+  it("finishes a run that started under the fair share, even when its steps take it over", async () => {
+    await account("usr_fair");
+    const now = Date.now();
+    await bump(c, "runbytes:demand", 3_600_000, now, 31_000_000);
+    await bump(c, "runbytes:usr_fair", 3_600_000, now, 170_000);
+    try {
+      const { runId } = await start([transform("a", 1), transform("b", "x".repeat(15_000)), transform("c", 3)], "usr_fair", "ws_fair");
+      await advance(c, runId);
+      const run = await c.runs.findOne({ _id: runId });
+      expect(run?.status).toBe("succeeded");
+      expect(run?.logs.map((l) => l.status)).toEqual(["ok", "ok", "ok"]);
+    } finally {
+      await bump(c, "runbytes:demand", 3_600_000, now, -31_000_000);
+    }
   });
 
   it("reserves a run's most possible bytes once and gives back what it didn't use", async () => {
@@ -182,15 +204,16 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(counter?.n).toBeLessThan(2_000);
   });
 
-  it("counts what a run stores as it runs, and stops it when there's no room", async () => {
+  it("pauses a run until the next hour when there's no room, before its next step runs", async () => {
     await account("usr_writer");
     const big = { id: "big", name: "Big", type: "transform" as const, retry: { max: 0, backoffSeconds: 5 }, config: { output: "€".repeat(6_000) } };
     const { runId } = await start([big, transform("b", 1)], "usr_writer", "ws_writer");
     await bump(c, "runbytes:usr_writer", 3_600_000, Date.now(), 3_990_000);
     await advance(c, runId);
     const run = await c.runs.findOne({ _id: runId });
-    expect(run?.status).toBe("failed");
-    expect(run?.error).toMatch(/4 MB/);
+    expect(run?.status).toBe("waiting");
+    expect(run?.nextRunAt).toBe((Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000);
+    expect(run?.logs.at(-1)?.message).toMatch(/^Paused: this account's runs have stored their limit this hour\. Continues at \d\d:\d\d UTC\.$/);
     expect(run?.outputs).toEqual({});
     // 6,000 "€" are 18 KB in UTF-8: over the 16 KB a step keeps, so it would be cut, by bytes.
     const { keepable } = await import("../worker/engine");
@@ -300,19 +323,19 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
   });
 
-  it("shrinks many accounts' moderate backlogs after old history, and any backlog near full", { timeout: 180_000 }, async () => {
+  it("shrinks many accounts' moderate backlogs before recent history, and any backlog near full", { timeout: 180_000 }, async () => {
     await c.runs.deleteMany({});
     const pendingRun = (owner: string, i: number) =>
       ({ _id: `run_${owner}_${i}`, ownerId: owner, workflowId: `wf_${owner}`, status: "waiting", steps: [], input: { big: "x" }, outputs: {}, logs: [], createdAt: 1 }) as never;
     // 100 accounts holding 20 waiting runs each, and one account's finished run.
     await c.runs.insertMany(Array.from({ length: 100 }, (_, a) => Array.from({ length: 20 }, (_, i) => pendingRun(`usr_s${a}`, i))).flat());
     await c.runs.insertOne({ _id: "run_history", ownerId: "usr_h", status: "succeeded", createdAt: 0 } as never);
-    // Old history goes first; when that isn't enough, the moderate backlogs.
-    const sizes = [460_000_000, 460_000_000, 300_000_000];
+    // The moderate backlogs go before anyone's recent history; here that frees enough.
+    const sizes = [460_000_000, 300_000_000];
     const stub = { stats: async () => ({ dataSize: sizes.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db;
     await guardStorage(c, stub, Date.now());
     expect(await c.runs.countDocuments({ status: "stopped", input: null })).toBe(2_000);
-    expect(await c.runs.findOne({ _id: "run_history" })).toBeNull();
+    expect(await c.runs.findOne({ _id: "run_history" })).not.toBeNull();
 
     // Many accounts with one waiting run each: history goes first, then, near full, those runs too.
     await c.runs.deleteMany({});
@@ -326,7 +349,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({});
   });
 
-  it("deletes old history before stopping an ordinary account's few runs in flight", async () => {
+  it("trims long histories to their newest 50 before stopping an ordinary account's few runs in flight", async () => {
     await c.runs.deleteMany({});
     const now = Date.now();
     const waiting = Array.from({ length: 5 }, (_, i) => ({ _id: `run_live_${i}`, ownerId: "usr_live", status: "waiting", nextRunAt: now + 600_000, createdAt: now }) as never);
@@ -335,7 +358,31 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     const sizes = [380_000_000, 200_000_000];
     await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 200_000_000, indexSize: 0 }) } as unknown as Db, now);
     expect(await c.runs.countDocuments({ ownerId: "usr_live", status: "waiting" })).toBe(5);
-    expect(await c.runs.countDocuments({ ownerId: "usr_old" })).toBe(0);
+    expect(await c.runs.countDocuments({ ownerId: "usr_old" })).toBe(50);
+    expect(await c.runs.countDocuments({ ownerId: "usr_old", createdAt: { $gte: 250 } })).toBe(50);
+    await c.runs.deleteMany({});
+  });
+
+  it("stops many mid-sized backlogs before anyone loses their newest 50 finished runs", async () => {
+    await c.runs.deleteMany({});
+    const now = Date.now();
+    // 20 accounts each holding 20 waiting runs (under the big-backlog mark), and 3 ordinary accounts
+    // with 200 finished runs each.
+    const waiting = Array.from({ length: 20 }, (_, a) =>
+      Array.from({ length: 20 }, (_, i) => ({ _id: `run_mid_${a}_${i}`, ownerId: `usr_mid${a}`, status: "waiting", nextRunAt: now + 3_600_000, createdAt: now }) as never),
+    ).flat();
+    const history = ["usr_h1", "usr_h2", "usr_h3"].flatMap((owner) =>
+      Array.from({ length: 200 }, (_, i) => ({ _id: `run_${owner}_${i}`, ownerId: owner, status: "succeeded", createdAt: i }) as never),
+    );
+    await c.runs.insertMany([...waiting, ...history]);
+    // Still full after the older history goes; under the mark once the backlogs are stopped.
+    const sizes = [380_000_000, 380_000_000, 200_000_000];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 200_000_000, indexSize: 0 }) } as unknown as Db, now);
+    for (const owner of ["usr_h1", "usr_h2", "usr_h3"]) {
+      expect(await c.runs.countDocuments({ ownerId: owner, createdAt: { $gte: 150 } }), owner).toBe(50);
+      expect(await c.runs.countDocuments({ ownerId: owner }), owner).toBe(50);
+    }
+    expect(await c.runs.countDocuments({ ownerId: /^usr_mid/, status: "stopped" })).toBe(400);
     await c.runs.deleteMany({});
   });
 

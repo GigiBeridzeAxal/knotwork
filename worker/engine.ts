@@ -6,7 +6,7 @@ import { giveBack, underLimit } from "./auth";
 import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
-import { clip, DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
+import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
 
 /**
  * The engine. A run moves forward one step at a time and saves its place after every step, so
@@ -29,7 +29,7 @@ const MAX_RUN_OUTPUT_BYTES = 64_000;
 /** A log line keeps only a preview of the step's output; the full output is in `outputs`. */
 const LOG_PREVIEW_BYTES = 1_000;
 const MAX_LOGS = 50;
-/** Longest log message and run error kept. Both show up in lists, so they stay short. */
+/** Longest log message and run error kept, in UTF-8 bytes. Both show up in lists, so they stay short. */
 const MAX_MESSAGE = 1_000;
 const MAX_ERROR = 1_000;
 /** Due runs one tick moves forward, and how many at once. The rest wait for the next minute. */
@@ -40,9 +40,14 @@ const DUE_PER_OWNER = 2;
 const BIG_BACKLOG = 21;
 /** ... and after it. */
 const SHRINK_BACKLOG_FROM = 5;
+/** When the database is nearly full, each account's newest finished runs kept until last. */
+const HISTORY_KEPT_PER_ACCOUNT = 50;
+/** Accounts whose older history one check trims (those with the most first). */
+const HISTORY_OWNERS_PER_CHECK = 20;
 /** Most runs the storage guard stops, or deletes, in one step of one check. */
 const SHRINK_PER_CHECK = 2_000;
 const TICK_CONCURRENCY = 3;
+const HOUR = 3_600_000;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
 /** The free cluster holds 512 MB. Past the first mark old runs are pruned; past the second, new runs and sign-ups pause. */
@@ -128,7 +133,13 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
 }
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
-/** Most a log entry can add: a 1,000-character message (up to 4 bytes each), a 1 KB output preview, names. */
+/** Cuts text to at most `max` UTF-8 bytes (plus "…"), never through the middle of a character. */
+export function clipBytes(text: string, max: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.byteLength <= max) return text;
+  return `${new TextDecoder().decode(bytes.slice(0, max)).replace(/\uFFFD$/, "")}…`;
+}
+/** Most a log entry can add: a 1 KB message, a 1 KB output preview, names, and JSON escaping. */
 const LOG_MAX_BYTES = 5_500;
 /** About what a log entry adds to its run. */
 const logBytes = (log: LogDoc) => utf8Bytes(JSON.stringify(log));
@@ -143,7 +154,7 @@ async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, 
     {
       $set: {
         status: "failed",
-        error: clip(error, MAX_ERROR),
+        error: clipBytes(error, MAX_ERROR),
         leaseUntil: null,
         nextRunAt: null,
         finishedAt: Date.now(),
@@ -192,7 +203,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
     stepType: s.type,
     attempt: attempt + 1,
     status,
-    message: message === null ? null : clip(message, MAX_MESSAGE),
+    message: message === null ? null : clipBytes(message, MAX_MESSAGE),
     output: keepable(output, LOG_PREVIEW_BYTES).value,
     startedAt: at,
     durationMs: Date.now() - at,
@@ -212,7 +223,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
       {
         $set: {
           status,
-          error: error === null ? null : clip(error, MAX_ERROR),
+          error: error === null ? null : clipBytes(error, MAX_ERROR),
           stepIndex: index,
           attempt,
           claims: 0,
@@ -254,7 +265,18 @@ async function step(c: Collections, run: RunDoc, started: number) {
     Math.min(stepsLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
   const noRoom = await chargeRunBytes(c, run.ownerId, pool, reserve, started);
   if (noRoom) {
-    await finish("failed", noRoom);
+    // No step has run in this invocation yet, so nothing is repeated: the run waits for the next hour,
+    // when the budgets start again, and says why.
+    const nextHour = (Math.floor(started / HOUR) + 1) * HOUR;
+    const at = new Date(nextHour).toISOString().slice(11, 16);
+    const why = noRoom.startsWith("Your account")
+      ? "this account's runs have stored their limit"
+      : "Knotwork's storage for runs is busy";
+    const pausedAt = steps[Math.min(index, steps.length - 1)];
+    await park(
+      nextHour,
+      pausedAt && entry(pausedAt, "waiting", started, `Paused: ${why} this hour. Continues at ${at} UTC.`),
+    );
     await chargeRunBytes(c, run.ownerId, pool, used, Date.now(), false);
     return;
   }
@@ -372,7 +394,13 @@ async function shrinkBacklogs(c: Collections, now: number, from: number): Promis
     .aggregate<{
       _id: string;
       n: number;
-    }>([{ $match: { status: { $in: ["queued", "waiting"] } } }, { $group: { _id: "$ownerId", n: { $sum: 1 } } }, { $match: { n: { $gte: from } } }, { $sort: { n: -1 } }, { $limit: 1_000 }])
+    }>([
+      { $match: { status: { $in: ["queued", "waiting"] } } },
+      { $group: { _id: "$ownerId", n: { $sum: 1 } } },
+      { $match: { n: { $gte: from } } },
+      { $sort: { n: -1 } },
+      { $limit: 1_000 },
+    ])
     .toArray();
   const owners: string[] = [];
   let total = 0;
@@ -390,6 +418,35 @@ async function shrinkBacklogs(c: Collections, now: number, from: number): Promis
       .toArray()
   ).map((r) => r._id);
   return shrinkRuns(c, now, ids, "this account had many runs waiting");
+}
+
+const FINISHED: RunStatus[] = ["succeeded", "failed", "stopped"];
+
+/**
+ * Deletes finished runs beyond each account's newest HISTORY_KEPT_PER_ACCOUNT, from the accounts with
+ * the most history, so trimming old history costs every account its oldest runs before anyone loses
+ * their recent ones. Returns how many runs it deleted.
+ */
+async function trimHistories(c: Collections): Promise<number> {
+  const heavy = await c.runs
+    .aggregate<{
+      _id: string;
+      n: number;
+    }>([{ $match: { status: { $in: FINISHED } } }, { $group: { _id: "$ownerId", n: { $sum: 1 } } }, { $match: { n: { $gt: HISTORY_KEPT_PER_ACCOUNT } } }, { $sort: { n: -1 } }, { $limit: HISTORY_OWNERS_PER_CHECK }])
+    .toArray();
+  const ids: string[] = [];
+  for (const h of heavy) {
+    if (ids.length >= SHRINK_PER_CHECK) break;
+    const extra = await c.runs
+      .find({ ownerId: h._id, status: { $in: FINISHED } }, { projection: { _id: 1 } })
+      .sort({ createdAt: -1 })
+      .skip(HISTORY_KEPT_PER_ACCOUNT)
+      .limit(SHRINK_PER_CHECK - ids.length)
+      .toArray();
+    ids.push(...extra.map((r) => r._id));
+  }
+  if (ids.length) await c.runs.deleteMany({ _id: { $in: ids } });
+  return ids.length;
 }
 
 /** Runs waiting more than a day ahead (long delays are what filling the database with waits needs), latest first. */
@@ -446,14 +503,18 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     // until there's room:
     //   1. shrink runs waiting more than a day ahead (long waits are what filling the space needs);
     //   2. shrink the pending runs of accounts holding far more than usual, biggest backlogs first;
-    //   3. delete everyone's oldest finished runs;
+    //   3. delete finished runs beyond each account's newest 50, the longest histories first;
     //   4. shrink the pending runs of accounts holding several;
-    //   5. near the full mark, shrink any pending runs, the biggest backlogs first.
+    //   5. delete everyone's oldest finished runs;
+    //   6. near the full mark, shrink any pending runs, the biggest backlogs first.
+    // So many mid-sized backlogs can cost other accounts their older history, but not their recent runs.
     if (await shrinkLongWaits(c, now)) used = await measure();
     if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, BIG_BACKLOG))) used = await measure();
+    if (used > STORAGE_PRUNE_BYTES && (await trimHistories(c))) used = await measure();
+    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
     if (used > STORAGE_PRUNE_BYTES) {
       const old = await c.runs
-        .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
+        .find({ status: { $in: FINISHED } }, { projection: { _id: 1 } })
         .sort({ createdAt: 1 })
         .limit(SHRINK_PER_CHECK)
         .toArray();
@@ -462,7 +523,6 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
         used = await measure();
       }
     }
-    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
     if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
   }
   // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
