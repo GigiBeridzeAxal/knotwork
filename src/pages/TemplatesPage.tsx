@@ -1,11 +1,12 @@
 import { useRef, useState } from "react";
+import { canEdit } from "../../shared/schema";
+import { useSession } from "../session";
 import { TEMPLATE_CATEGORIES, type Template, type TemplateCategory, TEMPLATES } from "../../shared/templates";
 import { describeTrigger, Glyph } from "../canvas/describe";
 import { parseImport, stashImport } from "../canvas/transfer";
 import { ArrowIcon } from "../components/icons";
 import { Button, cn, Eyebrow, PageTitle } from "../components/ui";
 import { Link, navigate } from "../router";
-import { useSession } from "../session";
 
 /** Opens a file exported from Knotwork in the editor, unsaved, so it can be looked over first. */
 export function ImportButton({ onError, className }: { onError: (message: string) => void; className?: string }) {
@@ -62,7 +63,10 @@ export function TemplatesPage() {
   const [category, setCategory] = useState<TemplateCategory | "All">("All");
   const [error, setError] = useState("");
   // The shared demo account can't run templates with ready-made steps, so it isn't offered them.
-  const isDemo = useSession().me?.user.demo ?? false;
+  const session = useSession();
+  const isDemo = session.me?.user.demo ?? false;
+  // A viewer can browse templates but not make workflows from them.
+  const editable = canEdit(session.workspace.role);
   const offered = TEMPLATES.filter((t) => !(isDemo && t.demo === false));
   const shown = offered.filter((t) => category === "All" || t.category === category);
 
@@ -72,10 +76,13 @@ export function TemplatesPage() {
         <div className="flex flex-col gap-2">
           <PageTitle>Templates</PageTitle>
           <p className="max-w-xl text-soft">
-            {offered.length} workflows that run as they are, or with one secret added. Open one on the canvas, look it over, and it becomes yours when you press Create.
+            {offered.length} workflows that run as they are, or with one secret added.{" "}
+            {editable
+              ? "Open one on the canvas, look it over, and it becomes yours when you press Create."
+              : "You're a viewer in this workspace, so you can browse them; an editor can create from them."}
           </p>
         </div>
-        <ImportButton onError={setError} />
+        {editable && <ImportButton onError={setError} />}
       </div>
 
       {error && (

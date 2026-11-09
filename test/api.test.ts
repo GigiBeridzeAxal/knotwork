@@ -138,6 +138,32 @@ describe.skipIf(!uri)("HTTP API", () => {
     const hook = await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(600) });
     expect(hook.status).toBe(400);
     expect((await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(40) })).status).toBe(202);
+    // The limit is the body's own: exactly 50 levels is accepted, 51 is not.
+    expect((await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(50) })).status).toBe(202);
+    expect((await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(51) })).status).toBe(400);
+    expect((await call("POST", `/api/workflows/${ok.body.id}/run`, { ...alice, raw: `{"input":${deep(50)}}` })).status).toBeLessThan(300);
+    expect((await call("POST", `/api/workflows/${ok.body.id}/run`, { ...alice, raw: `{"input":${deep(51)}}` })).status).toBe(400);
+  });
+
+  it("answers 400 for a name with a null character, and doesn't count a run for it", async () => {
+    const hook = await call("POST", "/api/workflows", { ...alice, body: flow("Null hook", { type: "webhook" }) });
+    expect(hook.status).toBe(201);
+    const runsBefore = (await call("GET", "/api/overview", alice)).body.runsThisHour;
+    const url = `/hooks/${hook.body.hookKey}`;
+    expect((await call("POST", url, { raw: '{"a\\u0000b":1}' })).status).toBe(400);
+    expect((await call("POST", `${url}?a%00b=1`, { body: {} })).status).toBe(400);
+    const form = await worker.fetch(
+      new Request(`http://kw.test${url}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "a%00b=1" }),
+      env,
+      { waitUntil() {}, passThroughOnException() {}, props: {} } as unknown as ExecutionContext,
+    );
+    expect(form.status).toBe(400);
+    const saved = await call("POST", "/api/workflows", {
+      ...alice,
+      body: { ...flow("Null out"), steps: [{ id: "t_1", name: "T", type: "transform", retry: { max: 0, backoffSeconds: 5 }, config: { output: { "a\u0000b": 1 } } }] },
+    });
+    expect(saved.status).toBe(400);
+    expect((await call("GET", "/api/overview", alice)).body.runsThisHour).toBe(runsBefore);
   });
 
   it("changing the password keeps this session and ends the others", async () => {

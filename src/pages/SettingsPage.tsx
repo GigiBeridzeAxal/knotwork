@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { LIMITS } from "../../shared/limits";
 import { PASSWORD_MIN } from "../../shared/schema";
 import { api, ApiError } from "../api";
@@ -7,27 +7,10 @@ import { Button, Card, Field, inputClass, PageTitle } from "../components/ui";
 import { navigate } from "../router";
 import { useSession } from "../session";
 import { useWorkspace } from "../workspace";
-
-function Section({ title, blurb, children }: { title: string; blurb: string; children: ReactNode }) {
-  return (
-    <section className="grid gap-4 border-t border-line pt-8 lg:grid-cols-3 lg:gap-8">
-      <div className="flex flex-col gap-2">
-        <h2 className="font-display text-xl font-bold tracking-tight">{title}</h2>
-        <p className="text-sm text-muted">{blurb}</p>
-      </div>
-      <div className="lg:col-span-2">{children}</div>
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 border-t border-line px-5 py-4 first:border-0">
-      <span className="text-sm text-soft">{label}</span>
-      <span className="text-right font-mono text-sm text-text tabular-nums">{value}</span>
-    </div>
-  );
-}
+import { API_DOCS, ApiKeys } from "./settings/ApiKeys";
+import { Members } from "./settings/Members";
+import { Row, ROLE_LABEL, Section } from "./settings/parts";
+import { RecoveryCodes } from "./settings/RecoveryCodes";
 
 function WorkspaceSettings() {
   const { workspace, me, reload } = useSession();
@@ -51,7 +34,7 @@ function WorkspaceSettings() {
   }
 
   async function remove() {
-    if (!confirm(`Delete "${workspace.name}" with all its workflows and runs? This can't be undone.`)) return;
+    if (!confirm(`Delete "${workspace.name}" with all its workflows and runs? Everyone in it loses access and every API key for it stops working. This can't be undone.`)) return;
     setBusy(true);
     try {
       await api.deleteWorkspace(workspace.id);
@@ -61,6 +44,16 @@ function WorkspaceSettings() {
       setNote((err as Error).message);
       setBusy(false);
     }
+  }
+
+  if (workspace.role !== "owner") {
+    return (
+      <Card>
+        <Row label="Workspace name" value={<span className="font-sans">{workspace.name}</span>} />
+        <Row label="Your role" value={<span className="font-sans">{ROLE_LABEL[workspace.role]}</span>} />
+        <p className="border-t border-line px-5 py-4 text-[13px] text-muted">Only the owner can rename or delete this workspace.</p>
+      </Card>
+    );
   }
 
   return (
@@ -91,8 +84,9 @@ function WorkspaceSettings() {
   );
 }
 
-/** Changing the password needs the current one, and signs out every other device. */
-function PasswordSettings() {
+/** Changing the password needs the current one, signs out every other device, and ends the account's API keys and recovery codes. */
+function PasswordSettings({ onChanged }: { onChanged: () => void }) {
+  const { reload } = useSession();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [busy, setBusy] = useState(false);
@@ -106,7 +100,10 @@ function PasswordSettings() {
       await api.changePassword(current, next);
       setCurrent("");
       setNext("");
-      setNote({ ok: true, text: "Password changed. Other devices were logged out." });
+      // The change ended the account's recovery codes and API keys: show both sections as they are now.
+      await reload().catch(() => {});
+      onChanged();
+      setNote({ ok: true, text: "Password changed. Other devices were logged out, and your API keys and recovery codes were ended. Make new recovery codes below." });
     } catch (err) {
       const issue = err instanceof ApiError ? err.issues[0]?.message : undefined;
       setNote({ ok: false, text: issue && err instanceof ApiError && err.status === 400 ? issue : (err as Error).message });
@@ -163,7 +160,7 @@ function DeleteAccount() {
     <Card className="p-5 sm:p-6">
       <form onSubmit={remove} className="flex flex-col gap-4">
         <p className="text-[13px] text-muted">
-          Deletes your account, every workspace, workflow, webhook and run. Your email can be used to sign up again afterwards.
+          Deletes your account, every workspace, workflow, webhook and run, and your API keys. People in your workspaces lose access. Your email can be used to sign up again afterwards.
         </p>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1">
@@ -183,12 +180,13 @@ function DeleteAccount() {
 export function SettingsPage() {
   const { workflows, runsThisHour, runsLimit } = useWorkspace();
   const { me, workspace, logout } = useSession();
+  const [passwordChanges, setPasswordChanges] = useState(0);
 
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-2">
         <PageTitle>Settings</PageTitle>
-        <p className="text-soft">Your account, this workspace and the free plan limits.</p>
+        <p className="text-soft">Your account, this workspace, the people in it and the free plan limits.</p>
       </div>
 
       <Section title="Account" blurb={me.user.demo ? "The shared demo account. It resets every day at 03:00 UTC." : "You sign in with this email and your password."}>
@@ -213,8 +211,17 @@ export function SettingsPage() {
       </Section>
 
       {!me.user.demo && (
-        <Section title="Password" blurb="Changing it logs you out everywhere else.">
-          <PasswordSettings />
+        <Section title="Password" blurb="Changing it logs you out everywhere else, and ends your API keys and recovery codes.">
+          <PasswordSettings onChanged={() => setPasswordChanges((n) => n + 1)} />
+        </Section>
+      )}
+
+      {!me.user.demo && (
+        <Section
+          title="Recovery codes"
+          blurb="Knotwork never sends email. If you forget your password, one of these codes is the only way back in."
+        >
+          <RecoveryCodes />
         </Section>
       )}
 
@@ -222,11 +229,47 @@ export function SettingsPage() {
         <WorkspaceSettings key={workspace.id} />
       </Section>
 
+      <Section
+        title="Members"
+        blurb="The owner manages who is in a workspace. Editors change workflows and start runs. Viewers only look, but they can read every step's settings, including anything pasted into headers."
+      >
+        {me.user.demo && workspace.personal ? (
+          <Card className="p-5 sm:p-6">
+            <p className="text-sm text-soft">The shared demo account can't share workspaces. Create your own account to invite people.</p>
+          </Card>
+        ) : workspace.personal ? (
+          <Card className="p-5 sm:p-6">
+            <p className="text-sm text-soft">
+              <span className="font-medium text-text">Personal is only for you, so it can't be shared.</span> To work with other people, make a
+              new workspace from the workspace menu in the sidebar, then invite them from here.
+            </p>
+          </Card>
+        ) : (
+          <Members key={workspace.id} />
+        )}
+      </Section>
+
+      {!me.user.demo && (
+        <Section
+          title="API keys"
+          blurb={
+            <>
+              <p>Let scripts and other services read or run your workflows. Changing or recovering your password revokes every key.</p>
+              <a href={API_DOCS} target="_blank" rel="noreferrer" className="mt-2 inline-block text-soft underline decoration-edge underline-offset-4 hover:text-text hover:decoration-text">
+                Read the API docs
+              </a>
+            </>
+          }
+        >
+          <ApiKeys key={`${workspace.id}:${passwordChanges}`} />
+        </Section>
+      )}
+
       <Section title="Free plan" blurb="Knotwork runs on free plans, so each account has limits that keep it fair for everyone.">
         <Card>
           <Row label={`Workflows in ${workspace.name}`} value={`${workflows?.length ?? 0} / ${LIMITS.workflowsPerWorkspace}`} />
-          <Row label="Workspaces" value={`${me.workspaces.length} / ${LIMITS.workspacesPerAccount}`} />
-          <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${runsLimit}`} />
+          <Row label="Your workspaces" value={`${me.workspaces.filter((w) => w.role === "owner").length} / ${LIMITS.workspacesPerAccount}`} />
+          <Row label={workspace.role === "owner" ? "Runs this hour (whole account)" : "Runs this hour (owner's account)"} value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>
