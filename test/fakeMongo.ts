@@ -182,6 +182,7 @@ export function fakeMongo() {
     members: new FakeCollection(),
     invites: new FakeCollection(),
     apiKeys: new FakeCollection(),
+    secrets: new FakeCollection(),
   };
   return { c: c as unknown as Collections, raw: c, started: 0, connected: 0, async close() {} };
 }

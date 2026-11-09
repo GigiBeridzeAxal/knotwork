@@ -6,7 +6,30 @@
 export const LIMITS = {
   workspacesPerAccount: 5,
   workflowsPerWorkspace: 10,
+  /** Counting the steps inside if and loop blocks. */
   stepsPerWorkflow: 25,
+  /** How deep steps can nest: 1 is the top level, so 3 allows a block inside a block. */
+  stepDepth: 3,
+  /** Items one loop goes through. A longer list fails the step instead of being cut short. */
+  loopItems: 50,
+  /**
+   * Steps one run may run in total. Every time a step runs counts: each pass of a loop, each retry,
+   * each "if" check and each start of a loop. Moving a loop to its next item does not.
+   */
+  stepRunsPerRun: 200,
+  /**
+   * Requests to other sites one run makes in one invocation before it steps aside until the next
+   * minute, and the most all the runs woken by one cron tick make together (each of them still at
+   * most its own share). A redirect followed counts as a request. Cloudflare's free plan allows 50
+   * outgoing requests per invocation.
+   */
+  httpCallsPerGo: 30,
+  httpCallsPerTick: 40,
+  secretsPerWorkspace: 20,
+  secretMinChars: 8,
+  secretMaxChars: 4_000,
+  /** How far a Stripe webhook's signed time may be from now (seconds). */
+  signatureToleranceSeconds: 300,
   /** A saved workflow (its trigger and every step's settings). */
   workflowBytes: 32_000,
   /** Test input for a manual run, and a webhook's body. */

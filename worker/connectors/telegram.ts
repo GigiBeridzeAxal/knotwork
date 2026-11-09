@@ -32,6 +32,7 @@ export async function telegram(step: Extract<Step, { type: "telegram" }>, scope:
   const result = field(answer.body, "result");
   return {
     kind: "ok",
+    calls: answer.calls,
     output: { ok: true, messageId: field(result, "message_id") ?? null, chatId: field(field(result, "chat"), "id") ?? chatId },
     message: `Sent to Telegram chat ${chatId}`,
   };

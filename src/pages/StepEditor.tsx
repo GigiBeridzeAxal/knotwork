@@ -3,6 +3,7 @@ import { filterOps, type FilterOp, type Step } from "../../shared/schema";
 import { Button, cn, Eyebrow, Field, inputClass, textareaClass } from "../components/ui";
 import { CONNECTOR_TYPES, STEP_TYPES } from "../../shared/examples";
 import { ConnectorFields } from "./ConnectorFields";
+import { LIMITS } from "../../shared/limits";
 
 const OP_LABELS: Record<FilterOp, string> = {
   equals: "equals",
@@ -21,6 +22,8 @@ const TYPE_COLOR: Record<Step["type"], string> = {
   filter: "text-muted",
   delay: "text-muted",
   log: "text-muted",
+  if: "text-muted",
+  loop: "text-muted",
   slack: "text-muted",
   discord: "text-muted",
   telegram: "text-muted",
@@ -84,6 +87,7 @@ export function JsonArea({
 export function StepEditor({
   step,
   index,
+  uid = `s${index}`,
   total,
   refs,
   errors,
@@ -97,6 +101,8 @@ export function StepEditor({
 }: {
   step: Step;
   index: number;
+  /** A prefix for the form fields' ids that is unique on the page (steps in different lists share an index). */
+  uid?: string;
   total: number;
   refs: string[];
   errors: string[];
@@ -111,7 +117,6 @@ export function StepEditor({
   embedded?: boolean;
 }) {
   const typeInfo = STEP_TYPES.find((t) => t.type === step.type)!;
-  const uid = `s${index}`;
   const set = (patch: Partial<Step>) => onChange({ ...step, ...patch } as Step);
   const setConfig = (patch: Record<string, unknown>) => onChange({ ...step, config: { ...step.config, ...patch } } as Step);
 
@@ -221,7 +226,17 @@ export function StepEditor({
             </Field>
           )}
 
-          {step.type === "filter" && (
+          {step.type === "loop" && (
+            <Field
+              label="List to go through"
+              htmlFor={`${uid}-items`}
+              hint={`A template that gives a list, up to ${LIMITS.loopItems} items. The steps inside run once per item, with {{ loop.item }}, {{ loop.index }} (from 0) and {{ loop.count }}.`}
+            >
+              <input id={`${uid}-items`} className={cn(inputClass, "font-mono")} value={step.config.items} onChange={(e) => setConfig({ items: e.target.value })} />
+            </Field>
+          )}
+
+          {(step.type === "filter" || step.type === "if") && (
             <div className="grid gap-4 sm:grid-cols-[1fr_180px_1fr]">
               <Field label="Value" htmlFor={`${uid}-left`}>
                 <input id={`${uid}-left`} className={cn(inputClass, "font-mono")} value={step.config.left} onChange={(e) => setConfig({ left: e.target.value })} />

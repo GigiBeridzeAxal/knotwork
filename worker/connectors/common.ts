@@ -36,7 +36,7 @@ export function hide(message: string, secrets: string[]): string {
   return out;
 }
 
-export type Answer = { ok: true; status: number; body: unknown } | { ok: false; result: StepResult };
+export type Answer = { ok: true; status: number; body: unknown; calls: number } | { ok: false; result: StepResult };
 
 /**
  * POSTs (or GETs) JSON to a service with the http step's guards and no redirects. A failed answer
@@ -58,12 +58,16 @@ export async function callService(
       body = JSON.stringify(init.json);
       headers.set("content-type", "application/json");
     }
-    sent = await send({ method: init.method ?? "POST", url, headers, body, maxRedirects: 0 }, options);
+    sent = await send({ method: init.method ?? "POST", url, headers, body }, options);
   } catch (err) {
     // A bad header value or similar thrown before the request goes out; its text may quote the credential.
     return { ok: false, result: { kind: "fail", message: hide(`${service}: ${(err as Error).message || "the request failed"}`, secrets) } };
   }
-  if (sent.kind === "fail") return { ok: false, result: { kind: "fail", message: hide(sent.message, secrets) } };
+  if (sent.kind === "fail") {
+    // calls, outOfCalls and noRoom tell the engine about the request allowance; they come from send(), not from text.
+    const { message, ...rest } = sent;
+    return { ok: false, result: { ...rest, kind: "fail", message: hide(message, secrets) } };
+  }
   const { res } = sent;
   if (!res.ok) {
     const said = reason(sent.body) ?? (typeof sent.body === "string" ? sent.body : "");
@@ -72,10 +76,10 @@ export async function callService(
     const later = res.status === 429 && wait ? ` (asked to wait ${clip(wait, 20)}s)` : "";
     return {
       ok: false,
-      result: { kind: "fail", message: `${service} answered ${res.status}${detail}${later}`, output: { status: res.status, ok: false } },
+      result: { kind: "fail", message: `${service} answered ${res.status}${detail}${later}`, output: { status: res.status, ok: false }, calls: sent.calls },
     };
   }
-  return { ok: true, status: res.status, body: sent.body };
+  return { ok: true, status: res.status, body: sent.body, calls: sent.calls };
 }
 
 /** A field of an object answer, or undefined. */

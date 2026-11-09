@@ -51,6 +51,7 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
       const number = field(answer.body, "number");
       return {
         kind: "ok",
+        calls: answer.calls,
         output: { number: number ?? null, id: field(answer.body, "id") ?? null, url: field(answer.body, "html_url") ?? null },
         message: number === undefined ? `Opened an issue in ${repo}` : `Opened issue #${number} in ${repo}`,
       };
@@ -65,6 +66,7 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
       if (!answer.ok) return answer.result;
       return {
         kind: "ok",
+        calls: answer.calls,
         output: { id: field(answer.body, "id") ?? null, url: field(answer.body, "html_url") ?? null },
         message: `Commented on #${number} in ${repo}`,
       };
@@ -76,6 +78,7 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
       const stars = field(b, "stargazers_count");
       return {
         kind: "ok",
+        calls: answer.calls,
         output: {
           fullName: field(b, "full_name") ?? repo,
           description: field(b, "description") ?? "",

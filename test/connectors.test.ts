@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { workflowInput, type Step } from "../shared/schema";
+import { type LeafStep, workflowInput } from "../shared/schema";
 import { newStep } from "../shared/examples";
 import { DEMO_HOSTS, executeStep, type Scope } from "../worker/steps";
 
@@ -7,7 +7,7 @@ const SLACK = "https://hooks.slack.com/services/T000/B000/XXXXXXXXXXXXXXXX";
 const DISCORD = "https://discord.com/api/webhooks/123456/abcdefSECRETabcdef";
 const TOKEN = "123456789:AAH-abcdefghijklmnopqrstuvwxyz012345";
 
-const scope: Scope & { secrets: Record<string, string> } = {
+const scope: Scope = {
   trigger: { body: { action: "created", sender: { login: "ada" }, repository: { full_name: "o/r", stargazers_count: 7 }, n: 12 } },
   steps: {},
   run: { id: "run_1", startedAt: "" },
@@ -15,8 +15,8 @@ const scope: Scope & { secrets: Record<string, string> } = {
   secrets: { SLACK_WEBHOOK: SLACK, DISCORD_WEBHOOK: DISCORD, TELEGRAM_BOT_TOKEN: TOKEN, GITHUB_TOKEN: "github_pat_secretvalue123" },
 };
 
-function parse(step: unknown): Step {
-  return workflowInput.parse({ name: "x", trigger: { type: "manual" }, steps: [step] }).steps[0];
+function parse(step: unknown): LeafStep {
+  return workflowInput.parse({ name: "x", trigger: { type: "manual" }, steps: [step] }).steps[0] as LeafStep;
 }
 
 type Call = { url: string; init: RequestInit };

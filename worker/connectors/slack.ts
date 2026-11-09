@@ -24,7 +24,7 @@ export async function slack(step: Extract<Step, { type: "slack" }>, scope: Scope
 
   const answer = await callService("Slack", url, { json: payload }, options, [hook, url.href, url.pathname], () => undefined);
   if (!answer.ok) return answer.result;
-  return { kind: "ok", output: { ok: true, status: answer.status }, message: `Posted to Slack (${text.length} characters)` };
+  return { kind: "ok", calls: answer.calls, output: { ok: true, status: answer.status }, message: `Posted to Slack (${text.length} characters)` };
 }
 
 /** Turns Slack's channel-wide and group mentions into plain text. */

@@ -29,6 +29,7 @@ export async function discord(step: Extract<Step, { type: "discord" }>, scope: S
   if (!answer.ok) return answer.result;
   return {
     kind: "ok",
+    calls: answer.calls,
     output: { ok: true, messageId: field(answer.body, "id") ?? null, channelId: field(answer.body, "channel_id") ?? null },
     message: `Posted to Discord (${content.length} characters)`,
   };

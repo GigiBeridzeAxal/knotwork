@@ -20,7 +20,9 @@ function parseSample(text: string): StepSample | null {
     const data = JSON.parse(text);
     if (!data || typeof data !== "object" || Array.isArray(data)) return null;
     const steps = (data as { steps?: unknown }).steps;
+    const loop = (data as { loop?: unknown }).loop;
     return {
+      ...(loop && typeof loop === "object" && !Array.isArray(loop) ? { loop: loop as StepSample["loop"] } : {}),
       trigger: (data as { trigger?: unknown }).trigger,
       steps: steps && typeof steps === "object" && !Array.isArray(steps) ? (steps as Record<string, unknown>) : {},
     };
@@ -29,7 +31,8 @@ function parseSample(text: string): StepSample | null {
   }
 }
 
-export const sampleText = (sample: StepSample) => JSON.stringify({ trigger: sample.trigger ?? { body: {} }, steps: sample.steps }, null, 2);
+export const sampleText = (sample: StepSample) =>
+  JSON.stringify({ trigger: sample.trigger ?? { body: {} }, steps: sample.steps, ...(sample.loop ? { loop: sample.loop } : {}) }, null, 2);
 
 /** Runs one step by itself against test data, without saving or starting a run. */
 export function TestPanel({
@@ -66,8 +69,16 @@ export function TestPanel({
       const res = await api.testStep(withoutChildren(step), parsed, workflowName);
       onResult(res);
       if (res.status === "ok" && res.output !== undefined) {
-        onSample(sampleText({ ...parsed, steps: { ...parsed.steps, [step.id]: res.output } }));
-        setNote({ text: `Added to the test data as steps.${step.id}, so later steps can use it.`, bad: false });
+        // Testing a loop also sets up its first item, so the steps inside it can be tested next.
+        const first = step.type === "loop" ? (res.output as { item?: unknown; count?: number } | null) : null;
+        const loop = first && first.count ? { item: first.item, index: 0, count: first.count } : parsed.loop;
+        onSample(sampleText({ ...parsed, ...(loop ? { loop } : {}), steps: { ...parsed.steps, [step.id]: res.output } }));
+        setNote({
+          text: first?.count
+            ? `Added to the test data as steps.${step.id}, with its first item as loop.item for the steps inside.`
+            : `Added to the test data as steps.${step.id}, so later steps can use it.`,
+          bad: false,
+        });
       }
     } catch (e) {
       onResult(null);

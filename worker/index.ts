@@ -10,6 +10,8 @@ import {
   loginInput,
   type Me,
   passwordChange,
+  secretInput,
+  secretName,
   recoverInput,
   recoveryCodesInput,
   type Role,
@@ -80,6 +82,8 @@ import { stepTestInput } from "../shared/schema";
 import { getSample, getVersion, listVersions, saveVersion } from "./db";
 import { testStep } from "./stepTest";
 import { advance, createRun, tick } from "./engine";
+import { deleteSecret, listSecrets, loadSecrets, putSecret, secretRefs } from "./secrets";
+import { signatureProblem } from "./signature";
 import { type ApiKeyDoc, clientIsDead, databaseUnavailable, type Env, memberId, Mongo, unstorable, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
 const MINUTE = 60_000;
@@ -449,6 +453,7 @@ api.post("/auth/delete-account", async (c) => {
   await db(c).workflows.deleteMany({ ownerId });
   await db(c).versions.deleteMany({ ownerId });
   await db(c).runs.deleteMany({ ownerId });
+  await db(c).secrets.deleteMany({ ownerId });
   await db(c).workspaces.deleteMany({ ownerId });
   c.header("set-cookie", clearedCookie(secure(c)));
   return c.body(null, 204);
@@ -768,7 +773,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   if (blocked) return c.json({ error: blocked }, 429);
   // A manual run's input sits under `body`, like a webhook's, so `{{ trigger.body.x }}` works for both.
   const runId = await createRun(db(c), { ...doc, id: doc._id }, "manual", { body: body?.input ?? {} });
-  c.var.later.push(advance(db(c), runId));
+  c.var.later.push(advance(db(c), runId, c.env.AUTH_PEPPER));
   return c.json({ runId }, 202);
 });
 
@@ -786,8 +791,58 @@ scoped.get("/runs/:id", async (c) => {
 scoped.post("/runs/:id/check", async (c) => {
   const run = await db(c).runs.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace }, { projection: { _id: 1 } });
   if (!run) return c.json({ error: "No run with that id" }, 404);
-  await advance(db(c), run._id);
+  await advance(db(c), run._id, c.env.AUTH_PEPPER);
   return c.json(await getRun(db(c), run._id, c.var.workspace));
+});
+
+/**
+ * "Run again": starts a new run of the same workflow with the past run's input. It runs the workflow
+ * as it is now (so a fixed workflow can be tried on the input that broke it) and counts as a manual run.
+ */
+scoped.post("/runs/:id/rerun", async (c) => {
+  const past = await db(c).runs.findOne(
+    { _id: c.req.param("id"), workspaceId: c.var.workspace },
+    { projection: { workflowId: 1, status: 1, triggerType: 1, input: 1 } },
+  );
+  if (!past) return c.json({ error: "No run with that id" }, 404);
+  if (past.status !== "succeeded" && past.status !== "failed" && past.status !== "stopped") {
+    return c.json({ error: "This run hasn't finished yet. It can be run again once it has." }, 409);
+  }
+  // The storage guard empties the runs it stops; without the input there is nothing to repeat.
+  if (past.input === null) return c.json({ error: "This run's input was removed to free space, so it can't be run again." }, 409);
+  const doc = await db(c).workflows.findOne({ _id: past.workflowId, workspaceId: c.var.workspace });
+  if (!doc) return c.json({ error: "This run's workflow has been deleted" }, 404);
+  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual", runBytes(past.input, doc.steps));
+  if (blocked) return c.json({ error: blocked }, 429);
+  const runId = await createRun(db(c), { ...doc, id: doc._id }, past.triggerType, past.input, past._id);
+  c.var.later.push(advance(db(c), runId, c.env.AUTH_PEPPER));
+  return c.json({ runId }, 202);
+});
+
+// ---------- Secrets (inside one workspace) ----------
+//
+// Names and dates only: a secret's value is never sent back, to anyone.
+
+scoped.get("/secrets", async (c) => c.json(await listSecrets(db(c), c.var.workspace)));
+
+const SHARED_DEMO_SECRETS = "The demo account is shared with everyone who opens it, so it can't keep secrets. Create a free account to use them.";
+
+scoped.put("/secrets/:name", async (c) => {
+  if (c.var.session.demo) return c.json({ error: SHARED_DEMO_SECRETS }, 403);
+  const name = secretName.safeParse(c.req.param("name"));
+  if (!name.success) return c.json({ error: "Check the highlighted fields", issues: [{ path: ["name"], message: name.error.issues[0].message }] }, 400);
+  const parsed = secretInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json(issues(parsed.error), 400);
+  const res = await putSecret(db(c), c.env.AUTH_PEPPER, c.var.workspace, c.var.ownerId, name.data, parsed.data.value, Date.now());
+  if (res === "full") return c.json({ error: `A workspace can keep ${LIMITS.secretsPerWorkspace} secrets. Delete one to make room.` }, 409);
+  if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
+  return c.json(res);
+});
+
+scoped.delete("/secrets/:name", async (c) => {
+  if (c.var.session.demo) return c.json({ error: SHARED_DEMO_SECRETS }, 403);
+  const removed = await deleteSecret(db(c), c.var.workspace, c.req.param("name"));
+  return removed ? c.body(null, 204) : c.json({ error: "No secret with that name" }, 404);
 });
 
 // ---------- Version history ----------
@@ -858,7 +913,11 @@ scoped.post("/steps/test", async (c) => {
   const parsed = stepTestInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const { step, sample, workflowName } = parsed.data;
-  return c.json(await testStep(step, sample, workflowName, { demo }));
+  // The secrets the step names are filled in as in a run, and hidden in the answer the same way.
+  const names = secretRefs(step.config);
+  const unreadable = new Set<string>();
+  const secrets = names.size ? await loadSecrets(db(c), c.env.AUTH_PEPPER, c.var.workspace, names, unreadable) : {};
+  return c.json(await testStep(step, sample, workflowName, { demo, secrets, unreadable }));
 });
 
 api.route("/", scoped);
@@ -890,8 +949,19 @@ app.all(
     if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
     if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);
 
-    const text = await c.req.text();
-    if (text.length > LIMITS.runInputBytes) return c.json({ error: `Payload is larger than ${LIMITS.runInputBytes / 1000} KB` }, 413);
+    // The bytes as they were sent: a signature covers exactly those.
+    const raw = new Uint8Array(await c.req.arrayBuffer());
+    if (raw.byteLength > LIMITS.runInputBytes) return c.json({ error: `Payload is larger than ${LIMITS.runInputBytes / 1000} KB` }, 413);
+    const verify = doc.trigger.verify;
+    if (verify) {
+      // Refused calls start no run and use none of the account's run budget.
+      const secret = (await loadSecrets(db(c), c.env.AUTH_PEPPER, doc.workspaceId, [verify.secret]))[verify.secret];
+      // (The secret's name stays out of the answer: whoever holds the URL needn't learn it.)
+      if (!secret) return c.json({ error: "Signature check failed: this webhook's signing secret isn't set in its workspace, or has to be set again" }, 401);
+      const problem = await signatureProblem(verify.provider, secret, c.req.raw.headers, raw);
+      if (problem) return c.json({ error: `Signature check failed: ${problem}` }, 401);
+    }
+    const text = new TextDecoder().decode(raw);
     const type = c.req.header("content-type") ?? "";
     let body: unknown = text;
     if (type.includes("json") && text) {
@@ -901,7 +971,17 @@ app.all(
         return c.json({ error: "The body isn't valid JSON" }, 400);
       }
     } else if (type.includes("application/x-www-form-urlencoded")) {
-      body = Object.fromEntries(new URLSearchParams(text));
+      const form = Object.fromEntries(new URLSearchParams(text));
+      body = form;
+      // GitHub's default content type wraps the event as JSON text in a "payload" field. Unwrapped,
+      // `{{ trigger.body.ref }}` works whichever content type the webhook was created with.
+      if (doc.trigger.type === "webhook" && doc.trigger.verify?.provider === "github" && typeof form.payload === "string") {
+        try {
+          body = JSON.parse(form.payload);
+        } catch {
+          // Not JSON after all; keep the form fields.
+        }
+      }
     }
 
     // Headers and query are kept for templates, up to a few KB each; the whole input counts toward the
@@ -929,7 +1009,7 @@ app.all(
     if (blocked) return c.json({ error: blocked }, 429);
 
     const runId = await createRun(db(c), { ...doc, id: doc._id }, "webhook", input);
-    c.var.later.push(advance(db(c), runId));
+    c.var.later.push(advance(db(c), runId, c.env.AUTH_PEPPER));
     return c.json({ runId }, 202);
   },
 );
