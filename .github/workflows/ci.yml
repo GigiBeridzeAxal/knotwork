@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and tests
+    # Ubuntu 22.04 on purpose: MongoDB 8 refuses to start on the 6.19 kernel of newer runners
+    # (SERVER-121912), and a service container runs on the runner's kernel.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start a throwaway MongoDB
+        # Started here, not as a service, so its log doesn't bury the test output.
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --quiet --logpath /dev/null
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          docker logs mongo | tail -n 20
+          exit 1
+      - name: Type-check and build
+        run: npm run build
+      - name: Unit, engine and data tests
+        run: npm test
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:27017
+
+  scenarios:
+    name: Browser scenarios (Chromium, Firefox, WebKit)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start a throwaway MongoDB
+        # Started here, not as a service, so its log doesn't bury the test output.
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --quiet --logpath /dev/null
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          docker logs mongo | tail -n 20
+          exit 1
+      - name: Install the three browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Start Knotwork on a throwaway database
+        run: |
+          printf 'MONGODB_URI=%s\nAUTH_PEPPER=%s\n' "$MONGODB_URI" "$(openssl rand -base64 32)" > .dev.vars
+          npm run db:setup
+          npx vite --port 5173 --strictPort > vite.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:5173/api/health > /dev/null && exit 0
+            sleep 2
+          done
+          cat vite.log
+          exit 1
+      - name: Create and sign in the test accounts
+        run: |
+          node e2e/prep.mjs
+          node e2e/bst.mjs login --config e2e/knotwork.config.mjs --env e2e/accounts.env
+      - name: Run the scenarios
+        run: node e2e/bst.mjs run --config e2e/knotwork.config.mjs --out e2e/runs/ci
+      - name: Show the report
+        if: always()
+        run: |
+          cat e2e/runs/ci/REPORT.md >> "$GITHUB_STEP_SUMMARY" || true
+          tail -n 60 vite.log || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: scenario-report
+          path: e2e/runs/ci
+          retention-days: 7

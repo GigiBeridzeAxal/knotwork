@@ -156,6 +156,30 @@ MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test   # also the engine and data
 npm run build                                         # type-check and build
 ```
 
+## Tests that run by themselves
+
+Every pull request and every push to `main` runs [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on GitHub Actions:
+
+- **Build and tests**: the type-check, the build, and all tests against a throwaway MongoDB.
+- **Browser scenarios**: several test accounts, each in its own browser (Chromium, Firefox and WebKit, one of
+  them as an iPhone), play multi-user stories against a local Knotwork: two accounts that must not see each
+  other's data, two people saving the same workflow, sign-up and the demo, limits, the phone layout. The
+  scenarios and their small runner are in [`e2e/`](e2e); the report shows on the run's summary page.
+
+To run the scenarios yourself, start a local MongoDB and `npm run dev` as above, then in a second terminal:
+
+```sh
+npx playwright install chromium firefox webkit    # once
+npm run e2e
+```
+
+`e2e/prep.mjs` makes five test accounts with random passwords (kept in the gitignored `e2e/accounts.env`) and
+refuses to run against anything but a MongoDB on your own machine.
+
+[`.github/workflows/live-check.yml`](.github/workflows/live-check.yml) checks the live site every 30 minutes
+(`npm run live-check`): the front page, the API, and that the demo account opens with its workflows. If it
+fails twice in a row, it opens an issue labelled `live-check`, and closes it when the site works again.
+
 ## Deploy to Cloudflare
 
 1. Create a free **M0** cluster on [MongoDB Atlas](https://cloud.mongodb.com) and a database user with only
