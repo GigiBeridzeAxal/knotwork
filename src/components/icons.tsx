@@ -90,3 +90,11 @@ export const LogoutIcon = (p: SVGProps<SVGSVGElement>) => (
     <path d="M8 16.5H5.5A1.5 1.5 0 0 1 4 15V5a1.5 1.5 0 0 1 1.5-1.5H8M12.5 13.5 16 10l-3.5-3.5M16 10H8" />
   </Icon>
 );
+export const TemplatesIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Icon {...p}>
+    <rect x="3" y="3" width="6" height="6" rx="1.5" />
+    <rect x="11" y="3" width="6" height="6" rx="1.5" />
+    <rect x="3" y="11" width="6" height="6" rx="1.5" />
+    <path d="M14 11.500v5M11.500 14h5" />
+  </Icon>
+);

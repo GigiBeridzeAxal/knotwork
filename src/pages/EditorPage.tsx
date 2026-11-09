@@ -6,6 +6,9 @@ import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClas
 import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
 import { Link, navigate } from "../router";
 import { useFindElsewhere } from "../session";
+import { CanvasView } from "../canvas/CanvasView";
+import { stashedImport } from "../canvas/transfer";
+import { findTemplate } from "../../shared/templates";
 import { StepEditor } from "./StepEditor";
 
 const CRON_PRESETS = [
@@ -15,13 +18,35 @@ const CRON_PRESETS = [
   { label: "Mondays at 8:00 UTC", cron: "0 8 * * 1" },
 ];
 
+type View = "canvas" | "list";
+const VIEW_KEY = "knotwork.editorView";
+
+/** A new workflow starts blank, from a template (`?template=<id>`) or from an imported file (`?import`). */
+function startingPoint(): { draft: WorkflowInput; input?: unknown } {
+  const query = new URLSearchParams(location.search);
+  const template = findTemplate(query.get("template") ?? "");
+  if (template) return { draft: structuredClone(template.workflow), input: template.sampleInput };
+  const imported = query.has("import") ? stashedImport() : null;
+  return { draft: imported ?? structuredClone(BLANK) };
+}
+
+const DEFAULT_INPUT = { amount: 120, id: "order_1" };
+
 function toInput(wf: Workflow): WorkflowInput {
   return { name: wf.name, description: wf.description, enabled: wf.enabled, trigger: wf.trigger, steps: wf.steps };
 }
 
 export function EditorPage({ id }: { id: string | null }) {
   const [saved, setSaved] = useState<Workflow | null>(null);
-  const [draft, setDraft] = useState<WorkflowInput | null>(id ? null : structuredClone(BLANK));
+  const [start] = useState(() => (id ? null : startingPoint()));
+  const [draft, setDraft] = useState<WorkflowInput | null>(start?.draft ?? null);
+  const [view, setView] = useState<View>(() => {
+    try {
+      return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "canvas";
+    } catch {
+      return "canvas";
+    }
+  });
   const [openStep, setOpenStep] = useState<number | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [message, setMessage] = useState("");
@@ -31,7 +56,7 @@ export function EditorPage({ id }: { id: string | null }) {
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [showRun, setShowRun] = useState(false);
-  const [runInput, setRunInput] = useState('{\n  "amount": 120,\n  "id": "order_1"\n}');
+  const [runInput, setRunInput] = useState(() => JSON.stringify(start?.input ?? DEFAULT_INPUT, null, 2));
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
   const findElsewhere = useFindElsewhere();
@@ -159,7 +184,7 @@ export function EditorPage({ id }: { id: string | null }) {
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div className="flex min-w-0 flex-1 basis-64 flex-col gap-2">
           <Link href="/workflows" className="text-sm text-soft hover:text-text">
             ← Workflows
           </Link>
@@ -176,10 +201,33 @@ export function EditorPage({ id }: { id: string | null }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {message && (
-            <span role="status" className={cn("text-sm", message === "Saved" ? "text-soft" : "text-fail")}>
+            <span role="status" className={cn("text-sm max-sm:order-last max-sm:basis-full", message === "Saved" ? "text-soft" : "text-fail")}>
               {message}
             </span>
           )}
+          <div role="group" aria-label="View" className="flex h-11 items-center gap-1 rounded-[10px] border border-line p-1">
+            {(["canvas", "list"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                aria-pressed={view === v}
+                onClick={() => {
+                  setView(v);
+                  try {
+                    localStorage.setItem(VIEW_KEY, v);
+                  } catch {
+                    // Storage blocked: the choice lasts until the page is reloaded.
+                  }
+                }}
+                className={cn(
+                  "h-full rounded-md px-3 text-[13px] font-medium capitalize transition-colors",
+                  view === v ? "bg-raised text-text" : "text-muted hover:text-text",
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
           <Button onClick={save} disabled={busy || !dirty}>
             {saved ? (dirty ? "Save" : "Saved") : "Create"}
           </Button>
@@ -239,6 +287,35 @@ export function EditorPage({ id }: { id: string | null }) {
         </Card>
       )}
 
+      {view === "canvas" && (
+        <CanvasView
+          draft={draft}
+          saved={saved}
+          runs={runs}
+          issues={issues}
+          resetKey={version}
+          update={update}
+          sampleInput={(() => {
+            try {
+              return JSON.parse(runInput);
+            } catch {
+              return {};
+            }
+          })()}
+          triggerEditor={
+            <TriggerCard bare trigger={draft.trigger} onChange={(trigger) => update({ trigger })} hookUrl={hookUrl} cronError={cronError} />
+          }
+          onRestore={(workflow) => {
+            touched.current = true;
+            setDraft(workflow);
+            setIssues([]);
+            setVersion((v) => v + 1);
+          }}
+          onDelete={remove}
+        />
+      )}
+
+      {view === "list" && (
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
         <div className="flex flex-col">
           <TriggerCard
@@ -329,6 +406,7 @@ export function EditorPage({ id }: { id: string | null }) {
           )}
         </aside>
       </div>
+      )}
     </div>
   );
 }
@@ -346,7 +424,10 @@ function TriggerCard({
   onChange,
   hookUrl,
   cronError,
+  bare = false,
 }: {
+  /** Without the card around it, for the canvas's side panel. */
+  bare?: boolean;
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
@@ -359,9 +440,9 @@ function TriggerCard({
     { type: "schedule", label: "Schedule", blurb: "Runs on a cron, in UTC" },
   ];
   return (
-    <Card className="flex flex-col gap-4 p-4">
-      <span className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Trigger</span>
-      <fieldset className="grid gap-2 sm:grid-cols-3">
+    <div className={cn("flex flex-col gap-4", !bare && "rounded-2xl border border-line bg-graphite p-4")}>
+      {!bare && <span className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Trigger</span>}
+      <fieldset className={cn("grid gap-2", !bare && "sm:grid-cols-3")}>
         <legend className="sr-only">How this workflow starts</legend>
         {types.map((t) => (
           <label
@@ -429,6 +510,6 @@ function TriggerCard({
         ) : (
           <p className="text-[13px] text-muted">Save the workflow to get its webhook URL.</p>
         ))}
-    </Card>
+    </div>
   );
 }

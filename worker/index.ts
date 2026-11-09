@@ -47,6 +47,10 @@ import {
   updateWorkflow,
 } from "./db";
 import { DEMO_USER_ID, ensureDemo } from "./demo";
+// Version history, sample data and testing one step.
+import { stepTestInput, type Workflow } from "../shared/schema";
+import { getSample, getVersion, listVersions, saveVersion } from "./db";
+import { testStep } from "./stepTest";
 import { advance, createRun, tick } from "./engine";
 import { type Env, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
@@ -305,6 +309,7 @@ api.post("/auth/delete-account", async (c) => {
   await db(c).users.deleteOne({ _id: ownerId });
   await db(c).sessions.deleteMany({ userId: ownerId });
   await db(c).workflows.deleteMany({ ownerId });
+  await db(c).versions.deleteMany({ ownerId });
   await db(c).runs.deleteMany({ ownerId });
   await db(c).workspaces.deleteMany({ ownerId });
   c.header("set-cookie", clearedCookie(secure(c)));
@@ -398,6 +403,7 @@ scoped.post("/workflows", async (c) => {
   const res = await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now(), await newHookKey(c.env.AUTH_PEPPER));
   if (res === "full") return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
   if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
+  await keepVersion(c, res);
   return c.json(res, 201);
 });
 
@@ -413,7 +419,10 @@ scoped.put("/workflows/:id", async (c) => {
   const version = workflowSave.safeParse(body);
   if (!version.success) return c.json({ error: "Missing the version this workflow was loaded at" }, 400);
   const res = await updateWorkflow(db(c), c.req.param("id"), c.var.workspace, parsed.data, version.data.version, Date.now());
-  if (res.ok) return c.json(res.workflow);
+  if (res.ok) {
+    await keepVersion(c, res.workflow);
+    return c.json(res.workflow);
+  }
   if (res.reason === "stale") {
     return c.json({ error: "This workflow was changed somewhere else since you opened it.", current: res.current }, 409);
   }
@@ -460,6 +469,76 @@ scoped.post("/runs/:id/check", async (c) => {
   if (!run) return c.json({ error: "No run with that id" }, 404);
   await advance(db(c), run._id);
   return c.json(await getRun(db(c), run._id, c.var.workspace));
+});
+
+// ---------- Version history ----------
+//
+// Each save of a workflow keeps a copy (worker/db.ts, saveVersion), so an earlier version can be
+// looked at and loaded back into the editor. The history is pruned on every save to a fixed size.
+
+/**
+ * Keeps a copy of a workflow that was just saved. The copy is written before the response, so the
+ * history is right straight away; pruning runs after it. A copy that can't be written is logged and
+ * otherwise ignored: losing a history entry must never fail the save itself.
+ */
+async function keepVersion(c: C, wf: Workflow) {
+  try {
+    const saved = await saveVersion(db(c), wf, c.var.session.userId);
+    if (saved) c.var.later.push(saved.pruned);
+  } catch (err) {
+    console.error(`saving a version of ${wf.id}`, err);
+  }
+}
+
+/** Whether the workflow is in this workspace, for routes that answer about one workflow. */
+const workflowHere = async (c: C, id: string) =>
+  (await db(c).workflows.findOne({ _id: id, workspaceId: c.var.workspace }, { projection: { _id: 1 } })) !== null;
+
+scoped.get("/workflows/:id/versions", async (c) => {
+  const id = c.req.param("id");
+  const [here, versions] = await Promise.all([workflowHere(c, id), listVersions(db(c), id, c.var.workspace)]);
+  return here ? c.json(versions) : c.json({ error: "No workflow with that id" }, 404);
+});
+
+scoped.get("/workflows/:id/versions/:version", async (c) => {
+  const { id, version: text } = c.req.param();
+  if (!/^[1-9]\d{0,8}$/.test(text)) return c.json({ error: "A version is a whole number from 1 up" }, 400);
+  const [here, version] = await Promise.all([workflowHere(c, id), getVersion(db(c), id, c.var.workspace, Number(text))]);
+  if (!here) return c.json({ error: "No workflow with that id" }, 404);
+  return version ? c.json(version) : c.json({ error: "No saved version with that number" }, 404);
+});
+
+// ---------- Testing one step ----------
+
+/**
+ * The trigger data and step outputs of the workflow's newest finished run, to test steps with, or
+ * null when it has none yet. Cut down to LIMITS.sampleBytes (worker/db.ts, trimSample).
+ */
+scoped.get("/workflows/:id/sample", async (c) => {
+  const id = c.req.param("id");
+  const [here, sample] = await Promise.all([workflowHere(c, id), getSample(db(c), id, c.var.workspace)]);
+  return here ? c.json(sample) : c.json({ error: "No workflow with that id" }, 404);
+});
+
+/**
+ * Runs one step once against sample data and answers with what it did. Nothing is stored and a
+ * delay step doesn't wait. The step runs through executeStep, so its protections apply as in a real
+ * run: the private-address check on every redirect hop, the demo account's host allow-list, the 15 s
+ * timeout and the 256 KB response cap. Like every API route, this one sits behind the session check,
+ * the same-origin check for writes and the per-IP limiter; on top of that each account (or, for the
+ * shared demo account, each network) gets LIMITS.stepTestsPerHour tests an hour, counted before the
+ * body is even read, so a test can't be used to send unlimited requests.
+ */
+scoped.post("/steps/test", async (c) => {
+  const demo = c.var.session.demo;
+  const key = demo ? `steptest:demo:${network(c)}` : `steptest:${c.var.session.userId}`;
+  if (!(await underLimit(db(c), key, HOUR, LIMITS.stepTestsPerHour))) {
+    return c.json({ error: `You can test ${LIMITS.stepTestsPerHour} steps an hour, and you've used them. Try again after the hour turns.` }, 429);
+  }
+  const parsed = stepTestInput.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json(issues(parsed.error), 400);
+  const { step, sample, workflowName } = parsed.data;
+  return c.json(await testStep(step, sample, workflowName, { demo }));
 });
 
 api.route("/", scoped);

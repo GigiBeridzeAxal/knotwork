@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import type { WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { PlusIcon } from "../components/icons";
-import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
-import { EXAMPLES } from "../../shared/examples";
-import { Link, navigate } from "../router";
+import { Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
+import { TEMPLATES } from "../../shared/templates";
+import { ImportButton } from "./TemplatesPage";
+import { Link } from "../router";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
   if (wf.trigger.type === "schedule") return `Schedule · ${wf.trigger.cron}`;
@@ -15,22 +16,10 @@ export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
 export function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<number | null>(null);
 
   useEffect(() => {
     api.workflows().then(setWorkflows, (e) => setError(e.message));
   }, []);
-
-  async function useExample(i: number) {
-    setBusy(i);
-    try {
-      const wf = await api.createWorkflow(EXAMPLES[i].workflow);
-      navigate(`/workflows/${wf.id}`);
-    } catch (e) {
-      setError((e as Error).message);
-      setBusy(null);
-    }
-  }
 
   return (
     <div className="flex flex-col gap-12">
@@ -39,13 +28,16 @@ export function WorkflowsPage() {
           <PageTitle>Workflows</PageTitle>
           <p className="text-soft">Wire a trigger to steps. Failed steps retry on their own, and every run is logged.</p>
         </div>
-        <Link
-          href="/workflows/new"
-          className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
-        >
-          <PlusIcon className="size-4" />
-          New workflow
-        </Link>
+        <div className="flex flex-wrap items-center gap-3">
+          <ImportButton onError={setError} />
+          <Link
+            href="/workflows/new"
+            className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
+          >
+            <PlusIcon className="size-4" />
+            New workflow
+          </Link>
+        </div>
       </div>
 
       {error && <p className="text-fail">{error}</p>}
@@ -87,23 +79,31 @@ export function WorkflowsPage() {
       {workflows && workflows.length === 0 && (
         <Card className="dots flex flex-col items-center gap-3 px-6 py-14 text-center">
           <p className="font-display text-2xl font-bold">No workflows yet</p>
-          <p className="max-w-md text-soft">Start from scratch, or pick an example below and run it straight away.</p>
+          <p className="max-w-md text-soft">Start from scratch, or open a template below and run it straight away.</p>
         </Card>
       )}
 
-      <section className="flex flex-col gap-4" aria-labelledby="examples">
-        <h2 id="examples" className="font-display text-xl font-bold tracking-tight">
-          Start from an example
-        </h2>
+      <section className="flex flex-col gap-4" aria-labelledby="templates">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h2 id="templates" className="font-display text-xl font-bold tracking-tight">
+            Start from a template
+          </h2>
+          <Link href="/templates" className="text-sm text-soft hover:text-text">
+            All {TEMPLATES.length} templates
+          </Link>
+        </div>
         <div className="grid gap-4 md:grid-cols-3">
-          {EXAMPLES.map((ex, i) => (
-            <Card key={ex.title} className="flex flex-col gap-3 p-5">
-              <Eyebrow>{triggerLabel(ex.workflow)}</Eyebrow>
-              <h3 className="font-semibold">{ex.title}</h3>
-              <p className="text-sm text-soft">{ex.blurb}</p>
-              <Button className="mt-auto self-start" onClick={() => useExample(i)} disabled={busy !== null}>
-                {busy === i ? "Creating…" : "Use this"}
-              </Button>
+          {TEMPLATES.slice(0, 3).map((t) => (
+            <Card key={t.id} className="flex flex-col gap-3 p-5">
+              <Eyebrow>{triggerLabel(t.workflow)}</Eyebrow>
+              <h3 className="font-semibold">{t.title}</h3>
+              <p className="text-sm text-soft">{t.blurb}</p>
+              <Link
+                href={`/workflows/new?template=${t.id}`}
+                className="mt-auto inline-flex h-11 items-center self-start rounded-[10px] border border-edge px-4 text-sm font-medium transition-colors hover:border-muted hover:bg-graphite"
+              >
+                Use this
+              </Link>
             </Card>
           ))}
         </div>

@@ -5,12 +5,13 @@ import { api } from "../api";
 import { Link, navigate, usePath } from "../router";
 import { initials, useSession } from "../session";
 import { useWorkspace } from "../workspace";
-import { CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon } from "./icons";
+import { CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon, TemplatesIcon } from "./icons";
 import { cn, Logo } from "./ui";
 
 const NAV = [
   { href: "/home", label: "Home", icon: HomeIcon, match: (p: string) => p === "/home" },
   { href: "/workflows", label: "Workflows", icon: FlowIcon, match: (p: string) => p === "/workflows" },
+  { href: "/templates", label: "Templates", icon: TemplatesIcon, match: (p: string) => p === "/templates" },
   { href: "/runs", label: "Runs", icon: RunsIcon, match: (p: string) => p.startsWith("/runs") },
   { href: "/settings", label: "Settings", icon: SettingsIcon, match: (p: string) => p === "/settings" },
 ];
@@ -20,6 +21,7 @@ const TITLES: [RegExp, string][] = [
   [/^\/workflows\/new$/, "New workflow"],
   [/^\/workflows\/.+/, "Workflow"],
   [/^\/workflows$/, "Workflows"],
+  [/^\/templates$/, "Templates"],
   [/^\/runs\/.+/, "Run"],
   [/^\/runs$/, "Runs"],
   [/^\/settings$/, "Settings"],

@@ -9,6 +9,7 @@ import { LandingPage } from "./pages/LandingPage";
 import { RunPage } from "./pages/RunPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { TemplatesPage } from "./pages/TemplatesPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { Link, match, navigate, usePath } from "./router";
 import { SessionProvider, useSession } from "./session";
@@ -18,7 +19,9 @@ function Routes({ path }: { path: string }) {
   let p;
   if (path === "/home") return <HomePage />;
   if (path === "/workflows") return <WorkflowsPage />;
-  if ((p = match("/workflows/new", path))) return <EditorPage key="new" id={null} />;
+  // Keyed by the query too: another template, or another imported file, is another new workflow.
+  if ((p = match("/workflows/new", path))) return <EditorPage key={`new${location.search}`} id={null} />;
+  if (path === "/templates") return <TemplatesPage />;
   if ((p = match("/workflows/:id", path))) return <EditorPage key={p.id} id={p.id} />;
   if (path === "/runs") return <RunsPage />;
   if ((p = match("/runs/:id", path))) return <RunPage key={p.id} id={p.id} />;

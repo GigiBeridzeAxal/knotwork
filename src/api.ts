@@ -1,4 +1,19 @@
-import type { Me, Overview, Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type {
+  Me,
+  Overview,
+  Run,
+  RunDetail,
+  RunSample,
+  Step,
+  StepSample,
+  StepTestResult,
+  Workflow,
+  WorkflowInput,
+  WorkflowSummary,
+  WorkflowVersion,
+  WorkflowVersionDetail,
+  Workspace,
+} from "../shared/schema";
 
 /**
  * The signed-in session lives in an HttpOnly cookie the browser sends by itself. The workspace being
@@ -79,4 +94,11 @@ export const api = {
   },
   run: (id: string) => request<RunDetail>(`/runs/${id}`),
   checkRun: (id: string) => request<RunDetail>(`/runs/${id}/check`, post()),
+
+  versions: (workflowId: string) => request<WorkflowVersion[]>(`/workflows/${workflowId}/versions`),
+  version: (workflowId: string, version: number) => request<WorkflowVersionDetail>(`/workflows/${workflowId}/versions/${version}`),
+  /** Data from the workflow's latest finished run, or null when it has never run. */
+  sample: (workflowId: string) => request<RunSample | null>(`/workflows/${workflowId}/sample`),
+  testStep: (step: Step, sample: StepSample, workflowName: string) =>
+    request<StepTestResult>("/steps/test", post({ step, sample, workflowName })),
 };
