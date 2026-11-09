@@ -45,4 +45,11 @@ export const LIMITS = {
   duplicateSignupsPerHour: 10,
   /** Sessions one account can have at once; logging in again drops the oldest. */
   sessionsPerAccount: 20,
+  /** Saved versions kept per workflow (the newest ones), and the most they may add up to. */
+  versionsPerWorkflow: 20,
+  versionBytesPerWorkflow: 128_000,
+  /** Single-step tests from the editor per account per hour (per network for the shared demo). */
+  stepTestsPerHour: 60,
+  /** The most run data `GET /workflows/:id/sample` hands back for testing steps. */
+  sampleBytes: 32_000,
 } as const;

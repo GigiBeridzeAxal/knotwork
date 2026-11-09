@@ -250,6 +250,8 @@ async function runScenario(scn, specs, engines, outDir, attempt) {
         rec.error = String(e.message).split("\n").slice(0, 6).join("\n");
         rec.kind = e instanceof CheckError ? "check" : "error";
         rec.url = actor?.page?.url();
+        // Say what broke in the log too, so a failure in CI can be read without the report file.
+        console.log(`  failed step (${actor?.name ?? "no actor"}): ${title}\n    ${rec.error.replace(/\n/g, "\n    ")}\n    at ${rec.url ?? "no page"}`);
         rec.shots = await shoot(title);
         rec.events = Object.values(actors).flatMap((a) => a.events.slice(-8).map((ev) => ({ actor: a.name, ...ev })));
         if (!soft) failed = true;
