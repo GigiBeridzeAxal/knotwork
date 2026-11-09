@@ -13,18 +13,22 @@ export const LIMITS = {
   runInputBytes: 64_000,
   /** Runs started this clock hour, counted across all of an account's workspaces. */
   runsPerAccountPerHour: 60,
-  /** Runs started this clock hour across every account: the real ceiling for a free cluster. */
-  runsPerHourOverall: 600,
+  /** The same for an account in its first 24 hours. */
+  newAccountRunsPerHour: 10,
+  /** Webhook and manual runs started this clock hour across every account (schedules don't count). */
+  runsPerHourOverall: 1_000,
   minScheduleMinutes: 5,
   /** Runs (and their logs) are deleted this many days after they start, or after their last wait. */
   runHistoryDays: 7,
-  /** New accounts from one IP address (or IPv6 /64) per hour, and from everyone per day. */
+  /** New accounts from one IP address (or IPv6 /48) per hour, and from everyone per day. */
   signupsPerIpPerHour: 5,
   signupsPerDay: 300,
   /** Login attempts for one email from one IP address in 15 minutes. */
   loginAttemptsPer15Min: 10,
-  /** Demo sign-ins from one IP per hour. */
+  /** Demo sign-ins from one IP (or IPv6 /48) per hour. */
   demoLoginsPerIpPerHour: 30,
   /** Requests to the API and webhooks from one IP per minute, checked before any database work. */
-  requestsPerIpPerMinute: 120,
+  requestsPerIpPerMinute: 60,
+  /** Sessions one account can have at once; logging in again drops the oldest. */
+  sessionsPerAccount: 20,
 } as const;

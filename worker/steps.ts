@@ -1,5 +1,5 @@
 import type { FilterOp, Step } from "../shared/schema";
-import { render, renderString, renderText } from "../shared/template";
+import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
 
 export type StepResult =
   | { kind: "ok"; output: unknown; message?: string }
@@ -30,14 +30,19 @@ export interface StepOptions {
   allowHosts?: readonly string[];
 }
 
+/** Cuts text that will be stored or shown (log lines, errors), so no step can make them huge. */
+export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
+
 export async function executeStep(step: Step, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
+  // One budget for everything this step renders (URL, headers, body, output, message).
+  const budget = newBudget();
   switch (step.type) {
     case "http":
-      return http(step, scope, options);
+      return http(step, scope, options, budget);
     case "transform":
-      return { kind: "ok", output: render(step.config.output, scope) };
+      return { kind: "ok", output: render(step.config.output, scope, budget) };
     case "filter":
-      return filter(step, scope);
+      return filter(step, scope, budget);
     case "delay":
       return {
         kind: "wait",
@@ -46,8 +51,8 @@ export async function executeStep(step: Step, scope: Scope, options: StepOptions
         message: `Waiting ${formatSeconds(step.config.seconds)}`,
       };
     case "log": {
-      const message = renderText(step.config.message, scope);
-      return { kind: "ok", output: { message }, message };
+      const message = renderText(step.config.message, scope, budget);
+      return { kind: "ok", output: { message }, message: clip(message, 2_000) };
     }
   }
 }
@@ -55,14 +60,17 @@ export async function executeStep(step: Step, scope: Scope, options: StepOptions
 /** Headers that carry credentials. They're dropped when a redirect leads to another host. */
 const CREDENTIAL_HEADERS = ["authorization", "proxy-authorization", "cookie", "x-api-key"];
 
-async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options: StepOptions): Promise<StepResult> {
+const MAX_URL = 2_048;
+
+async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options: StepOptions, budget: Budget): Promise<StepResult> {
   const { config } = step;
-  const url = renderText(config.url, scope).trim();
+  const url = renderText(config.url, scope, budget).trim();
+  if (url.length > MAX_URL) return { kind: "fail", message: `The URL is longer than ${MAX_URL} characters` };
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { kind: "fail", message: `"${url}" is not a valid URL` };
+    return { kind: "fail", message: `"${clip(url, 200)}" is not a valid URL` };
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return { kind: "fail", message: "Only http and https URLs can be called" };
@@ -73,16 +81,16 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
 
   const headers = new Headers({ "user-agent": USER_AGENT });
   for (const [name, value] of Object.entries(config.headers)) {
-    headers.set(name, renderText(value, scope));
+    headers.set(name, renderText(value, scope, budget));
   }
 
   let body: string | undefined;
   if (config.body !== undefined && config.body !== "" && config.method !== "GET") {
     if (typeof config.body === "string") {
-      const rendered = renderString(config.body, scope);
+      const rendered = renderString(config.body, scope, budget);
       body = typeof rendered === "string" ? rendered : JSON.stringify(rendered);
     } else {
-      body = JSON.stringify(render(config.body, scope));
+      body = JSON.stringify(render(config.body, scope, budget));
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
     }
   }
@@ -103,8 +111,8 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
       if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
         return { kind: "fail", message: `${target.host} redirected to ${next.host}, which steps can't call` };
       }
-      // Credentials set for one host must not be handed to another one.
-      if (next.host !== target.host) for (const name of CREDENTIAL_HEADERS) headers.delete(name);
+      // Credentials set for one origin must not be handed to another one (another host, or http).
+      if (next.origin !== target.origin) for (const name of CREDENTIAL_HEADERS) headers.delete(name);
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
         method = "GET";
         sendBody = undefined;
@@ -132,7 +140,7 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     headers: { "content-type": res.headers.get("content-type") ?? "" },
     body: responseBody,
   };
-  const message = `${config.method} ${parsed.host}${parsed.pathname} → ${res.status}`;
+  const message = `${config.method} ${parsed.host}${clip(parsed.pathname, 200)} → ${res.status}`;
   if (!res.ok && config.failOnError) return { kind: "fail", message, output };
   return { kind: "ok", output, message };
 }
@@ -166,13 +174,13 @@ const OP_WORDS: Record<FilterOp, string> = {
   not_exists: "is empty",
 };
 
-function filter(step: Extract<Step, { type: "filter" }>, scope: Scope): StepResult {
+function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: Budget): StepResult {
   const { left, op, right } = step.config;
-  const leftValue = renderString(left, scope);
-  const rightText = renderText(right, scope);
+  const leftValue = renderString(left, scope, budget);
+  const rightText = renderText(right, scope, budget);
   const passed = compare(leftValue, op, rightText);
-  const shown = typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing";
-  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${rightText}"`}`;
+  const shown = clip(typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing", 300);
+  const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightText, 300)}"`}`;
   if (!passed) return { kind: "stop", message: `Stopped: ${description} is false` };
   return { kind: "ok", output: { passed: true }, message: `Passed: ${description}` };
 }

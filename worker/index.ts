@@ -64,6 +64,16 @@ app.onError((err, c) => {
 });
 
 const ip = (c: C) => ipKey(c.req.header("cf-connecting-ip") ?? "local");
+/** The network key for sign-up limits: IPv6 grouped by /48 instead of /64. */
+const network = (c: C) => ipKey(c.req.header("cf-connecting-ip") ?? "local", 48);
+/** The host of an Origin header, or "" for one that isn't a URL (e.g. "null" from a sandboxed page). */
+const hostOf = (origin: string) => {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return "";
+  }
+};
 const secure = (c: C) => new URL(c.req.url).protocol === "https:";
 const issues = (error: { issues: unknown[] }) => ({ error: "Check the highlighted fields", issues: error.issues });
 const tooLarge = (c: C) => c.json({ error: `The request is larger than ${MAX_API_BODY / 1024} KB` }, 413);
@@ -106,7 +116,7 @@ api.use("*", bodyLimit({ maxSize: MAX_API_BODY, onError: tooLarge }));
 api.use("*", async (c, next) => {
   if (c.req.method !== "GET" && c.req.method !== "HEAD") {
     const origin = c.req.header("origin");
-    if (origin && new URL(origin).host !== new URL(c.req.url).host) return c.json({ error: "Cross-site request refused" }, 403);
+    if (origin && hostOf(origin) !== new URL(c.req.url).host) return c.json({ error: "Cross-site request refused" }, 403);
   }
   return next();
 });
@@ -117,8 +127,21 @@ api.get("/limits", (c) => c.json(LIMITS));
 // ---------- Accounts ----------
 
 async function me(c: C, userId: string): Promise<Me | null> {
-  const [user, workspaces] = await Promise.all([db(c).users.findOne({ _id: userId }), listWorkspaces(db(c), userId)]);
+  const [user, found] = await Promise.all([db(c).users.findOne({ _id: userId }), listWorkspaces(db(c), userId)]);
   if (!user) return null;
+  let workspaces = found;
+  if (!workspaces.some((w) => w.personal)) {
+    // Every account keeps a Personal workspace. If a sign-up was cut off before it was made, make it now
+    // (a fixed id, so two requests at once still make one).
+    const id = `ws_p_${user._id.slice(4)}`;
+    await db(c).workspaces.updateOne(
+      { _id: id },
+      { $setOnInsert: { ownerId: user._id, name: "Personal", personal: true, createdAt: Date.now() } },
+      { upsert: true },
+    );
+    await db(c).sessions.updateMany({ userId: user._id }, { $addToSet: { workspaceIds: id } });
+    workspaces = await listWorkspaces(db(c), userId);
+  }
   return { user: { id: user._id, name: user.name, email: user.email, demo: user.demo }, workspaces };
 }
 
@@ -136,7 +159,8 @@ api.post("/auth/signup", async (c) => {
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const { name, email, password } = parsed.data;
   const now = Date.now();
-  if (!(await underLimit(db(c), `signup:ip:${ip(c)}`, HOUR, LIMITS.signupsPerIpPerHour, now))) {
+  const ipCounter = `signup:ip:${network(c)}`;
+  if (!(await underLimit(db(c), ipCounter, HOUR, LIMITS.signupsPerIpPerHour, now))) {
     return c.json({ error: "Too many new accounts from your network. Try again in an hour." }, 429);
   }
   // Only accounts that were really created count toward the daily total (added below), so failed
@@ -157,6 +181,8 @@ api.post("/auth/signup", async (c) => {
     await db(c).users.insertOne(user);
   } catch (err) {
     if ((err as { code?: number }).code === 11000) {
+      // No account was made, so this attempt doesn't count toward the network's hourly sign-ups.
+      await giveBack(db(c), ipCounter, HOUR, now);
       return c.json({ error: "There's already an account with that email. Log in instead.", issues: [{ path: ["email"], message: "Already registered" }] }, 409);
     }
     throw err;
@@ -183,7 +209,7 @@ api.post("/auth/login", async (c) => {
 });
 
 api.post("/auth/demo", async (c) => {
-  if (!(await underLimit(db(c), `demo:ip:${ip(c)}`, HOUR, LIMITS.demoLoginsPerIpPerHour))) {
+  if (!(await underLimit(db(c), `demo:ip:${network(c)}`, HOUR, LIMITS.demoLoginsPerIpPerHour))) {
     return c.json({ error: "Too many demo sign-ins from your network. Try again in an hour." }, 429);
   }
   await ensureDemo(db(c), Date.now());
@@ -242,11 +268,13 @@ api.post("/auth/delete-account", async (c) => {
   const user = await confirmPassword(c, parsed.data.password);
   if (user instanceof Response) return user;
   const ownerId = user._id;
-  await db(c).runs.deleteMany({ ownerId });
-  await db(c).workflows.deleteMany({ ownerId });
-  await db(c).workspaces.deleteMany({ ownerId });
-  await db(c).sessions.deleteMany({ userId: ownerId });
+  // The account and its sign-ins go first, so it is gone even if the request is cut off part way.
+  // Then the workflows (which stops their webhooks and schedules), then everything else.
   await db(c).users.deleteOne({ _id: ownerId });
+  await db(c).sessions.deleteMany({ userId: ownerId });
+  await db(c).workflows.deleteMany({ ownerId });
+  await db(c).runs.deleteMany({ ownerId });
+  await db(c).workspaces.deleteMany({ ownerId });
   c.header("set-cookie", clearedCookie(secure(c)));
   return c.body(null, 204);
 });
@@ -374,7 +402,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   }
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
-  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now());
+  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual");
   if (blocked) return c.json({ error: blocked }, 429);
   // A manual run's input sits under `body`, like a webhook's, so `{{ trigger.body.x }}` works for both.
   const runId = await createRun(db(c), { ...doc, id: doc._id }, "manual", { body: body?.input ?? {} });
@@ -429,7 +457,7 @@ app.all(
       body = Object.fromEntries(new URLSearchParams(text));
     }
 
-    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now());
+    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook");
     if (blocked) return c.json({ error: blocked }, 429);
 
     const headers: Record<string, string> = {};

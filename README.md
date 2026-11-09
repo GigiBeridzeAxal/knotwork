@@ -24,8 +24,8 @@ attempt is written to a run log you can open in the dashboard.
 - **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
-- **Run history.** Every attempt, a preview of its output, and how long it took. History is kept for 7 days,
-  counted from the run's last wait, so a long delay can't outlive its own run.
+- **Run history.** Every attempt, a preview of its output, and how long it took. History is kept for 7 days
+  after a run starts, or after it wakes from its last wait, so a long delay can't outlive its own run.
 - **Accounts and workspaces.** Sign up with a name, email and password (no email to confirm), or open the
   shared **demo account** with one click. Every account starts with a **Personal** workspace and can add more;
   the sidebar switches between them, and its **+** adds a workflow to the one you're in. A workspace only ever
@@ -89,11 +89,14 @@ a secret that is never stored in the database. The free plan's CPU budget allows
 pepper is what keeps a copy of the database alone from being used to guess passwords. The session is a random
 token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefix; the database stores only its
 SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
-limiter turns away more than 120 requests a minute from one IP before any database work. Sign-ups are
-limited per IP (IPv6 per /64) and per day, and login attempts per email and IP.
+limiter turns away more than 60 requests a minute from one IP before any database work. Sign-ups and demo
+sign-ins are limited per network (IPv6 per /48) and sign-ups per day, login attempts per email and IP, and an
+account keeps at most 20 sessions.
 
-**Steps.** HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
-every redirect is checked too, and a redirect to another host drops credential headers. The shared demo
+**Steps.** Everything one step renders from templates (URL, headers, body, output, message) adds up to at
+most 64 KB, so naming a big value many times (`{{ trigger }}` × 1,000) fails the step instead of producing
+megabytes. Log lines and errors are cut to 1 KB, and a run keeps its last 50 log lines. HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
+every redirect is checked too, and a redirect to another origin drops credential headers. The shared demo
 account's HTTP steps can only call a few public test APIs (`DEMO_HOSTS` in `worker/steps.ts`).
 
 **Before MongoDB.** Until accounts were added, Knotwork kept its data in Cloudflare D1, with workflows tied to
@@ -116,7 +119,12 @@ MONGODB_URI=mongodb://127.0.0.1:27017 npm run db:setup     # creates the indexes
 npm run dev                                                # http://localhost:5173
 ```
 
-The database is called `knotwork` (`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable).
+`AUTH_PEPPER` must be at least 16 characters, or sign-up and login fail. The database is called `knotwork`
+(`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable).
+
+Locally every browser has the same address, so the per-network limits (5 sign-ups an hour, 30 demo sign-ins,
+10 login attempts) are shared by everything you test. To start them over, clear the counters:
+`mongosh knotwork --eval 'db.counters.deleteMany({})'`.
 The cron doesn't fire on its own in local development: click **Check now** on a waiting run, or run one tick
 (schedules and waiting runs) with `curl http://localhost:5173/cdn-cgi/handler/scheduled`.
 
@@ -136,14 +144,21 @@ npm run build                                         # type-check and build
 
 ```sh
 npx wrangler login
-MONGODB_URI="mongodb+srv://..." npm run db:setup   # indexes, once per database
+MONGODB_URI="mongodb+srv://..." npm run db:setup   # indexes, once per database (add DNS_SERVERS=1.1.1.1
+                                                   # if it fails with "querySrv ECONNREFUSED")
 npx wrangler secret put MONGODB_URI                # paste the same connection string
-npx wrangler secret put AUTH_PEPPER                # paste a long random string, e.g. from `openssl rand -base64 32`
+npx wrangler secret put AUTH_PEPPER                # at least 16 characters; e.g. paste `openssl rand -base64 32`
 npm run deploy
 ```
 
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
 password stop working.
+
+3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
+   whose path starts with `/api/` or `/hooks/`, more than 30 per 10 seconds from one IP, block for 10 seconds.
+   The Worker's own limiter answers floods with 429, but those requests still count toward the free plan's
+   100,000 a day; the WAF rule stops them before the Worker runs. If the daily quota does run out, `/api`
+   and `/hooks` fail until 00:00 UTC while the dashboard's static files keep loading.
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
 own domain, or remove it to use the `*.workers.dev` address.
@@ -156,13 +171,17 @@ Because anyone can sign up, there are limits ([`shared/limits.ts`](shared/limits
 person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
-- 60 runs per account per clock hour (webhooks, schedules and manual runs together), and 600 per hour overall.
-- 120 requests a minute per IP address; 5 new accounts per IP address per hour and 300 a day; 10 login
-  attempts per email and IP per 15 minutes; 30 demo sign-ins per IP per hour.
+- 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
+  first 24 hours. Webhook and manual runs across everyone: 1,000 an hour. A schedule that hits its
+  account's limit is skipped for that time.
+- 60 requests a minute per IP address; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
+  300 a day; 10 login attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour;
+  20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.
-- 32 KB per workflow and 64 KB per webhook payload or test input. HTTP calls get 15s and 256 KB of response;
-  up to 5 retries per step; 16 KB of output is kept per step and 64 KB per run.
-- Runs are deleted 7 days after they start or last waited. Workflows stay until you delete them.
+- 32 KB per workflow and 64 KB per webhook payload or test input; 64 KB of rendered templates per step.
+  HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
+  64 KB per run; the last 50 log lines are kept.
+- Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
 - The demo account is shared by everyone who opens it, so its 60 runs an hour are shared too. Its HTTP steps
   can only call a few public test APIs, and it is reset every day at 03:00 UTC.
 

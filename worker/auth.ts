@@ -1,3 +1,4 @@
+import { LIMITS } from "../shared/limits";
 import type { Collections, SessionDoc, UserDoc } from "./mongo";
 import { randomId } from "./mongo";
 
@@ -63,14 +64,25 @@ export async function createSession(c: Collections, user: Pick<UserDoc, "_id" | 
   const token = randomId(32);
   const workspaceIds = (await c.workspaces.find({ ownerId: user._id }, { projection: { _id: 1 } }).toArray()).map((w) => w._id);
   const days = user.demo ? DEMO_SESSION_DAYS : SESSION_DAYS;
+  const id = await sha256(token);
   await c.sessions.insertOne({
-    _id: await sha256(token),
+    _id: id,
     userId: user._id,
     demo: user.demo,
     workspaceIds,
     createdAt: now,
     expiresAt: new Date(now + days * 86_400_000),
   });
+  // Keep at most LIMITS.sessionsPerAccount, so logging in over and over can't fill the database.
+  // (The shared demo account is the exception: everyone shares it, and its sessions last a day.)
+  if (!user.demo) {
+    const old = await c.sessions
+      .find({ userId: user._id }, { projection: { _id: 1 } })
+      .sort({ createdAt: -1 })
+      .skip(LIMITS.sessionsPerAccount)
+      .toArray();
+    if (old.length) await c.sessions.deleteMany({ _id: { $in: old.map((s) => s._id) } });
+  }
   return { token, maxAge: days * 86_400 };
 }
 
@@ -97,14 +109,17 @@ export function readCookie(header: string | undefined, name: string): string {
   return "";
 }
 
-/** The part of an IP that identifies one network: the whole IPv4 address, or an IPv6 /64. */
-export function ipKey(ip: string): string {
+/**
+ * The part of an IP that identifies one network: the whole IPv4 address, or an IPv6 prefix (/64 by
+ * default; sign-ups use /48, since anyone can get a /48 with 65,536 /64s in it for free).
+ */
+export function ipKey(ip: string, prefix: 48 | 64 = 64): string {
   if (!ip.includes(":")) return ip;
   const [head, tail = ""] = ip.toLowerCase().split("::");
   const left = head ? head.split(":") : [];
   const right = tail ? tail.split(":") : [];
   const full = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
-  return full.slice(0, 4).map((h) => h.replace(/^0+(?=.)/, "")).join(":") + "::/64";
+  return full.slice(0, prefix / 16).map((h) => h.replace(/^0+(?=.)/, "")).join(":") + `::/${prefix}`;
 }
 
 /**

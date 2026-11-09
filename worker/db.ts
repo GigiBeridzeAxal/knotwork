@@ -105,7 +105,8 @@ export async function getWorkflow(c: Collections, id: string, workspaceId: strin
 /**
  * Adds a workflow if the workspace has room. Two saves at once could both pass a count taken first,
  * so the workflow is inserted, then counted, and taken out again if it went over the limit or the
- * workspace was deleted in the meantime.
+ * workspace was deleted in the meantime. (Two saves into the last free place at the same moment can
+ * then both be refused; that errs on the safe side, and trying again works.)
  */
 export async function insertWorkflow(
   c: Collections,
@@ -189,19 +190,34 @@ export const storageFull = async (c: Collections) => (await c.counters.findOne({
  * Takes one run from the account's and everyone's budget for this clock hour. Returns why the run
  * may not start, or null when it may. The counters are atomic, so parallel requests can't overshoot.
  */
-export async function takeRunSlot(c: Collections, ownerId: string, now: number): Promise<string | null> {
-  const [full, mine] = await Promise.all([
+export async function takeRunSlot(
+  c: Collections,
+  ownerId: string,
+  now: number,
+  kind: "schedule" | "webhook" | "manual" = "manual",
+): Promise<string | null> {
+  // Accounts younger than a day get a smaller budget, so a batch of fresh sign-ups can't use up
+  // everyone's runs. (The demo's own id has no user document with a date; it keeps the full budget.)
+  const [full, user] = await Promise.all([
     storageFull(c),
-    underLimit(c, runCounter(ownerId), HOUR, LIMITS.runsPerAccountPerHour, now),
+    ownerId === DEMO_USER_ID ? null : c.users.findOne({ _id: ownerId }, { projection: { createdAt: 1 } }),
   ]);
+  const max = user && now - user.createdAt < 24 * HOUR ? LIMITS.newAccountRunsPerHour : LIMITS.runsPerAccountPerHour;
+  const mine = await underLimit(c, runCounter(ownerId), HOUR, max, now);
+  // A refused run gives its slot back, so the counter (shown as "runs this hour") counts started runs.
+  if (full || !mine) await giveBack(c, runCounter(ownerId), HOUR, now);
   if (full) return "Knotwork's free database is nearly full, so new runs are paused for a few minutes.";
   if (!mine) {
     if (ownerId === DEMO_USER_ID) {
       return `The demo account is shared by everyone trying Knotwork and has used its ${LIMITS.runsPerAccountPerHour} runs this hour. Create a free account to get your own.`;
     }
-    return `Your account has started ${LIMITS.runsPerAccountPerHour} runs this hour, which is the limit. Try again after the hour turns.`;
+    const young = max < LIMITS.runsPerAccountPerHour ? " (accounts get the full 60 after their first day)" : "";
+    return `Your account has started ${max} runs this hour, which is the limit${young}. Try again after the hour turns.`;
   }
-  if (!(await underLimit(c, "runs:all", HOUR, LIMITS.runsPerHourOverall, now))) {
+  // Scheduled runs are already limited per account and by the 5-minute minimum, so the shared ceiling
+  // applies only to runs anyone can start on demand: webhooks and manual runs. That way a burst of
+  // webhook calls can't stop everyone's schedules.
+  if (kind !== "schedule" && !(await underLimit(c, "runs:all", HOUR, LIMITS.runsPerHourOverall, now))) {
     await giveBack(c, runCounter(ownerId), HOUR, now);
     return "Knotwork is busy right now. Try again in a few minutes.";
   }

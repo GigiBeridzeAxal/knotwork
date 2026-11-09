@@ -11,7 +11,8 @@ export function RunsPage() {
   useEffect(() => {
     const load = () => api.runs().then(setRuns, (e) => setError(e.message));
     load();
-    const timer = setInterval(load, 5000);
+    // Every 15 s while the tab is visible; each request opens a database connection.
+    const timer = setInterval(() => document.visibilityState === "visible" && load(), 15_000);
     return () => clearInterval(timer);
   }, []);
 
@@ -19,7 +20,7 @@ export function RunsPage() {
     <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-2">
         <PageTitle>Runs</PageTitle>
-        <p className="text-soft">Every run from the last 14 days, newest first.</p>
+        <p className="text-soft">Every run from the last 7 days, newest first.</p>
       </div>
       {error && <p className="text-fail">{error}</p>}
       {runs && runs.length === 0 && <Card className="dots p-10 text-center text-soft">No runs yet. Run a workflow to see it here.</Card>}

@@ -6,7 +6,7 @@ import { giveBack, underLimit } from "./auth";
 import { STORAGE_FULL, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
-import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
+import { clip, DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
 
 /**
  * The engine. A run moves forward one step at a time and saves its place after every step, so
@@ -28,9 +28,12 @@ const MAX_OUTPUT_BYTES = 16_000;
 const MAX_RUN_OUTPUT_BYTES = 64_000;
 /** A log line keeps only a preview of the step's output; the full output is in `outputs`. */
 const LOG_PREVIEW_BYTES = 1_000;
-const MAX_LOGS = 100;
-/** Due runs one tick moves forward, and how many at once. */
-const DUE_PER_TICK = 25;
+const MAX_LOGS = 50;
+/** Longest log message and run error kept. Both show up in lists, so they stay short. */
+const MAX_MESSAGE = 1_000;
+const MAX_ERROR = 1_000;
+/** Due runs one tick moves forward, and how many at once. The rest wait for the next minute. */
+const DUE_PER_TICK = 10;
 const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
@@ -72,9 +75,13 @@ export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Tr
   return run._id;
 }
 
-/** Take ownership of a run that is ready to move. Returns null when it isn't ready or someone else has it. */
+/**
+ * Take ownership of a run that is ready to move. Returns null when it isn't ready or someone else has
+ * it. The claim itself is one atomic update; the run is then read without its logs, which the engine
+ * never needs and which are the biggest part of a run.
+ */
 async function claim(c: Collections, runId: string, now: number) {
-  return c.runs.findOneAndUpdate(
+  const claimed = await c.runs.updateOne(
     {
       _id: runId,
       $or: [
@@ -83,8 +90,9 @@ async function claim(c: Collections, runId: string, now: number) {
       ],
     },
     { $set: { status: "running", leaseUntil: now + LEASE_MS }, $inc: { claims: 1 } },
-    { returnDocument: "after" },
   );
+  if (claimed.modifiedCount === 0) return null;
+  return c.runs.findOne({ _id: runId }, { projection: { logs: 0 } });
 }
 
 /**
@@ -114,7 +122,7 @@ async function updateLastRun(c: Collections, run: Pick<RunDoc, "_id" | "workflow
 async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, error: string) {
   await c.runs.updateOne(
     { _id: run._id },
-    { $set: { status: "failed", error, leaseUntil: null, nextRunAt: null, finishedAt: Date.now() } },
+    { $set: { status: "failed", error: clip(error, MAX_ERROR), leaseUntil: null, nextRunAt: null, finishedAt: Date.now() } },
   );
   await updateLastRun(c, run, "failed");
 }
@@ -158,7 +166,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
     stepType: s.type,
     attempt: attempt + 1,
     status,
-    message,
+    message: message === null ? null : clip(message, MAX_MESSAGE),
     output: keepable(output, LOG_PREVIEW_BYTES).value,
     startedAt: at,
     durationMs: Date.now() - at,
@@ -169,7 +177,16 @@ async function step(c: Collections, run: RunDoc, started: number) {
     await c.runs.updateOne(
       { _id: run._id },
       {
-        $set: { status, error, stepIndex: index, attempt, claims: 0, leaseUntil: null, nextRunAt: null, finishedAt: Date.now() },
+        $set: {
+          status,
+          error: error === null ? null : clip(error, MAX_ERROR),
+          stepIndex: index,
+          attempt,
+          claims: 0,
+          leaseUntil: null,
+          nextRunAt: null,
+          finishedAt: Date.now(),
+        },
         ...(log ? { $push: pushLog(log) } : {}),
       },
     );
@@ -272,8 +289,10 @@ async function inBatches<T>(items: T[], limit: number, work: (item: T) => Promis
  * runs go first; past STORAGE_FULL_BYTES new runs and sign-ups pause until the next check.
  */
 export async function guardStorage(c: Collections, db: Db, now: number) {
-  const stats = (await db.stats()) as { dataSize?: number; storageSize?: number; indexSize?: number };
-  const used = Math.max(stats.dataSize ?? 0, stats.storageSize ?? 0) + (stats.indexSize ?? 0);
+  // Atlas counts data plus indexes toward the 512 MB. (storageSize includes space freed by deletes,
+  // which an M0 cluster can't compact, so it would never come back down.)
+  const stats = (await db.stats()) as { dataSize?: number; indexSize?: number };
+  const used = (stats.dataSize ?? 0) + (stats.indexSize ?? 0);
   if (used > STORAGE_PRUNE_BYTES) {
     const old = await c.runs
       .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
@@ -304,7 +323,8 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
   const minuteOfHour = new Date(minute).getUTCMinutes();
   let scheduled = 0;
 
-  // Only schedules this minute could fire: never marked, or marked before this minute.
+  // Only schedules this minute could fire: never marked, or marked before this minute. The scan reads
+  // just the cron; a workflow's steps are loaded only when it fires.
   const schedules = await c.workflows
     .find(
       {
@@ -312,25 +332,30 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
         enabled: true,
         $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }],
       },
-      { projection: { _id: 1, name: 1, workspaceId: 1, ownerId: 1, trigger: 1, steps: 1 } },
+      { projection: { _id: 1, trigger: 1 } },
     )
     .toArray();
 
-  for (const wf of schedules) {
+  for (const { _id, trigger } of schedules) {
     try {
-      const trigger = wf.trigger as Extract<Trigger, { type: "schedule" }>;
-      if (!cronMatches(parseCron(trigger.cron), new Date(minute))) continue;
+      if (!cronMatches(parseCron((trigger as Extract<Trigger, { type: "schedule" }>).cron), new Date(minute))) continue;
       // Mark the minute first, so two ticks can never fire the same schedule twice.
-      const marked = await c.workflows.updateOne(
-        { _id: wf._id, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
+      const wf = await c.workflows.findOneAndUpdate(
+        { _id, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
         { $set: { lastScheduledAt: minute } },
+        { returnDocument: "after" },
       );
-      if (marked.modifiedCount === 0) continue;
-      if (await takeRunSlot(c, wf.ownerId, now)) continue;
+      if (!wf) continue;
+      // A schedule that hits the account's hourly limit is skipped for this time; the log says why.
+      const blocked = await takeRunSlot(c, wf.ownerId, now, "schedule");
+      if (blocked) {
+        console.log(`schedule ${_id} skipped: ${blocked}`);
+        continue;
+      }
       await createRun(c, { ...wf, id: wf._id }, "schedule", { scheduledFor: new Date(minute).toISOString() });
       scheduled += 1;
     } catch (err) {
-      console.error(`schedule ${wf._id}`, err);
+      console.error(`schedule ${_id}`, err);
     }
   }
 

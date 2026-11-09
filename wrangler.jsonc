@@ -16,9 +16,11 @@
   // Run the Worker near the database instead of near the visitor: each request opens a database
   // connection, and the handshake is several round trips.
   "placement": { "mode": "smart" },
-  // Cloudflare's free rate limiter: 120 requests a minute per IP (or IPv6 /64) to /api and /hooks,
+  // Cloudflare's free rate limiter: 60 requests a minute per IP (or IPv6 /64) to /api and /hooks,
   // turned away before the Worker opens a database connection. Matches LIMITS.requestsPerIpPerMinute.
-  "ratelimits": [{ "name": "IP_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }],
+  // (Turned-away requests still count toward the 100k a day; see "Deploy" in the README for the
+  // free WAF rule that stops floods before they reach the Worker.)
+  "ratelimits": [{ "name": "IP_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }],
   // Every minute: start scheduled workflows and resume runs that are waiting on a retry or a delay.
   "triggers": { "crons": ["* * * * *"] },
   // Served at knotwork.gigiberidze.com. Cloudflare creates the DNS record and certificate on deploy.

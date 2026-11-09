@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderText } from "../shared/template";
+import { render, renderText, TemplateTooLarge } from "../shared/template";
 import { cookieName, hashPassword, ipKey, readCookie, sessionCookie, verifyPassword } from "../worker/auth";
 import { keepable } from "../worker/engine";
 import { DEMO_HOSTS, executeStep, privateHost } from "../worker/steps";
@@ -34,6 +34,7 @@ describe("rate-limit keys", () => {
     expect(ipKey("2001:db8:1:2:bbbb:cccc:dddd:eeee")).toBe("2001:db8:1:2::/64");
     expect(ipKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
     expect(ipKey("203.0.113.9")).toBe("203.0.113.9");
+    expect(ipKey("2001:db8:1:2:aaaa::1", 48)).toBe("2001:db8:1::/48");
   });
 });
 
@@ -102,6 +103,22 @@ describe("http steps", () => {
 });
 
 describe("templates", () => {
+  it("fail fast instead of building megabytes when one big value is named many times", () => {
+    const scope = { trigger: { text: "x".repeat(60_000) } };
+    const started = performance.now();
+    expect(() => renderText("{{trigger}}".repeat(2_900), scope)).toThrow(TemplateTooLarge);
+    expect(() => render({ a: Array(2_900).fill("{{ trigger }}") }, scope)).toThrow(TemplateTooLarge);
+    expect(performance.now() - started).toBeLessThan(200);
+    // Within the budget, rendering works as before.
+    expect(renderText("{{ trigger.text }}!", { trigger: { text: "hi" } })).toBe("hi!");
+  });
+
+  it("make a step fail with a clear message, not crash", async () => {
+    const step = { id: "a", name: "Log", type: "log" as const, retry: { max: 0, backoffSeconds: 5 }, config: { message: "{{trigger}}".repeat(181) } };
+    const scope = { trigger: "y".repeat(60_000), steps: {}, run: { id: "r", startedAt: "" }, workflow: { id: "w", name: "w" } };
+    await expect(executeStep(step, scope)).rejects.toThrow(/more than 64 KB/);
+  });
+
   it("stay fast on input built to make regexes backtrack", () => {
     const evil = "{{" + " ".repeat(20_000) + "x";
     const started = performance.now();
