@@ -3,7 +3,7 @@ import { cronMatches, nextFire, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
 import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
-import { runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
+import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
 import { clip, DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
@@ -114,14 +114,20 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
     text = JSON.stringify(value) ?? "null";
   } catch (err) {
     const note = { unsaved: true, reason: `The output couldn't be saved: ${(err as Error).message}` };
-    return { value: note, bytes: JSON.stringify(note).length };
+    return { value: note, bytes: utf8Bytes(JSON.stringify(note)) };
   }
-  if (text.length > max) {
-    const cut = { truncated: true, preview: text.slice(0, max) };
-    return { value: cut, bytes: max + 40 };
+  // Sizes are UTF-8 bytes, as stored: a character can take up to 4.
+  const bytes = utf8Bytes(text);
+  if (bytes > max) {
+    const preview = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, max)).replace(/\uFFFD$/, "");
+    return { value: { truncated: true, preview }, bytes: max + 40 };
   }
-  return { value: JSON.parse(text), bytes: text.length };
+  return { value: JSON.parse(text), bytes };
 }
+
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+/** About what a log entry adds to its run. */
+const logBytes = (log: LogDoc) => utf8Bytes(JSON.stringify(log));
 
 async function updateLastRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, status: Run["status"]) {
   await c.workflows.updateOne({ _id: run.workflowId, "lastRun.id": run._id }, { $set: { "lastRun.status": status } });
@@ -179,9 +185,13 @@ async function step(c: Collections, run: RunDoc, started: number) {
     startedAt: at,
     durationMs: Date.now() - at,
   });
+  const pool = run.triggerType === "schedule" ? "schedule" : "demand";
   const pushLog = (log: LogDoc) => ({ logs: { $each: [log], $slice: -MAX_LOGS } });
+  // Logs of retries, stops and failures are counted too, but never refused: the run is ending or pausing.
+  const countLog = (log?: LogDoc) => (log ? chargeRunBytes(c, run.ownerId, pool, logBytes(log), Date.now(), false) : null);
 
   const finish = async (status: Run["status"], error: string | null, log?: LogDoc) => {
+    await countLog(log);
     await c.runs.updateOne(
       { _id: run._id },
       {
@@ -204,6 +214,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
   // A waiting run is kept for the full history period after it wakes up, so a week-long delay
   // can't outlive its own run.
   const park = async (nextRunAt: number, log?: LogDoc) => {
+    await countLog(log);
     await c.runs.updateOne(
       { _id: run._id },
       {
@@ -242,8 +253,15 @@ async function step(c: Collections, run: RunDoc, started: number) {
           await finish("failed", `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`, entry(current, "failed", at, "Output too large"));
           return;
         }
-        scope.steps[current.id] = kept.value;
         const log = entry(current, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, kept.value);
+        // What this step stores counts against the same hourly byte budgets as the run's start, before
+        // it's written, so outputs can't store more than the budgets allow.
+        const noRoom = await chargeRunBytes(c, run.ownerId, pool, kept.bytes + logBytes(log), Date.now());
+        if (noRoom) {
+          await finish("failed", `${current.name}: ${noRoom}`, entry(current, "failed", at, "No room this hour"));
+          return;
+        }
+        scope.steps[current.id] = kept.value;
         index += 1;
         attempt = 0;
         const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };

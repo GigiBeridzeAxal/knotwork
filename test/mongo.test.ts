@@ -154,7 +154,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await takeRunSlot(c, "usr_fair_quiet", now, "webhook")).toBeNull();
   });
 
-  it("limits what new runs may store per hour, per account and overall", async () => {
+  it("limits what runs may store per hour, per account and per pool", async () => {
     await Promise.all([account("usr_bytes"), account("usr_bytes2"), account("usr_bytes3")]);
     const now = Date.now();
     const results = [];
@@ -162,11 +162,28 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     // 4 MB an hour per account: 32 runs of 123 KB, then refused, with the slot given back.
     expect(results.filter((r) => r === null)).toHaveLength(32);
     expect(results[32]).toMatch(/4 MB/);
-    // Past half of the overall budget, an account that stored more than 1 MB this hour waits.
-    await bump(c, "runbytes:all", 3_600_000, now, 30_000_000);
-    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 900_000)).toBeNull();
-    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 200_000)).toMatch(/space/);
+    // Past half of the webhook and manual pool, an account that stored more than 200 KB this hour waits ...
+    await bump(c, "runbytes:demand", 3_600_000, now, 30_000_000);
+    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 150_000)).toBeNull();
+    expect(await takeRunSlot(c, "usr_bytes2", now, "webhook", 100_000)).toMatch(/space/);
+    // ... but its schedules, in their own pool, and a quiet account still run.
+    expect(await takeRunSlot(c, "usr_bytes2", now, "schedule", 10_000)).toBeNull();
     expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
+  });
+
+  it("counts what a run stores as it runs, and stops it when there's no room", async () => {
+    await account("usr_writer");
+    const big = { id: "big", name: "Big", type: "transform" as const, retry: { max: 0, backoffSeconds: 5 }, config: { output: "€".repeat(6_000) } };
+    const { runId } = await start([big, transform("b", 1)], "usr_writer", "ws_writer");
+    await bump(c, "runbytes:usr_writer", 3_600_000, Date.now(), 3_990_000);
+    await advance(c, runId);
+    const run = await c.runs.findOne({ _id: runId });
+    expect(run?.status).toBe("failed");
+    expect(run?.error).toMatch(/4 MB/);
+    expect(run?.outputs).toEqual({});
+    // 6,000 "€" are 18 KB in UTF-8: over the 16 KB a step keeps, so it would be cut, by bytes.
+    const { keepable } = await import("../worker/engine");
+    expect(keepable("€".repeat(6_000)).bytes).toBe(16_040);
   });
 
   it("gives a new account a smaller budget, and a deleted account's workflows none", async () => {

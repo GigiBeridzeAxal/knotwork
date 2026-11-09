@@ -15,10 +15,14 @@ export const LIMITS = {
   runsPerAccountPerHour: 60,
   /** The same for an account in its first 24 hours. */
   newAccountRunsPerHour: 10,
-  /** What new runs may store (input and steps) per clock hour: per account, overall, and the fair share past half. */
+  /**
+   * What runs may store per clock hour (input, steps, outputs, logs): per account; for webhook and
+   * manual runs together; for scheduled runs; and, past half of either pool, per account.
+   */
   runBytesPerAccountPerHour: 4_000_000,
   runBytesPerHourOverall: 60_000_000,
-  fairShareRunBytesPerHour: 1_000_000,
+  scheduleRunBytesPerHour: 30_000_000,
+  fairShareRunBytesPerHour: 200_000,
   /** Runs one account can have queued or waiting (in a delay or retry) at once. */
   pendingRunsPerAccount: 100,
   /** Webhook and manual runs started this clock hour across every account (schedules don't count). */

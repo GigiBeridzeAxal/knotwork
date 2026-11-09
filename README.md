@@ -78,8 +78,8 @@ data. Every 10 minutes (every minute once past 250 MB) the cron checks how much 
 use. Past 350 MB, queued and waiting runs are stopped, keeping only the reason: first those of accounts
 holding 5 or more, biggest backlogs first, then any waiting more than a day ahead; only if that isn't
 enough are everyone's oldest finished runs deleted, and near 450 MB any pending runs. Past 450 MB it
-pauses new runs and sign-ups until there's room again. New runs may also store only so much per hour
-(their input and steps), so a burst can't fill the space between two checks.
+pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
+in all; see Limits), so even a burst can't fill the space between two checks.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
 needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
@@ -195,9 +195,11 @@ person from using up the free plans:
 - The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry).
   Accounts take turns, round robin: those it served longest ago go first, 2 runs each, oldest first, and
   spare slots go to busy accounts. Webhook and manual runs start in their own request.
-- 100 runs per account queued or waiting (in a delay or retry) at once. What new runs store (input and
-  steps): 4 MB per account per hour, 60 MB overall, and past half of that, accounts that stored more than
-  1 MB this hour wait for the next.
+- 100 runs per account queued or waiting (in a delay or retry) at once.
+- What runs store (input, steps, outputs and logs, in UTF-8 bytes, counted before each write): 4 MB per
+  account per hour; 60 MB for webhook and manual runs together and 30 MB for scheduled runs, each a pool
+  of its own; past half of a pool, accounts that stored more than 200 KB this hour wait for the next. A
+  run that hits a budget mid-way fails with the reason.
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
@@ -205,7 +207,7 @@ person from using up the free plans:
 - Schedules run at most every 5 minutes, in UTC.
 - 32 KB per workflow and 64 KB per webhook payload or test input; 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
-  64 KB per run; the last 50 log lines are kept.
+  64 KB per run (UTF-8 bytes); the last 50 log lines are kept.
 - Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
 - The demo account is shared by everyone who opens it, so its 60 runs an hour are shared too. Its HTTP steps
   can only call a few public test APIs, and it is reset every day at 03:00 UTC.
