@@ -342,7 +342,7 @@ export function CanvasView({
                   <div className="flex flex-col gap-3 border-t border-line pt-5">
                     <Button onClick={() => exportWorkflow(draft)}>Export as a file</Button>
                     <p className="text-xs leading-relaxed text-muted">
-                      A small JSON file with the trigger and steps, to keep or to import into another workspace. It holds no webhook URL and no run history.
+                      A small JSON file with the trigger and steps, to keep or to import into another workspace. It holds no webhook URL and no run history. Anything typed into a step, such as an API key in a header, is in the file, so check it before sharing.
                     </p>
                   </div>
                   {saved && (

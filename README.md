@@ -32,7 +32,8 @@ attempt is written to a run log you can open in the dashboard.
   and restore it into the editor if you want it back; it only replaces the current version when you save.
 - **Templates, import and export.** Nine ready-made workflows open on the canvas unsaved, so you can look one
   over before pressing Create. Any workflow exports as a small JSON file (trigger and steps only: no webhook
-  URL, no history) and imports through the same checks as a save.
+  URL, no history) and imports through the same checks as a save. The file holds whatever was typed into
+  the steps, API keys in headers included, so check it before sharing.
 - **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
