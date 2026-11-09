@@ -257,6 +257,31 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
   });
 
+  it("shrinks many accounts' moderate backlogs before anyone's history, and any backlog near full", { timeout: 180_000 }, async () => {
+    await c.runs.deleteMany({});
+    const pendingRun = (owner: string, i: number) =>
+      ({ _id: `run_${owner}_${i}`, ownerId: owner, workflowId: `wf_${owner}`, status: "waiting", steps: [], input: { big: "x" }, outputs: {}, logs: [], createdAt: 1 }) as never;
+    // 100 accounts holding 20 waiting runs each, and one account's finished run.
+    await c.runs.insertMany(Array.from({ length: 100 }, (_, a) => Array.from({ length: 20 }, (_, i) => pendingRun(`usr_s${a}`, i))).flat());
+    await c.runs.insertOne({ _id: "run_history", ownerId: "usr_h", status: "succeeded", createdAt: 0 } as never);
+    const sizes = [460_000_000, 300_000_000];
+    const stub = { stats: async () => ({ dataSize: sizes.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db;
+    await guardStorage(c, stub, Date.now());
+    expect(await c.runs.countDocuments({ status: "stopped", input: null })).toBe(2_000);
+    expect(await c.runs.findOne({ _id: "run_history" })).not.toBeNull();
+
+    // Many accounts with one waiting run each: history goes first, then, near full, those runs too.
+    await c.runs.deleteMany({});
+    await c.runs.insertMany(Array.from({ length: 30 }, (_, a) => pendingRun(`usr_one${a}`, 0)));
+    await c.runs.insertOne({ _id: "run_history", ownerId: "usr_h", status: "succeeded", createdAt: 0 } as never);
+    const full = [490_000_000, 490_000_000, 300_000_000];
+    const stub2 = { stats: async () => ({ dataSize: full.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db;
+    expect(await guardStorage(c, stub2, Date.now())).toBe(300_000_000);
+    expect(await c.runs.findOne({ _id: "run_history" })).toBeNull();
+    expect(await c.runs.countDocuments({ status: "stopped" })).toBe(30);
+    await c.runs.deleteMany({});
+  });
+
   it("leaves a schedule saved during the tick to be worked out again", async () => {
     const input = { ...wfInput([transform("a", 1)]), trigger: { type: "schedule" as const, cron: "0 0 1 1 *" } };
     const wf = await addWorkflow("ws_race", "usr_race", input);

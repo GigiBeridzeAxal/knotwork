@@ -36,8 +36,10 @@ const MAX_ERROR = 1_000;
 const DUE_PER_TICK = 10;
 /** At most this many of one account's runs per tick, so one account can't take every slot. */
 const DUE_PER_OWNER = 2;
-/** When the database is nearly full, accounts with more pending runs than this have them stopped (at most five a check). */
-const STOP_BACKLOG_ABOVE = 20;
+/** When the database is nearly full, accounts with at least this many pending runs have them stopped first. */
+const SHRINK_BACKLOG_FROM = 5;
+/** Most runs the storage guard stops, or deletes, in one step of one check. */
+const SHRINK_PER_CHECK = 2_000;
 const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
@@ -293,6 +295,51 @@ async function inBatches<T>(items: T[], limit: number, work: (item: T) => Promis
  * Keeps the database inside the free cluster's 512 MB. Past STORAGE_PRUNE_BYTES the oldest finished
  * runs go first; past STORAGE_FULL_BYTES new runs and sign-ups pause until the next check.
  */
+/**
+ * Stops up to SHRINK_PER_CHECK queued or waiting runs, from the accounts holding the most (at least
+ * `from` each), and drops their bulky parts: input, step list, outputs and log. The run stays, small,
+ * with the reason; its workflow shows it as stopped. Returns how many runs it stopped.
+ */
+async function shrinkBacklogs(c: Collections, now: number, from: number): Promise<number> {
+  const backlogs = await c.runs
+    .aggregate<{ _id: string; n: number }>([
+      { $match: { status: { $in: ["queued", "waiting"] } } },
+      { $group: { _id: "$ownerId", n: { $sum: 1 } } },
+      { $match: { n: { $gte: from } } },
+      { $sort: { n: -1 } },
+      { $limit: 1_000 },
+    ])
+    .toArray();
+  const owners: string[] = [];
+  let total = 0;
+  for (const b of backlogs) {
+    if (total >= SHRINK_PER_CHECK) break;
+    owners.push(b._id);
+    total += b.n;
+  }
+  if (!owners.length) return 0;
+  const pending = { ownerId: { $in: owners }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
+  const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).limit(SHRINK_PER_CHECK).toArray()).map((r) => r._id);
+  await c.runs.updateMany(
+    { _id: { $in: ids }, status: { $in: ["queued", "waiting"] } },
+    {
+      $set: {
+        status: "stopped",
+        error: "Stopped to free space: Knotwork's free database was nearly full, and this account had many runs waiting.",
+        finishedAt: now,
+        nextRunAt: null,
+        input: null,
+        steps: [],
+        outputs: {},
+        outputBytes: 0,
+        logs: [],
+      },
+    },
+  );
+  await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped" } });
+  return ids.length;
+}
+
 export async function guardStorage(c: Collections, db: Db, now: number) {
   // Atlas counts data plus indexes toward the 512 MB. (storageSize includes space freed by deletes,
   // which an M0 cluster can't compact, so it would never come back down.)
@@ -302,49 +349,24 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
   };
   let used = await measure();
   if (used > STORAGE_PRUNE_BYTES) {
-    // Waiting runs can't simply be deleted, so a few accounts could fill the space with them. First
-    // stop the pending runs of the (at most five) accounts holding the most, if they hold many, and
-    // drop the bulky parts (input, step list, outputs). The run stays, small, with the reason; its
-    // workflow shows it as stopped. Accounts with only a few in flight are left alone.
-    const top = await c.runs
-      .aggregate<{ _id: string }>([
-        { $match: { status: { $in: ["queued", "waiting"] } } },
-        { $group: { _id: "$ownerId", n: { $sum: 1 } } },
-        { $match: { n: { $gt: STOP_BACKLOG_ABOVE } } },
-        { $sort: { n: -1 } },
-        { $limit: 5 },
-      ])
-      .toArray();
-    if (top.length) {
-      const pending = { ownerId: { $in: top.map((t) => t._id) }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
-      const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).toArray()).map((r) => r._id);
-      await c.runs.updateMany(
-        { _id: { $in: ids }, status: { $in: ["queued", "waiting"] } },
-        {
-          $set: {
-            status: "stopped",
-            error: "Stopped to free space: Knotwork's free database was nearly full, and this account had the most runs waiting.",
-            finishedAt: now,
-            nextRunAt: null,
-            input: null,
-            steps: [],
-            outputs: {},
-            outputBytes: 0,
-          },
-        },
-      );
-      await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped" } });
-      used = await measure();
-    }
-    // Only then, if still needed, everyone's oldest finished runs.
+    // Waiting runs can't simply be deleted, so accounts could fill the space with them. In order,
+    // measuring again after each step, until there's room:
+    //   1. shrink the pending runs of accounts holding several, the biggest backlogs first;
+    //   2. delete everyone's oldest finished runs;
+    //   3. near the full mark, shrink any pending runs, the biggest backlogs first.
+    if (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM)) used = await measure();
     if (used > STORAGE_PRUNE_BYTES) {
       const old = await c.runs
         .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
         .sort({ createdAt: 1 })
-        .limit(2_000)
+        .limit(SHRINK_PER_CHECK)
         .toArray();
-      if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
+      if (old.length) {
+        await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
+        used = await measure();
+      }
     }
+    if (used > STORAGE_FULL_BYTES && (await shrinkBacklogs(c, now, 1))) used = await measure();
   }
   if (used > STORAGE_FULL_BYTES) {
     // Lasts until a little after the next check, which renews it while the database stays full.

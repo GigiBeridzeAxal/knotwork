@@ -12,6 +12,9 @@ export interface Env {
   IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   /** A looser per-IP limit for /hooks, which many senders share addresses for. */
   HOOK_IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  /** Per-network (IPv6 /48) limits: for /api, and a looser one for /hooks. */
+  NET_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  HOOK_NET_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   ASSETS: Fetcher;
 }
 

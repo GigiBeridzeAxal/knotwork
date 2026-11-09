@@ -27,15 +27,17 @@ describe.skipIf(!uri)("HTTP API", () => {
     cookie?: string;
     ws?: string;
     origin?: string;
+    ip?: string;
   }
 
   /** One request through the Worker, waiting for its background work (and connection close). */
-  async function call(method: string, path: string, { body, raw, cookie, ws, origin = "http://kw.test" }: Options = {}) {
+  async function call(method: string, path: string, { body, raw, cookie, ws, origin = "http://kw.test", ip }: Options = {}) {
     const pending: Promise<unknown>[] = [];
     const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException() {}, props: {} };
     const headers = new Headers({ "content-type": "application/json", origin });
     if (cookie) headers.set("cookie", cookie);
     if (ws) headers.set("x-knotwork-workspace", ws);
+    if (ip) headers.set("cf-connecting-ip", ip);
     const res = await worker.fetch(
       new Request(`http://kw.test${path}`, { method, headers, body: raw ?? (body === undefined ? undefined : JSON.stringify(body)) }),
       env,
@@ -177,6 +179,27 @@ describe.skipIf(!uri)("HTTP API", () => {
       expect(counts.size).toBe(before);
     } finally {
       env.IP_LIMITER = undefined;
+    }
+  });
+
+  it("limits a whole IPv6 /48 as well as each /64 in it", async () => {
+    const counts = new Map<string, number>();
+    const limiter = (max: number) => ({
+      async limit({ key }: { key: string }) {
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        return { success: counts.get(key)! <= max };
+      },
+    });
+    Object.assign(env, { IP_LIMITER: limiter(60), NET_LIMITER: limiter(3) });
+    try {
+      // Four different /64s of one /48: each /64 is far under 60, but the /48 allows 3.
+      const statuses = [];
+      for (let i = 1; i <= 4; i++) statuses.push((await call("GET", "/api/me", { ip: `2001:db8:1:${i}::1` })).status);
+      expect(statuses).toEqual([401, 401, 401, 429]);
+      // Another network is unaffected.
+      expect((await call("GET", "/api/me", { ip: "2001:db8:2:1::1" })).status).toBe(401);
+    } finally {
+      Object.assign(env, { IP_LIMITER: undefined, NET_LIMITER: undefined });
     }
   });
 

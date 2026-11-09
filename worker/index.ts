@@ -87,9 +87,16 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "local"]);
 // noisy sender block everyone else's webhooks.
 app.use("*", async (c, next) => {
   const from = c.req.header("cf-connecting-ip") ?? "local";
-  if (c.env.IP_LIMITER && !LOOPBACK.has(from) && !c.req.path.startsWith("/hooks/")) {
-    const { success } = await c.env.IP_LIMITER.limit({ key: ipKey(from) });
-    if (!success) return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
+  if (!LOOPBACK.has(from) && !c.req.path.startsWith("/hooks/")) {
+    // Per address (IPv6 per /64), and per network (IPv6 per /48, which anyone can get for free and
+    // which holds 65,536 /64s).
+    const [address, network] = await Promise.all([
+      c.env.IP_LIMITER?.limit({ key: ipKey(from) }),
+      c.env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
+    ]);
+    if (address?.success === false || network?.success === false) {
+      return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
+    }
   }
   return next();
 });
@@ -454,12 +461,16 @@ app.all(
     // Per webhook URL, and a much looser per-IP limit (shared by every sender behind that address),
     // so made-up keys can't be used to make unlimited database lookups from one address.
     const from = c.req.header("cf-connecting-ip") ?? "local";
-    const [perHook, perIp] = await Promise.all([
+    const remote = !LOOPBACK.has(from);
+    const [perHook, perIp, perNet] = await Promise.all([
       c.env.IP_LIMITER?.limit({ key: `hook:${key}` }),
-      LOOPBACK.has(from) ? undefined : c.env.HOOK_IP_LIMITER?.limit({ key: ipKey(from) }),
+      remote ? c.env.HOOK_IP_LIMITER?.limit({ key: ipKey(from) }) : undefined,
+      remote ? c.env.HOOK_NET_LIMITER?.limit({ key: ipKey(from, 48) }) : undefined,
     ]);
     if (perHook?.success === false) return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429);
-    if (perIp?.success === false) return c.json({ error: "Too many webhook calls from your network. Wait a minute and try again." }, 429);
+    if (perIp?.success === false || perNet?.success === false) {
+      return c.json({ error: "Too many webhook calls from your network. Wait a minute and try again." }, 429);
+    }
     const doc = await db(c).workflows.findOne({ hookKey: key });
     if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
     if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);
