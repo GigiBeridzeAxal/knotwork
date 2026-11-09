@@ -69,8 +69,8 @@ const toInvite = (doc: InviteDoc): Invite => ({
 });
 
 /**
- * A workspace's links that can still let someone in. A link is deleted when its last place is taken
- * (see `acceptInvite`), so every link that hasn't expired is open, and the count can't be fooled
+ * A workspace's links that can still let someone in. A link is marked expired when its last place is
+ * taken (see `acceptInvite`), so every link that hasn't expired is open, and the count can't be fooled
  * by a pile of used-up ones.
  */
 const openFilter = (workspaceId: string, now: number) => ({ workspaceId, expiresAt: { $gt: new Date(now) } });
