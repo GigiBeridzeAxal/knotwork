@@ -352,6 +352,12 @@ function AccountMenu() {
             <p className="px-2.5 pb-2.5 text-xs leading-relaxed text-muted">Anyone can use this account, and it resets every day at 03:00 UTC. Create your own to keep your workflows.</p>
           )}
           <div className="mx-1 my-1 h-px bg-line" />
+          {me.user.demo && (
+            <Link href="/signup" role="menuitem" onClick={close} className={cn(menuItem, "text-text")}>
+              <PlusIcon className="size-[18px] text-wire" />
+              Create your own account
+            </Link>
+          )}
           <Link href="/settings" role="menuitem" onClick={close} className={menuItem}>
             <SettingsIcon className="size-[18px] text-muted" />
             Settings
