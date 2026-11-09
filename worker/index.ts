@@ -112,8 +112,14 @@ app.use("*", async (c, next) => {
   const later: Promise<unknown>[] = [];
   c.set("mongo", mongo);
   c.set("later", later);
+  const start = Date.now();
   try {
     await next();
+    // How long the database connection took to open, and the whole request, so slow pages can be
+    // told apart from slow handshakes (browser dev tools show this under Timing).
+    const timing = [`total;dur=${Date.now() - start}`];
+    if (mongo.connected) timing.unshift(`db-connect;dur=${mongo.connected - mongo.started}`);
+    c.res.headers.append("Server-Timing", timing.join(", "));
   } finally {
     c.executionCtx.waitUntil(Promise.allSettled(later).then(() => mongo.close()));
   }

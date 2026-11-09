@@ -144,6 +144,9 @@ export class Mongo {
   private database: Db | null = null;
 
   private env: Env;
+  /** When the client was made, and when its first connection was ready (ms): for Server-Timing. */
+  started = 0;
+  connected = 0;
 
   constructor(env: Env) {
     this.env = env;
@@ -162,6 +165,8 @@ export class Mongo {
         connectTimeoutMS: 8_000,
         appName: "knotwork",
       });
+      this.started = Date.now();
+      this.client.once("connectionReady", () => (this.connected = Date.now()));
       this.database = this.client.db(this.env.MONGODB_DB || "knotwork");
       this.cols = collections(this.database);
     }
