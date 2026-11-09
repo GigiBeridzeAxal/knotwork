@@ -5,6 +5,7 @@ import type { Workflow } from "../shared/schema";
 import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
 import { ensureDemo } from "../worker/demo";
 import { advance, createRun, tick } from "../worker/engine";
+import { bump } from "../worker/auth";
 import { type Collections, collections } from "../worker/mongo";
 import { dropAll } from "./dropAll";
 
@@ -139,6 +140,19 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(results.filter((r) => r === null)).toHaveLength(60);
   });
 
+  it("past half of the shared ceiling, holds back busy accounts' on-demand runs until the hour turns", async () => {
+    await Promise.all([account("usr_fair_busy"), account("usr_fair_quiet")]);
+    const now = Date.now();
+    await bump(c, "runs:all", 3_600_000, now, 1_500);
+    const results = [];
+    for (let i = 0; i < 21; i++) results.push(await takeRunSlot(c, "usr_fair_busy", now, "webhook"));
+    expect(results.filter((r) => r === null)).toHaveLength(20);
+    const next = new Date((Math.floor(now / 3_600_000) + 1) * 3_600_000).toISOString().slice(11, 16);
+    expect(results[20]).toContain(`${next} UTC`);
+    expect(await takeRunSlot(c, "usr_fair_busy", now, "schedule")).toBeNull();
+    expect(await takeRunSlot(c, "usr_fair_quiet", now, "webhook")).toBeNull();
+  });
+
   it("gives a new account a smaller budget, and a deleted account's workflows none", async () => {
     await account("usr_new", 3_600_000);
     const now = Date.now();
@@ -151,16 +165,18 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
 
   it("shares the cron's slots between accounts, in the order runs became ready", async () => {
     const now = Date.now();
-    // 30 runs of one busy account that have been ready for a while, then one run of another account.
+    // 60 runs of one busy account that have been ready for a while (more than one query's window),
+    // then one run of another account.
     const hog = await addWorkflow("ws_hog", "usr_hog", wfInput([transform("a", 1)]));
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {
       const runId = await createRun(c, { ...hog, ownerId: "usr_hog" }, "manual", {});
       await c.runs.updateOne({ _id: runId }, { $set: { nextRunAt: now - 60_000 + i } });
     }
     const { runId: other } = await start([transform("a", 1)], "usr_other", "ws_other");
     await tick(c, now + 1_000);
     expect((await c.runs.findOne({ _id: other }))?.status).toBe("succeeded");
-    expect(await c.runs.countDocuments({ ownerId: "usr_hog", status: "succeeded" })).toBe(2);
+    // The other account's run goes first; slots nobody else needs go to the busy account.
+    expect(await c.runs.countDocuments({ ownerId: "usr_hog", status: "succeeded" })).toBe(9);
   });
 
   it("never lets parallel saves put more workflows in a workspace than the limit", async () => {

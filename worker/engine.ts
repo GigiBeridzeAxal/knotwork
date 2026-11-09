@@ -1,7 +1,7 @@
 import type { Run, Step, StepLog, Trigger, Workflow } from "../shared/schema";
 import { cronMatches, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
-import type { Db } from "mongodb";
+import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
 import { STORAGE_FULL, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
@@ -362,30 +362,42 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
     }
   }
 
-  const candidates = await c.runs
-    .find(
-      {
-        $or: [
-          { status: { $in: ["queued", "waiting"] }, nextRunAt: null },
-          { status: { $in: ["queued", "waiting"] }, nextRunAt: { $lte: now } },
-          { status: "running", leaseUntil: { $lt: now } },
-        ],
-      },
-      { projection: { _id: 1, ownerId: 1 } },
-    )
-    // In the order they became ready. A run that used up its time in one invocation is parked with
-    // nextRunAt = now, so it goes to the back of the line instead of staying at the front.
-    .sort({ nextRunAt: 1 })
-    .limit(DUE_PER_TICK * 5)
-    .toArray();
+  const ready: Filter<RunDoc> = {
+    $or: [
+      { status: { $in: ["queued", "waiting"] }, nextRunAt: null },
+      { status: { $in: ["queued", "waiting"] }, nextRunAt: { $lte: now } },
+      { status: "running", leaseUntil: { $lt: now } },
+    ],
+  };
+  // In the order they became ready, at most DUE_PER_OWNER per account. A run that used up its time in
+  // one invocation is parked with nextRunAt = now, so it goes to the back of the line. Each pass skips
+  // accounts that already have their share, so one account's backlog can't hide everyone else's runs.
+  const due: { _id: string; ownerId: string }[] = [];
+  const later: { _id: string; ownerId: string }[] = [];
   const perOwner = new Map<string, number>();
-  const due = candidates
-    .filter((run) => {
+  const capped: string[] = [];
+  const window = DUE_PER_TICK * 2;
+  for (let pass = 0; pass < 4 && due.length < DUE_PER_TICK; pass++) {
+    const skip = [...due.map((r) => r._id), ...later.map((r) => r._id)];
+    const filter: Filter<RunDoc> = pass === 0 ? ready : { $and: [ready, { ownerId: { $nin: capped } }, { _id: { $nin: skip } }] };
+    const batch = await c.runs.find(filter, { projection: { _id: 1, ownerId: 1 } }).sort({ nextRunAt: 1 }).limit(window).toArray();
+    for (const run of batch) {
       const n = perOwner.get(run.ownerId) ?? 0;
+      if (n >= DUE_PER_OWNER || due.length >= DUE_PER_TICK) {
+        later.push(run);
+        continue;
+      }
+      due.push(run);
       perOwner.set(run.ownerId, n + 1);
-      return n < DUE_PER_OWNER;
-    })
-    .slice(0, DUE_PER_TICK);
+      if (n + 1 === DUE_PER_OWNER) capped.push(run.ownerId);
+    }
+    if (batch.length < window) break;
+  }
+  // Slots nobody else needs go to the busy accounts, oldest first, so a lone busy account still gets 10.
+  for (const run of later) {
+    if (due.length >= DUE_PER_TICK) break;
+    if ((perOwner.get(run.ownerId) ?? 0) >= DUE_PER_OWNER) due.push(run);
+  }
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.
   await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));

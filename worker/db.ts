@@ -232,7 +232,10 @@ export async function takeRunSlot(
     const fair = everyone <= LIMITS.runsPerHourOverall / 2 || used <= LIMITS.fairShareRunsPerHour;
     if (everyone > LIMITS.runsPerHourOverall || !fair) {
       await Promise.all([giveBack(c, runCounter(ownerId), HOUR, now), giveBack(c, "runs:all", HOUR, now)]);
-      return "Knotwork is busy right now. Try again in a few minutes.";
+      const at = new Date((Math.floor(now / HOUR) + 1) * HOUR).toISOString().slice(11, 16);
+      return everyone > LIMITS.runsPerHourOverall
+        ? `Knotwork has started as many runs as it can this hour. New runs can start again at ${at} UTC.`
+        : `Knotwork is busy this hour, and your account has already started ${LIMITS.fairShareRunsPerHour} runs, so new ones wait until ${at} UTC. Scheduled runs keep going.`;
     }
   }
   return null;

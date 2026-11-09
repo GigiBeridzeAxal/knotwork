@@ -179,7 +179,8 @@ person from using up the free plans:
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
   limit is skipped for that time.
 - The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry), at
-  most 2 per account, in the order they became ready. Webhook and manual runs start in their own request.
+  most 2 per account while other accounts have runs waiting, in the order they became ready. Webhook and
+  manual runs start in their own request.
 - 60 requests a minute per IP address; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
   attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
