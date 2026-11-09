@@ -128,9 +128,13 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
     return res.body as { id: string; token: string; role: string; uses: number; maxUses: number; expiresAt: number };
   }
 
+  // The token goes in the body, so it never sits in a URL (or a request log).
+  const accept = (token: string, who: { cookie: string }) => call("POST", "/api/invites/accept", { cookie: who.cookie, body: { token } });
+  const preview = (token: string, who?: { cookie: string }) => call("POST", "/api/invites/preview", { cookie: who?.cookie, body: { token } });
+
   async function join(owner: Person, ws: string, who: Person, role: "editor" | "viewer") {
     const { id, token } = await invite(owner, ws, role);
-    const res = await call("POST", `/api/invites/${token}/accept`, { cookie: who.cookie });
+    const res = await accept(token, who);
     expect(res.status).toBe(200);
     await call("DELETE", `/api/workspaces/${ws}/invites/${id}`, { cookie: owner.cookie });
   }
@@ -189,12 +193,12 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
 
     it("show what they offer, let someone in once, and never change a role someone already has", async () => {
       const made = await invite(alice, team, "editor");
-      expect((await call("GET", `/api/invites/${made.token}`)).status).toBe(401);
-      const preview = await call("GET", `/api/invites/${made.token}`, { cookie: bob.cookie });
-      expect(preview.body).toEqual({ workspaceId: team, workspaceName: "Team", ownerName: "Alice", role: "editor", already: false });
+      expect((await preview(made.token)).status).toBe(401);
+      const offer = await preview(made.token, bob);
+      expect(offer.body).toEqual({ workspaceId: team, workspaceName: "Team", ownerName: "Alice", role: "editor", already: false });
 
       expect((await call("GET", "/api/workflows", { cookie: bob.cookie, ws: team })).status).toBe(404);
-      const joined = await call("POST", `/api/invites/${made.token}/accept`, { cookie: bob.cookie });
+      const joined = await accept(made.token, bob);
       expect(joined.body).toEqual({ workspaceId: team });
       const me = await call("GET", "/api/me", { cookie: bob.cookie });
       expect(me.body.workspaces).toMatchObject([
@@ -204,10 +208,10 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect((await call("GET", "/api/workflows", { cookie: bob.cookie, ws: team })).status).toBe(200);
 
       // Joining again, or the owner opening their own link, changes nothing and uses nothing up.
-      expect((await call("POST", `/api/invites/${made.token}/accept`, { cookie: bob.cookie })).status).toBe(200);
-      expect((await call("POST", `/api/invites/${made.token}/accept`, { cookie: alice.cookie })).status).toBe(200);
+      expect((await accept(made.token, bob)).status).toBe(200);
+      expect((await accept(made.token, alice)).status).toBe(200);
       const viewerLink = await invite(alice, team, "viewer");
-      expect((await call("POST", `/api/invites/${viewerLink.token}/accept`, { cookie: bob.cookie })).status).toBe(200);
+      expect((await accept(viewerLink.token, bob)).status).toBe(200);
       const list = await call("GET", `/api/workspaces/${team}/team`, { cookie: alice.cookie });
       expect(list.body.members.map((m: any) => [m.name, m.role])).toEqual([["Alice", "owner"], ["Bob", "editor"]]);
       expect(list.body.invites.map((i: any) => i.uses).sort()).toEqual([0, 1]);
@@ -219,21 +223,22 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const ws = await sharedWorkspace(alice, "Links");
       const revoked = await invite(alice, ws, "viewer");
       await call("DELETE", `/api/workspaces/${ws}/invites/${revoked.id}`, { cookie: alice.cookie });
-      expect((await call("GET", `/api/invites/${revoked.token}`, { cookie: carol.cookie })).status).toBe(404);
-      expect((await call("POST", `/api/invites/${revoked.token}/accept`, { cookie: carol.cookie })).status).toBe(404);
+      expect((await preview(revoked.token, carol)).status).toBe(404);
+      expect((await accept(revoked.token, carol)).status).toBe(404);
 
       const expired = await invite(alice, ws, "viewer");
       await raw.invites.updateOne({ _id: expired.id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
-      expect((await call("POST", `/api/invites/${expired.token}/accept`, { cookie: carol.cookie })).status).toBe(404);
+      expect((await accept(expired.token, carol)).status).toBe(404);
 
       const used = await invite(alice, ws, "viewer");
       await raw.invites.updateOne({ _id: used.id }, { $set: { uses: LIMITS.inviteUses } });
-      expect((await call("GET", `/api/invites/${used.token}`, { cookie: carol.cookie })).status).toBe(410);
-      expect((await call("POST", `/api/invites/${used.token}/accept`, { cookie: carol.cookie })).status).toBe(410);
+      expect((await preview(used.token, carol)).status).toBe(410);
+      expect((await accept(used.token, carol)).status).toBe(410);
 
       // Made-up and malformed tokens.
-      expect((await call("POST", `/api/invites/${"x".repeat(43)}/accept`, { cookie: carol.cookie })).status).toBe(404);
-      expect((await call("POST", "/api/invites/short/accept", { cookie: carol.cookie })).status).toBe(404);
+      expect((await accept("x".repeat(43), carol)).status).toBe(404);
+      expect((await accept("short", carol)).status).toBe(404);
+      expect((await call("POST", "/api/invites/accept", { cookie: carol.cookie, body: { token: { $gt: "" } } })).status).toBe(404);
       expect((await call("GET", "/api/me", { cookie: carol.cookie })).body.workspaces).toHaveLength(1);
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
@@ -243,10 +248,53 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const made = await invite(alice, ws, "viewer");
       await raw.invites.updateOne({ _id: made.id }, { $set: { maxUses: 2 } });
       const people = await Promise.all(["P", "Q", "R", "S"].map(person));
-      const results = await Promise.all(people.map((p) => call("POST", `/api/invites/${made.token}/accept`, { cookie: p.cookie })));
+      const results = await Promise.all(people.map((p) => accept(made.token, p)));
       expect(results.filter((r) => r.status === 200)).toHaveLength(2);
-      expect(results.filter((r) => r.status === 410)).toHaveLength(2);
+      // The losers see "used up" (410), or "gone" (404) once the full link has been deleted.
+      expect(results.filter((r) => r.status === 410 || r.status === 404)).toHaveLength(2);
       expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(2);
+      await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
+    });
+
+    it("a link lets each account in once: someone removed or made a viewer can't walk back in with it", async () => {
+      const ws = await sharedWorkspace(alice, "Once");
+      const link = await invite(alice, ws, "editor");
+      const [ed, gone] = [await person("Ed"), await person("Gone")];
+      expect((await accept(link.token, ed)).status).toBe(200);
+      expect((await accept(link.token, gone)).status).toBe(200);
+      // Ed is made a viewer, leaves, and tries the link he joined with to become an editor again.
+      await call("PATCH", `/api/workspaces/${ws}/members/${ed.id}`, { cookie: alice.cookie, body: { role: "viewer" } });
+      expect((await call("DELETE", `/api/workspaces/${ws}/members/${ed.id}`, { cookie: ed.cookie })).status).toBe(204);
+      expect((await accept(link.token, ed)).status).toBe(410);
+      expect((await call("GET", "/api/workflows", { cookie: ed.cookie, ws })).status).toBe(404);
+      // The owner removes Gone; the same link doesn't let them back in either.
+      expect((await call("DELETE", `/api/workspaces/${ws}/members/${gone.id}`, { cookie: alice.cookie })).status).toBe(204);
+      expect((await accept(link.token, gone)).status).toBe(410);
+      expect((await call("POST", "/api/workflows", { cookie: gone.cookie, ws, body: flow("Back") })).status).toBe(404);
+      expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(0);
+      // A fresh link from the owner does.
+      await join(alice, ws, ed, "viewer");
+      expect((await call("GET", "/api/workflows", { cookie: ed.cookie, ws })).status).toBe(200);
+      await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
+    });
+
+    it("a used-up link is deleted, so used-up links can't hide open ones from the limit", async () => {
+      const ws = await sharedWorkspace(alice, "Limit");
+      // Many links, each used up by one join.
+      for (let i = 0; i < 8; i++) {
+        const guest = await person(`Guest${i}`);
+        const link = await invite(alice, ws, "viewer");
+        await raw.invites.updateOne({ _id: link.id }, { $set: { maxUses: 1 } });
+        expect((await accept(link.token, guest)).status).toBe(200);
+        expect((await preview(link.token, mallory)).status).toBe(404);
+      }
+      expect(await raw.invites.countDocuments({ workspaceId: ws })).toBe(0);
+      const statuses = [];
+      for (let i = 0; i < LIMITS.invitesPerWorkspace + 1; i++) {
+        statuses.push((await call("POST", `/api/workspaces/${ws}/invites`, { cookie: alice.cookie, body: { role: "viewer" } })).status);
+      }
+      expect(statuses).toEqual([...Array(LIMITS.invitesPerWorkspace).fill(201), 409]);
+      expect((await call("GET", `/api/workspaces/${ws}/team`, { cookie: alice.cookie })).body.invites).toHaveLength(LIMITS.invitesPerWorkspace);
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
 
@@ -256,7 +304,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const extra = await call("POST", "/api/workspaces", { cookie: demo.cookie, body: { name: "Demo side" } });
       expect((await call("POST", `/api/workspaces/${extra.body.id}/invites`, { cookie: demo.cookie, body: { role: "viewer" } })).status).toBe(403);
       const made = await invite(alice, team, "viewer");
-      expect((await call("POST", `/api/invites/${made.token}/accept`, { cookie: demo.cookie })).status).toBe(403);
+      expect((await accept(made.token, demo)).status).toBe(403);
       expect((await call("POST", "/api/keys", { cookie: demo.cookie, body: { name: "k", workspaceId: demoWs, access: "read" } })).status).toBe(403);
       expect((await call("POST", "/api/auth/recovery-codes", { cookie: demo.cookie, body: { password: "x" } })).status).toBe(403);
       await call("DELETE", `/api/workspaces/${extra.body.id}`, { cookie: demo.cookie });
@@ -339,11 +387,30 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect((await call("DELETE", `/api/workspaces/${team}/members/${dave.id}`, { cookie: alice.cookie })).status).toBe(404);
     });
 
+    it("a webhook URL can be replaced, which ends the old one for anyone who knew it", async () => {
+      const old = wf.hookKey;
+      expect((await call("POST", `/hooks/${old}`, { body: {} })).status).toBe(202);
+      expect((await call("POST", `/api/workflows/${wf.id}/hook-key`, { cookie: carol.cookie, ws: team })).status).toBe(403);
+      expect((await call("POST", `/api/workflows/${wf.id}/hook-key`, { cookie: mallory.cookie, ws: team })).status).toBe(404);
+      const made = await call("POST", `/api/workflows/${wf.id}/hook-key`, { cookie: bob.cookie, ws: team });
+      expect(made.status).toBe(200);
+      expect(made.body.hookKey).not.toBe(old);
+      expect((await call("POST", `/hooks/${old}`, { body: {} })).status).toBe(404);
+      expect((await call("POST", `/hooks/${made.body.hookKey}`, { body: {} })).status).toBe(202);
+      const after = await call("GET", `/api/workflows/${wf.id}`, { cookie: alice.cookie, ws: team });
+      expect(after.body).toMatchObject({ hookKey: made.body.hookKey, version: wf.version });
+      wf = { ...wf, hookKey: made.body.hookKey };
+    });
+
     it("a member can leave; the owner can't, and can't be removed", async () => {
       const erin = await person("Erin");
       await join(alice, team, erin, "viewer");
       expect((await call("DELETE", `/api/workspaces/${team}/members/${alice.id}`, { cookie: erin.cookie })).status).toBe(403);
+      // The owner trying to leave is refused, and loses nothing by trying (their API keys stay).
+      const key = (await call("POST", "/api/keys", { cookie: alice.cookie, body: { name: "stays", workspaceId: team, access: "read" } })).body;
       expect((await call("DELETE", `/api/workspaces/${team}/members/${alice.id}`, { cookie: alice.cookie })).status).toBe(409);
+      expect((await call("GET", "/api/workflows", { key: key.key })).status).toBe(200);
+      await call("DELETE", `/api/keys/${key.id}`, { cookie: alice.cookie });
       expect((await call("DELETE", `/api/workspaces/${team}/members/${erin.id}`, { cookie: erin.cookie })).status).toBe(204);
       expect((await call("GET", "/api/workflows", { cookie: erin.cookie, ws: team })).status).toBe(404);
       // Leaving a workspace you were never in says nothing about it.
@@ -363,7 +430,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const crowd = [];
       for (let i = 0; i < LIMITS.membersPerWorkspace + 1; i++) crowd.push(await person(`Crowd${i}`));
       const results = [];
-      for (const p of crowd) results.push((await call("POST", `/api/invites/${made.token}/accept`, { cookie: p.cookie })).status);
+      for (const p of crowd) results.push((await accept(made.token, p)).status);
       expect(results.filter((s) => s === 200)).toHaveLength(LIMITS.membersPerWorkspace);
       expect(results.at(-1)).toBe(409);
       expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(LIMITS.membersPerWorkspace);
@@ -578,8 +645,12 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect(changed.status).toBe(204);
       gina = { ...gina, password: "gina-changed-password" };
       expect((await call("GET", "/api/workflows", { key: first })).status).toBe(401);
+      // The recovery codes went with the old password: whoever knew it can't use a code they made.
+      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(0);
+      expect((await recover(gina.email, codes[3], "attacker-password-9")).status).toBe(401);
+      codes = (await call("POST", "/api/auth/recovery-codes", { cookie: gina.cookie, body: { password: gina.password } })).body.codes;
       const second = await make();
-      const ok = await recover(gina.email, codes[3], "gina-recovered-again");
+      const ok = await recover(gina.email, codes[0], "gina-recovered-again");
       expect(ok.status).toBe(200);
       gina = { ...gina, cookie: ok.cookie, password: "gina-recovered-again" };
       expect((await call("GET", "/api/workflows", { key: second })).status).toBe(401);
@@ -593,7 +664,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect(results.map((r) => r.status).sort()).toEqual([200, 401]);
       const winner = results.find((r) => r.status === 200)!;
       gina = { ...gina, cookie: winner.cookie, password: results[0].status === 200 ? "race-password-aaa" : "race-password-bbb" };
-      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 3);
+      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 2);
     });
 
     it("making new codes ends the old ones", async () => {

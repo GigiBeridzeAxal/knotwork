@@ -29,7 +29,8 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
   const [runsThisHour, setRunsThisHour] = useState(0);
   const [runsLimit, setRunsLimit] = useState<number>(LIMITS.runsPerAccountPerHour);
   const [error, setError] = useState("");
-  const { reload } = useSession();
+  const { reload, workspace } = useSession();
+  const role = workspace.role;
 
   const refresh = useCallback(() => {
     api.overview().then(
@@ -39,14 +40,16 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
         setRunsThisHour(o.runsThisHour);
         setRunsLimit(o.runsLimit);
         setError("");
+        // The owner changed this person's role while the app was open: pick it up without a page reload.
+        if (o.role !== role) reload().catch(() => {});
       },
       (e: Error) => {
-        // The workspace was deleted (e.g. on another device): reload the list, which falls back to Personal.
+        // The workspace was deleted, or this person was removed from it: reload the list, which falls back to Personal.
         if (e instanceof ApiError && e.status === 404) reload("").catch(() => setError(e.message));
         else setError(e.message);
       },
     );
-  }, [reload]);
+  }, [reload, role]);
 
   useEffect(refresh, [refresh, path]);
   useEffect(() => {

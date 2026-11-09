@@ -83,8 +83,9 @@ export const api = {
     request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
   /** Removes a member; with your own id, leaves the workspace. */
   removeMember: (workspaceId: string, userId: string) => request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "DELETE" }),
-  invite: (token: string) => request<InvitePreview>(`/invites/${encodeURIComponent(token)}`),
-  acceptInvite: (token: string) => request<{ workspaceId: string }>(`/invites/${encodeURIComponent(token)}/accept`, post()),
+  // The token goes in the body, so it stays out of request logs.
+  invite: (token: string) => request<InvitePreview>("/invites/preview", post({ token })),
+  acceptInvite: (token: string) => request<{ workspaceId: string }>("/invites/accept", post({ token })),
 
   apiKeys: () => request<ApiKey[]>("/keys"),
   createApiKey: (input: { name: string; workspaceId: string; access: ApiKeyAccess }) => request<NewApiKey>("/keys", post(input)),
@@ -105,6 +106,8 @@ export const api = {
   createWorkflow: (input: WorkflowInput) => request<Workflow>("/workflows", post(input)),
   updateWorkflow: (id: string, input: WorkflowInput, version: number) =>
     request<Workflow>(`/workflows/${id}`, { method: "PUT", body: JSON.stringify({ ...input, version }) }),
+  /** Replaces the workflow's webhook URL; the old one stops working. */
+  newHookKey: (id: string) => request<{ hookKey: string }>(`/workflows/${id}/hook-key`, post()),
   deleteWorkflow: (id: string) => request<void>(`/workflows/${id}`, { method: "DELETE" }),
   runWorkflow: (id: string, input: unknown) => request<{ runId: string }>(`/workflows/${id}/run`, post({ input })),
   runs: (workflowId?: string, limit?: number) => {

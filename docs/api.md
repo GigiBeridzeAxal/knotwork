@@ -11,7 +11,8 @@ Every request and response body is JSON. Times are milliseconds since 1970-01-01
 ## Make a key
 
 1. Sign in and open **Settings > API keys**.
-2. Give the key a name (up to 40 characters), pick one workspace, and pick **read** or **write**.
+2. Switch to the workspace the key is for (a key works in the workspace you're in), give the key a name
+   (up to 40 characters), and pick **Read only** or **Read and write**.
 3. Copy the key. It is shown once. Knotwork stores only its SHA-256 hash, so it can't show it again. If
    you lose it, revoke it and make a new one.
 
@@ -53,8 +54,9 @@ server or a script, and keep the key out of anything a browser downloads.
 
 ## Endpoints
 
-A key can call only these. Anything else under `/api` (accounts, passwords, workspaces, members, invite
-links, other keys) answers 403.
+A key can call only these. Account, workspace, member, invite and key routes answer `403` to a key. A few
+public routes (`/health`, `/limits`, and sign-up, log-in and recovery under `/auth/`) ignore the key and
+answer as they would for anyone.
 
 | Method | Path | Access | What it does |
 | --- | --- | --- | --- |
@@ -64,6 +66,7 @@ links, other keys) answers 403.
 | `PUT` | `/workflows/:id` | write | Replace a workflow |
 | `DELETE` | `/workflows/:id` | write | Delete a workflow and its runs |
 | `POST` | `/workflows/:id/run` | write | Start a run |
+| `POST` | `/workflows/:id/hook-key` | write | Make a new webhook URL; the old one stops working |
 | `GET` | `/runs` | read | List runs, newest first |
 | `GET` | `/runs/:id` | read | Get one run with its log |
 | `POST` | `/runs/:id/check` | write | Move a waiting run on now, if it is due |
@@ -144,11 +147,20 @@ workspace. Runs are deleted 7 days after they start (or after they wake from the
 For a run that is `waiting` (in a delay or before a retry): if its time has come, moves it on now
 instead of at the next minute's tick. Returns the run as `GET /runs/:id` does.
 
+### `POST /workflows/:id/hook-key`
+
+Gives the workflow a new webhook key, so its old webhook URL stops working at once. Use it when someone
+who has seen the URL shouldn't be able to start runs any more, for example an editor who was removed. No
+body. Answers `200` with `{ "hookKey": "..." }`, or `404`. The new URL is
+`/hooks/<workflow id>/<hookKey>`; update whatever calls the old one.
+
 ### `GET /overview`
 
 ```json
-{ "workflows": [], "runs": [], "runsThisHour": 4, "runsLimit": 60 }
+{ "role": "owner", "workflows": [], "runs": [], "runsThisHour": 4, "runsLimit": 60 }
 ```
+
+`role` is the role of the key's maker in the workspace right now (`owner`, `editor` or `viewer`).
 
 `workflows` are summaries as in `GET /workflows`; `runs` are the workspace's newest 100 run summaries.
 `runsThisHour` and `runsLimit` are for the workspace's owner, whose account every run is counted against.
@@ -224,7 +236,8 @@ What the API returns for a workflow:
 }
 ```
 
-`lastRun` is `null` before the first run. `hookKey` is the secret part of the webhook URL: anyone who has
+`lastRun` is `null` before the first run; `lastRun.error` is `"space"` when the storage guard stopped that
+run, and absent otherwise. `hookKey` is the secret part of the webhook URL: anyone who has
 it can start runs. A read key, or a write key whose maker is a viewer, always gets `"hookKey": ""`.
 
 Anyone who can read a workflow sees all its step settings, including any headers or tokens written into
@@ -240,7 +253,7 @@ A run summary (in `GET /runs` and `GET /overview`):
 | `status` | `queued`, `running`, `waiting`, then one of `succeeded`, `failed`, `stopped` |
 | `triggerType` | `manual`, `webhook` or `schedule` |
 | `stepIndex` | Index of the step it is on (0-based) |
-| `attempt` | Attempt number of that step |
+| `attempt` | Retries of the current step so far (0 on its first attempt) |
 | `nextRunAt` | When a `waiting` run moves on next, or `null` |
 | `error` | Why it failed or stopped, or `null` |
 | `createdAt`, `finishedAt` | `finishedAt` is `null` until it finishes |
@@ -250,7 +263,7 @@ A run summary (in `GET /runs` and `GET /overview`):
 | Field | Meaning |
 | --- | --- |
 | `input` | What started it. For `POST /workflows/:id/run`: `{ "body": <your input> }`. For a webhook: `{ "method", "query", "headers", "body" }` |
-| `logs` | One entry per attempt: `stepId`, `stepName`, `stepType`, `attempt`, `status` (`ok`, `failed`, `retrying`, `stopped`, `waiting`), `message`, `output`, `startedAt`, `durationMs` |
+| `logs` | One entry per attempt: `id`, `stepId`, `stepName`, `stepType`, `attempt`, `status` (`ok`, `failed`, `retrying`, `stopped`, `waiting`), `message`, `output`, `startedAt`, `durationMs` |
 | `stepCount` | How many steps the run has |
 
 A log entry's `output` is the step's output, cut to a preview when it is over 1,000 bytes:
@@ -274,7 +287,7 @@ field and a `message`. A `409` from `PUT` has `current` instead.
 | --- | --- |
 | `400` | The body isn't valid JSON or doesn't match the schema; `PUT` without `version` |
 | `401` | The key is missing its `Bearer` prefix, malformed, made up or revoked, or its maker no longer has access to the workspace |
-| `403` | A read key (or a key whose maker is a viewer) tried to change something or start a run; the path isn't one a key can call; `x-knotwork-workspace` names another workspace; or the request came with an `Origin` header from another site |
+| `403` | A read key (or a key whose maker is a viewer) tried to change something or start a run; the path isn't one a key can call; `x-knotwork-workspace` names another workspace; or a request that changes something (not `GET`) came with an `Origin` header from another site |
 | `404` | No workflow or run with that id in the key's workspace |
 | `409` | `PUT` with an old `version`; or the workspace already has 10 workflows |
 | `413` | The body is over 64 KB, or a run's body is over 64,000 characters |

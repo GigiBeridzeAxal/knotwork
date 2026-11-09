@@ -40,7 +40,7 @@ export function RecoveryCodes() {
       `Account: ${me.user.email}`,
       `Made: ${new Date().toISOString().slice(0, 10)}`,
       "",
-      "Each code works once. Use one at /recover to set a new password.",
+      `Each code works once. Use one at ${location.origin}/recover to set a new password.`,
       "",
       ...list,
       "",

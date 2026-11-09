@@ -9,7 +9,7 @@ export const pill =
   "inline-flex h-11 w-full items-center justify-center gap-2 rounded-full px-5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50";
 
 /** Where to go after signing in: the page that sent the user here, if it's one of ours. */
-function nextPath() {
+export function nextPath() {
   const next = new URLSearchParams(location.search).get("next") ?? "";
   return next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/login") && !next.startsWith("/signup") && !next.startsWith("/recover") ? next : "/home";
 }
@@ -108,7 +108,7 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
             />
           </Field>
           {!signup && (
-            <Link href="/recover" className="-mt-1 w-fit text-[13px] text-muted underline decoration-edge underline-offset-4 hover:text-text hover:decoration-text">
+            <Link href={`/recover${keepNext}`} className="-mt-1 w-fit text-[13px] text-muted underline decoration-edge underline-offset-4 hover:text-text hover:decoration-text">
               Forgot your password?
             </Link>
           )}

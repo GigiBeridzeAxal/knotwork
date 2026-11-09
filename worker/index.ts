@@ -6,7 +6,7 @@ import {
   apiKeyInput,
   canEdit,
   inviteInput,
-  inviteToken,
+  inviteTokenInput,
   loginInput,
   type Me,
   passwordChange,
@@ -173,7 +173,7 @@ const hub = (env: Env) => env.HUB!.get(env.HUB!.idFromName("main"), { locationHi
 /** The hub's cron entry. The Worker only forwards /api/ and /hooks/ paths, so visitors can't reach it. */
 export const HUB_TICK = "https://hub.internal/__hub/tick";
 
-// ---------- API (used by the dashboard) ----------
+// ---------- API (the dashboard with a session cookie; scripts with an API key) ----------
 
 const api = new Hono<{ Bindings: Env; Variables: Vars }>();
 
@@ -315,11 +315,11 @@ api.post("/auth/recover", async (c) => {
     recoveryCodeHash(c.env.AUTH_PEPPER, user?._id ?? "usr_unknown", code),
     hashPassword(password, c.env.AUTH_PEPPER),
   ]);
-  const used =
-    user && !user.demo && user.password
-      ? await db(c).users.updateOne({ _id: user._id, recoveryCodes: codeHash }, { $pull: { recoveryCodes: codeHash }, $set: { password: next } })
-      : null;
-  if (!user || !used?.modifiedCount) return c.json({ error: "That email and recovery code don't match an account." }, 401);
+  // An unknown email (or the demo account) gets the same update against an id nobody has, so it
+  // makes the same database round trip as a real attempt.
+  const target = user && !user.demo && user.password ? user._id : "usr_unknown";
+  const used = await db(c).users.updateOne({ _id: target, recoveryCodes: codeHash }, { $pull: { recoveryCodes: codeHash }, $set: { password: next } });
+  if (!user || !used.modifiedCount) return c.json({ error: "That email and recovery code don't match an account." }, 401);
   // Whoever had a way in before is out: every session, and every API key the account made.
   await Promise.all([
     giveBack(db(c), key, 15 * MINUTE),
@@ -383,13 +383,18 @@ async function confirmPassword(c: C, password: string): Promise<Response | UserD
   return user;
 }
 
-/** Changes the password, signs out every other device and revokes the account's API keys. */
+/** Changes the password, signs out every other device, and ends the account's API keys and recovery codes. */
 api.post("/auth/password", async (c) => {
   const parsed = passwordChange.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const user = await confirmPassword(c, parsed.data.current);
   if (user instanceof Response) return user;
-  await db(c).users.updateOne({ _id: user._id }, { $set: { password: await hashPassword(parsed.data.next, c.env.AUTH_PEPPER) } });
+  // The recovery codes go too: someone who knew the old password could have made their own set, and
+  // would otherwise still have a way in after the change. The owner makes new ones in Settings.
+  await db(c).users.updateOne(
+    { _id: user._id },
+    { $set: { password: await hashPassword(parsed.data.next, c.env.AUTH_PEPPER) }, $unset: { recoveryCodes: "" } },
+  );
   // A key made from a borrowed session would otherwise outlive the password change.
   await Promise.all([
     db(c).sessions.deleteMany({ userId: user._id, _id: { $ne: c.var.session._id } }),
@@ -538,10 +543,13 @@ api.delete("/workspaces/:id/members/:user", async (c) => {
 const INVITE_GONE = "This invite link doesn't work any more. It may have expired or been revoked. Ask for a new one.";
 const INVITE_USED = "Everyone this invite link could let in has joined. Ask for a new one.";
 
+// The token travels in the request body, not the URL, so it never lands in request logs.
+const tokenOf = async (c: C) => inviteTokenInput.safeParse(await c.req.json().catch(() => null));
+
 /** What an invite link offers, shown before joining. */
-api.get("/invites/:token", async (c) => {
-  const token = inviteToken.safeParse(c.req.param("token"));
-  const found = token.success ? await findInvite(db(c), token.data, Date.now()) : ({ ok: false, reason: "gone" } as const);
+api.post("/invites/preview", async (c) => {
+  const input = await tokenOf(c);
+  const found = input.success ? await findInvite(db(c), input.data.token, Date.now()) : ({ ok: false, reason: "gone" } as const);
   if (!found.ok) return found.reason === "used" ? c.json({ error: INVITE_USED }, 410) : c.json({ error: INVITE_GONE }, 404);
   const { invite, workspace } = found;
   const [owner, access] = await Promise.all([
@@ -551,14 +559,17 @@ api.get("/invites/:token", async (c) => {
   return c.json({ workspaceId: workspace._id, workspaceName: workspace.name, ownerName: owner?.name ?? "Someone", role: invite.role, already: access !== null });
 });
 
-api.post("/invites/:token/accept", async (c) => {
+api.post("/invites/accept", async (c) => {
   // Everyone shares the demo account, so letting it join would open the workspace to anyone.
   if (c.var.session.demo) return c.json({ error: DEMO_SHARED }, 403);
-  const token = inviteToken.safeParse(c.req.param("token"));
-  const res = token.success ? await acceptInvite(db(c), token.data, c.var.session.userId, Date.now()) : ({ ok: false, reason: "gone" } as const);
+  const input = await tokenOf(c);
+  const res = input.success ? await acceptInvite(db(c), input.data.token, c.var.session.userId, Date.now()) : ({ ok: false, reason: "gone" } as const);
   if (res.ok) return c.json({ workspaceId: res.workspaceId });
   if (res.reason === "gone") return c.json({ error: INVITE_GONE }, 404);
   if (res.reason === "used") return c.json({ error: INVITE_USED }, 410);
+  if (res.reason === "spent") {
+    return c.json({ error: "You already joined with this invite link once, and a link lets each account in once. Ask the owner for a new one." }, 410);
+  }
   if (res.reason === "full") {
     return c.json({ error: `This workspace already has ${LIMITS.membersPerWorkspace} members, which is the most it can have.` }, 409);
   }
@@ -666,7 +677,7 @@ scoped.get("/overview", async (c) => {
     counterValue(db(c), runCounter(c.var.ownerId), HOUR, now),
     runLimit(db(c), c.var.ownerId, now),
   ]);
-  return c.json({ workflows: workflows.map((wf) => shown(c, wf)), runs, runsThisHour, runsLimit: runsLimit ?? 0 });
+  return c.json({ role: c.var.role, workflows: workflows.map((wf) => shown(c, wf)), runs, runsThisHour, runsLimit: runsLimit ?? 0 });
 });
 
 scoped.post("/workflows", async (c) => {
@@ -695,6 +706,19 @@ scoped.put("/workflows/:id", async (c) => {
     return c.json({ error: "This workflow was changed somewhere else since you opened it.", current: res.current }, 409);
   }
   return c.json({ error: "No workflow with that id" }, 404);
+});
+
+/**
+ * Gives a workflow a new webhook URL; the old one stops working at once. For when the URL got out,
+ * or someone who could see it (an editor) was removed or made a viewer.
+ */
+scoped.post("/workflows/:id/hook-key", async (c) => {
+  const doc = await db(c).workflows.findOneAndUpdate(
+    { _id: c.req.param("id"), workspaceId: c.var.workspace },
+    { $set: { hookKey: await newHookKey(c.env.AUTH_PEPPER) } },
+    { returnDocument: "after", projection: { hookKey: 1 } },
+  );
+  return doc ? c.json({ hookKey: doc.hookKey }) : c.json({ error: "No workflow with that id" }, 404);
 });
 
 scoped.delete("/workflows/:id", async (c) => {

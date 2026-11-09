@@ -32,20 +32,21 @@ export class Hub {
       props: {},
     } as unknown as ExecutionContext;
     if (request.url === HUB_TICK && request.method === "POST") {
+      try {
+        await tick(this.mongo.c, Date.now(), this.mongo.db, this.env.AUTH_PEPPER);
+      } catch (err) {
+        console.error("tick", err);
+        await this.reset();
+      }
       // Once per start of the hub: create any index a newer version added (`createIndex` does nothing
       // for one that exists), so a deploy that adds collections needs no `npm run db:setup` by hand.
+      // It starts after the tick, so the tick doesn't wait behind it for a connection.
       if (!this.indexed) {
         this.indexed = true;
         this.state.waitUntil(
           // Reports the ones the server refused instead of throwing; the next start tries again.
           ensureIndexes(this.mongo.c).then((failed) => failed.length && console.warn("indexes", failed)),
         );
-      }
-      try {
-        await tick(this.mongo.c, Date.now(), this.mongo.db, this.env.AUTH_PEPPER);
-      } catch (err) {
-        console.error("tick", err);
-        await this.reset();
       }
       return new Response(null, { status: 204 });
     }

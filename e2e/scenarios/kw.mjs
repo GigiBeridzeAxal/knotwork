@@ -42,3 +42,44 @@ export async function sidebar(a) {
   if (await menu.isVisible()) await menu.click();
   return a.page.getByRole("dialog", { name: "Menu" }).or(a.page.locator("aside").first());
 }
+
+const startsWith = (name) => new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+
+/** The workspace switcher button at the top of the sidebar (opens the drawer first on a phone). */
+export async function switcher(a) {
+  return (await sidebar(a)).getByRole("region", { name: / workspace$/ }).getByRole("button").first();
+}
+
+/** Picks a workspace from the switcher menu, like a person would. */
+export async function switchTo(a, name) {
+  await (await switcher(a)).click();
+  await a.page.getByRole("menuitemradio", { name: startsWith(name) }).click();
+  await a.page.waitForURL(/\/home$/);
+  await (await switcher(a)).filter({ hasText: name }).waitFor();
+}
+
+/** The names in the switcher menu, as shown (role tags included), then closes it again. */
+export async function switcherEntries(a) {
+  await (await switcher(a)).click();
+  const items = a.page.getByRole("menuitemradio");
+  await items.first().waitFor();
+  const names = (await items.allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+  await a.page.keyboard.press("Escape");
+  return names;
+}
+
+/** A script calling the API with a key: plain Node fetch, so no cookies and no Origin header. */
+export async function keyApi(baseURL, key, method, path, body) {
+  const headers = { authorization: `Bearer ${key}` };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const res = await fetch(new URL("/api" + path, baseURL), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  return { status: res.status, body: json };
+}
+
+/** Horizontal overflow of the page in px (0 or less means nothing scrolls sideways). */
+export const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

@@ -68,18 +68,19 @@ const toInvite = (doc: InviteDoc): Invite => ({
   maxUses: doc.maxUses,
 });
 
-/** A workspace's links that can still let someone in: not expired and not used up. */
-async function openInvites(c: Collections, workspaceId: string, now: number): Promise<InviteDoc[]> {
-  const docs = await c.invites.find({ workspaceId, expiresAt: { $gt: new Date(now) } }).sort({ createdAt: 1 }).limit(50).toArray();
-  return docs.filter((d) => d.uses < d.maxUses);
-}
+/**
+ * A workspace's links that can still let someone in. A link is deleted when its last place is taken
+ * (see `acceptInvite`), so every link that hasn't expired is open, and the count can't be fooled
+ * by a pile of used-up ones.
+ */
+const openFilter = (workspaceId: string, now: number) => ({ workspaceId, expiresAt: { $gt: new Date(now) } });
 
 /** The people in a workspace, owner first. Open invite links are only given to the owner. */
 export async function team(c: Collections, workspace: WorkspaceDoc, viewerId: string, now: number): Promise<Team> {
   const isOwner = workspace.ownerId === viewerId;
   const [members, invites] = await Promise.all([
     c.members.find({ workspaceId: workspace._id }).sort({ createdAt: 1 }).limit(LIMITS.membersPerWorkspace).toArray(),
-    isOwner ? openInvites(c, workspace._id, now) : [],
+    isOwner ? c.invites.find(openFilter(workspace._id, now)).sort({ createdAt: 1 }).limit(LIMITS.invitesPerWorkspace).toArray() : [],
   ]);
   // Names only: members never see each other's email addresses.
   const users = await c.users
@@ -113,11 +114,12 @@ export async function createInvite(c: Collections, workspace: WorkspaceDoc, role
     role,
     uses: 0,
     maxUses: LIMITS.inviteUses,
+    joined: [],
     createdAt: now,
     expiresAt: new Date(now + LIMITS.inviteDays * DAY),
   };
   await c.invites.insertOne(doc);
-  if ((await openInvites(c, workspace._id, now)).length > LIMITS.invitesPerWorkspace) {
+  if ((await c.invites.countDocuments(openFilter(workspace._id, now))) > LIMITS.invitesPerWorkspace) {
     await c.invites.deleteOne({ _id: doc._id });
     return "full";
   }
@@ -142,51 +144,64 @@ export async function findInvite(c: Collections, token: string, now: number): Pr
 
 export type JoinResult =
   | { ok: true; workspaceId: string; already: boolean }
-  | { ok: false; reason: "gone" | "used" | "full" | "too-many" };
+  /** "spent": this account already joined with this link once, and a link lets each account in once. */
+  | { ok: false; reason: "gone" | "used" | "spent" | "full" | "too-many" };
 
 /**
  * Joins the invite's workspace with the invite's role.
  *
- * One use of the link is claimed with a single atomic update, so a link for ten people lets in ten
- * even when twenty click at once. The member row is then inserted and the workspace counted; if it
- * went over the limit, or the link or workspace was removed meanwhile, the row is taken out again.
- * Someone who already belongs keeps the role they have: a link never changes an existing role.
+ * A link lets each account in once. Otherwise someone the owner removed, or made a viewer, could
+ * leave and walk back in through the link they first joined with, and get their old role back.
+ * After a removal they need a new link from the owner.
+ *
+ * One place on the link is claimed with a single atomic update (which also records the account), so
+ * a link for ten people lets in ten even when twenty click at once. The member row is then inserted
+ * and the workspace counted; if it went over the limit, or the link or workspace was removed
+ * meanwhile, the row is taken out again. Someone who already belongs keeps the role they have: a
+ * link never changes an existing role.
  */
 export async function acceptInvite(c: Collections, token: string, userId: string, now: number): Promise<JoinResult> {
   const found = await findInvite(c, token, now);
   if (!found.ok) return found;
   const { invite, workspace } = found;
   const id = memberId(workspace._id, userId);
-  if (workspace.ownerId === userId || (await c.members.findOne({ _id: id }, { projection: { _id: 1 } }))) {
-    return { ok: true, workspaceId: workspace._id, already: true };
-  }
+  const isMember = async () => (await c.members.findOne({ _id: id }, { projection: { _id: 1 } })) !== null;
+  if (workspace.ownerId === userId || (await isMember())) return { ok: true, workspaceId: workspace._id, already: true };
+  if (invite.joined.includes(userId)) return { ok: false, reason: "spent" };
   if ((await c.members.countDocuments({ userId }, { limit: LIMITS.joinedWorkspacesPerAccount })) >= LIMITS.joinedWorkspacesPerAccount) {
     return { ok: false, reason: "too-many" };
   }
   const claimed = await c.invites.updateOne(
-    { _id: invite._id, expiresAt: { $gt: new Date(now) }, uses: { $lt: invite.maxUses } },
-    { $inc: { uses: 1 } },
+    { _id: invite._id, expiresAt: { $gt: new Date(now) }, uses: { $lt: invite.maxUses }, joined: { $ne: userId } },
+    { $inc: { uses: 1 }, $addToSet: { joined: userId } },
   );
-  if (claimed.modifiedCount === 0) return { ok: false, reason: "used" };
-  const giveUseBack = () => c.invites.updateOne({ _id: invite._id, uses: { $gt: 0 } }, { $inc: { uses: -1 } });
+  if (claimed.modifiedCount === 0) {
+    // Lost a race: with this account's own second click (which is joining), or for the last place.
+    return (await isMember()) ? { ok: true, workspaceId: workspace._id, already: true } : { ok: false, reason: "used" };
+  }
+  /** For a join that didn't happen: the place and this account's one use go back. */
+  const unclaim = () => c.invites.updateOne({ _id: invite._id, joined: userId }, { $inc: { uses: -1 }, $pull: { joined: userId } });
   try {
     await c.members.insertOne({ _id: id, workspaceId: workspace._id, userId, ownerId: workspace.ownerId, role: invite.role, createdAt: now });
   } catch (err) {
-    if ((err as { code?: number }).code !== 11000) throw err;
-    // The same person joining twice at the same moment: the first request made the row.
-    await giveUseBack();
-    return { ok: true, workspaceId: workspace._id, already: true };
+    await unclaim();
+    throw err;
   }
-  const [count, stillInvited, stillThere] = await Promise.all([
+  const [count, mine, stillInvited, stillThere] = await Promise.all([
     c.members.countDocuments({ workspaceId: workspace._id }),
+    c.members.countDocuments({ userId }, { limit: LIMITS.joinedWorkspacesPerAccount + 1 }),
     c.invites.findOne({ _id: invite._id }, { projection: { _id: 1 } }),
     c.workspaces.findOne({ _id: workspace._id }, { projection: { _id: 1 } }),
   ]);
-  if (count > LIMITS.membersPerWorkspace || !stillInvited || !stillThere) {
+  // Counted again after the insert, so two joins at once can't slip past either limit.
+  const over = count > LIMITS.membersPerWorkspace ? "full" : mine > LIMITS.joinedWorkspacesPerAccount ? "too-many" : null;
+  if (over || !stillInvited || !stillThere) {
     await c.members.deleteOne({ _id: id });
-    if (stillInvited) await giveUseBack();
-    return { ok: false, reason: stillInvited && stillThere ? "full" : "gone" };
+    await unclaim();
+    return { ok: false, reason: stillInvited && stillThere ? over! : "gone" };
   }
+  // The last place was taken: the link is done, so it goes (and stops counting as an open link).
+  await c.invites.deleteOne({ _id: invite._id, uses: { $gte: invite.maxUses } });
   return { ok: true, workspaceId: workspace._id, already: false };
 }
 
@@ -194,8 +209,9 @@ export async function acceptInvite(c: Collections, token: string, userId: string
 export async function removeMember(c: Collections, workspaceId: string, userId: string): Promise<boolean> {
   // The membership goes first: from then on their session and their keys are refused.
   const res = await c.members.deleteOne({ _id: memberId(workspaceId, userId), workspaceId, userId });
+  if (res.deletedCount === 0) return false;
   await c.apiKeys.deleteMany({ workspaceId, userId });
-  return res.deletedCount > 0;
+  return true;
 }
 
 /** For a deleted account: its keys and memberships, and the members, links and keys of its workspaces. */

@@ -85,6 +85,8 @@ export interface InviteDoc {
   role: MemberRole;
   uses: number;
   maxUses: number;
+  /** The accounts that joined with it. A link lets each account in once (see `acceptInvite`). */
+  joined: string[];
   createdAt: number;
   /** A TTL index deletes the invite at this time; the code also checks it. */
   expiresAt: Date;

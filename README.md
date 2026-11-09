@@ -147,7 +147,10 @@ whoever started the run.
 
 **Secrets stored as hashes.** An invite link's token and an API key are shown once, when they are made.
 The database keeps only their SHA-256, so a copy of it holds no working links or keys. An invite link
-works for 7 days and for 10 people, and the owner can revoke it sooner.
+works for 7 days and for 10 people, and the owner can revoke it sooner. A link lets each account in
+once: someone who was removed, or made a viewer, can't walk back in with the link they first used and
+needs a new one from the owner. A used-up link is deleted. The token travels in the request body
+(`POST /api/invites/preview` and `/accept`), not in an API URL, so it stays out of request logs.
 
 **API keys.** A key works in one workspace, read-only or read and write, and never has more rights than
 its maker has right now: the maker's role is read on every request, and their keys are deleted when they
@@ -158,12 +161,17 @@ lookup.
 
 **Recovery codes.** Each code is 12 characters with 60 random bits, stored as an HMAC of the user id and
 the code keyed with `AUTH_PEPPER`, so the database alone can't be used to test guesses. A code works once:
-the update that sets the new password also takes the code out. Using one signs out every device and revokes the account's API keys. Making
+the update that sets the new password also takes the code out. Using one signs out every device and revokes the account's API keys. Changing the password in Settings
+does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
 new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
 email and IP per 15 minutes.
 
 **Webhook URLs.** A webhook URL starts runs for whoever has it, so viewers and read-only keys get workflows
-with an empty `hookKey`.
+with an empty `hookKey`. Editors do see them, so after removing an editor the owner can press **New URL**
+on a workflow's trigger (`POST /api/workflows/:id/hook-key`) to end the old URL.
+
+**No framing.** [`public/_headers`](public/_headers) tells browsers never to show the app inside another
+site's frame, so its delete and revoke buttons can't be clicked through a disguised page.
 
 **The demo account** is shared by everyone, so it can't make invite links, join a workspace, or make API
 keys or recovery codes.
@@ -306,7 +314,7 @@ person from using up the free plans:
 
 ## Roadmap
 
-Done: teams with invite links and roles, recovery codes, and API keys (2026-11-09).
+Built: teams with invite links and roles, recovery codes, and API keys (2026-11-09; live from the next deploy).
 
 - Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
 - Branching (if / else) and loops over arrays

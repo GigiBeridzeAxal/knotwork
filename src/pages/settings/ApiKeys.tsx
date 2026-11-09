@@ -25,6 +25,8 @@ export function ApiKeys() {
   }, []);
 
   const full = (keys?.length ?? 0) >= LIMITS.apiKeysPerAccount;
+  /** A write key made by someone who is now a viewer only reads: a key never does more than its maker. */
+  const viewerIn = (id: string) => me.workspaces.find((w) => w.id === id)?.role === "viewer";
   const wsName = (id: string) => me.workspaces.find((w) => w.id === id)?.name ?? "A workspace you left";
 
   async function create(e: FormEvent) {
@@ -34,7 +36,7 @@ export function ApiKeys() {
     try {
       const key = await api.createApiKey({ name, workspaceId: workspace.id, access: writable ? access : "read" });
       setMade(key);
-      setKeys((k) => [key, ...(k ?? [])]);
+      setKeys((k) => [...(k ?? []), key]);
       setName("");
     } catch (err) {
       setError(errorText(err));
@@ -137,7 +139,7 @@ export function ApiKeys() {
                         k.access === "write" ? "bg-raised text-text ring-1 ring-edge ring-inset" : "bg-raised text-soft",
                       )}
                     >
-                      {k.access === "write" ? "read and write" : "read only"}
+                      {k.access !== "write" ? "read only" : viewerIn(k.workspaceId) ? "read only while you're a viewer" : "read and write"}
                     </span>
                   </span>
                   <span className="truncate font-mono text-xs text-muted">

@@ -90,9 +90,9 @@ export function JoinPage({ token }: { token: string }) {
 
         {state.kind === "ready" && (
           <>
-            <div className="flex flex-col gap-3">
+            <div className="flex min-w-0 flex-col gap-3">
               <p className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Invite</p>
-              <h1 className="font-display text-[32px] leading-[1.1] font-bold tracking-tight text-balance sm:text-[40px]">
+              <h1 className="font-display text-[32px] leading-[1.1] font-bold tracking-tight text-balance break-words sm:text-[40px]">
                 {state.invite.already ? (
                   <>You're already in {state.invite.workspaceName}</>
                 ) : (
@@ -111,11 +111,11 @@ export function JoinPage({ token }: { token: string }) {
             <div className="flex items-center gap-4 rounded-2xl border border-line bg-graphite p-5">
               <Avatar name={state.invite.workspaceName} size="lg" shape="square" />
               <div className="flex min-w-0 flex-col gap-1">
-                <span className="flex items-center gap-2">
+                <span className="flex min-w-0 items-center gap-2">
                   <span className="truncate font-medium">{state.invite.workspaceName}</span>
                   <span className="shrink-0 rounded-full bg-raised px-2 py-0.5 font-mono text-[11px] text-soft">{ROLE_LABEL[state.invite.role]}</span>
                 </span>
-                <span className="text-[13px] text-muted">
+                <span className="text-[13px] break-words text-muted">
                   {state.invite.ownerName}'s workspace. {ROLE_CAN[state.invite.role]}
                 </span>
               </div>

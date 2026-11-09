@@ -257,6 +257,15 @@ export function EditorPage({ id }: { id: string | null }) {
               onChange={(trigger) => update({ trigger })}
               hookUrl={hookUrl}
               hookHidden={!!saved && !saved.hookKey}
+              onNewHook={
+                saved && !readOnly
+                  ? async () => {
+                      if (!confirm("Make a new webhook URL? The current one stops working right away, so anything that calls it needs the new one.")) return;
+                      const { hookKey } = await api.newHookKey(saved.id);
+                      setSaved((now) => (now ? { ...now, hookKey } : now));
+                    }
+                  : undefined
+              }
               cronError={cronError}
             />
           </fieldset>
@@ -382,12 +391,15 @@ function TriggerCard({
   onChange,
   hookUrl,
   hookHidden = false,
+  onNewHook,
   cronError,
 }: {
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
   hookHidden?: boolean;
+  /** Replaces the webhook URL, e.g. after someone who knew it left the workspace. */
+  onNewHook?: () => void;
   cronError: string | null;
 }) {
   const [copied, setCopied] = useState(false);
@@ -462,6 +474,7 @@ function TriggerCard({
               >
                 {copied ? "Copied" : "Copy"}
               </Button>
+              {onNewHook && <Button onClick={onNewHook}>New URL</Button>}
             </div>
           </div>
         ) : hookHidden ? (

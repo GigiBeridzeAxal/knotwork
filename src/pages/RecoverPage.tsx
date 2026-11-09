@@ -4,7 +4,7 @@ import { api, ApiError } from "../api";
 import { cn, Field, inputClass } from "../components/ui";
 import { Link, navigate } from "../router";
 import { useSession } from "../session";
-import { AuthFrame, pill } from "./AuthPage";
+import { AuthFrame, nextPath, pill } from "./AuthPage";
 
 /** Sets a new password with a recovery code. There is no email reset, so this is the only way back in. */
 export function RecoverPage() {
@@ -27,7 +27,8 @@ export function RecoverPage() {
     setFieldErrors({});
     try {
       session.signedIn(await api.recover({ email, code, password }));
-      navigate("/home", { replace: true });
+      // Someone who came from an invite link goes back to it.
+      navigate(nextPath(), { replace: true });
     } catch (err) {
       if (err instanceof ApiError && err.issues?.length) {
         setFieldErrors(Object.fromEntries(err.issues.map((i) => [String(i.path[0]), i.message])));
@@ -106,7 +107,7 @@ export function RecoverPage() {
 
         <p className="text-sm text-soft">
           Remembered it?{" "}
-          <Link href="/login" className="font-medium text-text underline decoration-edge underline-offset-4 hover:decoration-text">
+          <Link href={`/login${location.search.includes("next=") ? location.search : ""}`} className="font-medium text-text underline decoration-edge underline-offset-4 hover:decoration-text">
             Log in
           </Link>
         </p>

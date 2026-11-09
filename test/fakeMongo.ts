@@ -55,6 +55,7 @@ function applyUpdate(doc: Doc, update: Doc, inserting: boolean) {
       else if (op === "$inc") doc[key] = (doc[key] ?? 0) + (arg as number);
       else if (op === "$addToSet") doc[key] = (doc[key] ?? []).includes(arg) ? doc[key] : [...(doc[key] ?? []), arg];
       else if (op === "$pull") doc[key] = (doc[key] ?? []).filter((x: unknown) => !same(x, arg));
+      else if (op === "$unset") delete doc[key];
       else throw new Error(`fakeMongo: update operator ${op} isn't supported`);
     }
   }

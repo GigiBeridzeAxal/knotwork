@@ -229,7 +229,7 @@ export const recoveryCodesInput = z.object({ password: z.string().min(1, "Enter 
 // ---------- Teams ----------
 
 export const inviteInput = z.object({ role: memberRole });
-export const inviteToken = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const inviteTokenInput = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) });
 export const roleChange = z.object({ role: memberRole });
 
 export interface Member {
@@ -336,11 +336,13 @@ export interface RunDetail extends Run {
 }
 
 export interface Overview {
+  /** What the caller may do in this workspace right now. The dashboard uses it to notice a role change. */
+  role: Role;
   workflows: WorkflowSummary[];
   /** The workspace's newest 100 runs. */
   runs: Run[];
-  /** Runs the whole account started this clock hour (the limit is per account). */
+  /** Runs the workspace's owner started this clock hour, in all their workspaces (the limit is the owner's). */
   runsThisHour: number;
-  /** This account's hourly run limit right now (lower in its first 24 hours). */
+  /** The owner's hourly run limit right now (lower in their first 24 hours). */
   runsLimit: number;
 }

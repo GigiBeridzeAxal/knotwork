@@ -34,7 +34,7 @@ function WorkspaceSettings() {
   }
 
   async function remove() {
-    if (!confirm(`Delete "${workspace.name}" with all its workflows and runs? This can't be undone.`)) return;
+    if (!confirm(`Delete "${workspace.name}" with all its workflows and runs? Everyone in it loses access and every API key for it stops working. This can't be undone.`)) return;
     setBusy(true);
     try {
       await api.deleteWorkspace(workspace.id);
@@ -84,8 +84,9 @@ function WorkspaceSettings() {
   );
 }
 
-/** Changing the password needs the current one, and signs out every other device. */
-function PasswordSettings() {
+/** Changing the password needs the current one, signs out every other device, and ends the account's API keys and recovery codes. */
+function PasswordSettings({ onChanged }: { onChanged: () => void }) {
+  const { reload } = useSession();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [busy, setBusy] = useState(false);
@@ -99,7 +100,10 @@ function PasswordSettings() {
       await api.changePassword(current, next);
       setCurrent("");
       setNext("");
-      setNote({ ok: true, text: "Password changed. Other devices were logged out and your API keys were revoked." });
+      // The change ended the account's recovery codes and API keys: show both sections as they are now.
+      await reload().catch(() => {});
+      onChanged();
+      setNote({ ok: true, text: "Password changed. Other devices were logged out, and your API keys and recovery codes were ended. Make new recovery codes below." });
     } catch (err) {
       const issue = err instanceof ApiError ? err.issues[0]?.message : undefined;
       setNote({ ok: false, text: issue && err instanceof ApiError && err.status === 400 ? issue : (err as Error).message });
@@ -156,7 +160,7 @@ function DeleteAccount() {
     <Card className="p-5 sm:p-6">
       <form onSubmit={remove} className="flex flex-col gap-4">
         <p className="text-[13px] text-muted">
-          Deletes your account, every workspace, workflow, webhook and run. Your email can be used to sign up again afterwards.
+          Deletes your account, every workspace, workflow, webhook and run, and your API keys. People in your workspaces lose access. Your email can be used to sign up again afterwards.
         </p>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1">
@@ -176,6 +180,7 @@ function DeleteAccount() {
 export function SettingsPage() {
   const { workflows, runsThisHour, runsLimit } = useWorkspace();
   const { me, workspace, logout } = useSession();
+  const [passwordChanges, setPasswordChanges] = useState(0);
 
   return (
     <div className="flex flex-col gap-8">
@@ -206,8 +211,8 @@ export function SettingsPage() {
       </Section>
 
       {!me.user.demo && (
-        <Section title="Password" blurb="Changing it logs you out everywhere else and revokes your API keys.">
-          <PasswordSettings />
+        <Section title="Password" blurb="Changing it logs you out everywhere else, and ends your API keys and recovery codes.">
+          <PasswordSettings onChanged={() => setPasswordChanges((n) => n + 1)} />
         </Section>
       )}
 
@@ -256,7 +261,7 @@ export function SettingsPage() {
             </>
           }
         >
-          <ApiKeys key={workspace.id} />
+          <ApiKeys key={`${workspace.id}:${passwordChanges}`} />
         </Section>
       )}
 
@@ -264,7 +269,7 @@ export function SettingsPage() {
         <Card>
           <Row label={`Workflows in ${workspace.name}`} value={`${workflows?.length ?? 0} / ${LIMITS.workflowsPerWorkspace}`} />
           <Row label="Your workspaces" value={`${me.workspaces.filter((w) => w.role === "owner").length} / ${LIMITS.workspacesPerAccount}`} />
-          <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${runsLimit}`} />
+          <Row label={workspace.role === "owner" ? "Runs this hour (whole account)" : "Runs this hour (owner's account)"} value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>
