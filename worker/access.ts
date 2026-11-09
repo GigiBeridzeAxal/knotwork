@@ -205,12 +205,22 @@ export async function acceptInvite(c: Collections, token: string, userId: string
   return { ok: true, workspaceId: workspace._id, already: false };
 }
 
-/** Takes someone out of a workspace, with the API keys they made for it. False when they weren't in it. */
+/**
+ * Ends the invite links an account joined a workspace with. Called when that person is removed,
+ * leaves or is made a viewer: the link they hold would otherwise let them back in, with its role,
+ * from a second account. Other people who got the same link and haven't used it need a new one.
+ */
+export const endLinksOf = (c: Collections, workspaceId: string, userId: string) => c.invites.deleteMany({ workspaceId, joined: userId });
+
+/**
+ * Takes someone out of a workspace, with the API keys they made for it and the invite links they
+ * joined with. False when they weren't in it.
+ */
 export async function removeMember(c: Collections, workspaceId: string, userId: string): Promise<boolean> {
   // The membership goes first: from then on their session and their keys are refused.
   const res = await c.members.deleteOne({ _id: memberId(workspaceId, userId), workspaceId, userId });
   if (res.deletedCount === 0) return false;
-  await c.apiKeys.deleteMany({ workspaceId, userId });
+  await Promise.all([c.apiKeys.deleteMany({ workspaceId, userId }), endLinksOf(c, workspaceId, userId)]);
   return true;
 }
 

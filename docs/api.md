@@ -19,7 +19,8 @@ Every request and response body is JSON. Times are milliseconds since 1970-01-01
 What a key can do:
 
 - **One workspace.** A key works in the workspace it was made for, and in no other.
-- **Read or write.** A read key can only make `GET` requests. A write key can also create, change and
+- **Read or write.** A read key can only make `GET` requests. It reads everything in a workflow's
+  steps, including tokens typed straight into a header, so treat a read key as a secret too. A write key can also create, change and
   delete workflows and start runs.
 - **Never more than its maker.** The maker's role in the workspace is read again on every request. A
   viewer can only make read keys. If the maker is made a viewer later, their write keys can only read

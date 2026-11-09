@@ -107,7 +107,7 @@ export default {
       await recover(page, data.email, data.codes[0].replace(/-/g, "").toLowerCase(), data.next);
       await page.waitForURL(/\/home$/);
       await page.goto("/settings");
-      await sees(dave, "7 of 8 codes left.");
+      await sees(dave, "You have no recovery codes.");
     });
 
     await step(dave, "the second device was logged out and the API key revoked", async () => {

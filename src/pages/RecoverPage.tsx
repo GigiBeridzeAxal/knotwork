@@ -43,7 +43,7 @@ export function RecoverPage() {
       <div className="mx-auto flex w-full max-w-[400px] flex-col gap-8">
         <div className="flex flex-col gap-3">
           <h1 className="font-display text-[32px] leading-[1.1] font-bold tracking-tight text-balance sm:text-[40px]">Recover your account</h1>
-          <p className="text-soft">Use one of your recovery codes to set a new password. The code stops working once used.</p>
+          <p className="text-soft">Use one of your recovery codes to set a new password. Your other codes end too, so make a new set in Settings afterwards.</p>
         </div>
 
         <form onSubmit={submit} className="flex flex-col gap-4" noValidate>

@@ -4,7 +4,7 @@ export default {
   name: "Teams: invite link, editor and viewer, removal",
   tags: ["sharing", "roles", "isolation", "lifecycle"],
   actors: ["alice", "bob", "carol", "frank"],
-  expectedHttp: [403, 404, 410],
+  expectedHttp: [403, 404],
   async run({ actors: { alice, bob, carol, frank }, step, check, eventually, sees, doesNotSee, runTag, data, leftBehind }) {
     const wsName = `Team ${runTag.slice(-5, -1)}`;
     const flow = `${runTag} bob flow`;
@@ -176,10 +176,10 @@ export default {
       check(entries.some((e) => e.includes("Personal")), "bob has no Personal workspace");
     });
 
-    await step(bob, "can't walk back in with the link he first joined with", async ({ page }) => {
+    await step(bob, "can't walk back in: the link he joined with was ended", async ({ page }) => {
       await page.goto(new URL(data.editorLink).pathname);
-      await page.getByRole("button", { name: "Join workspace" }).click();
-      await page.getByRole("alert").filter({ hasText: "You already joined with this invite link once" }).waitFor();
+      await page.getByRole("heading", { name: "This invite link doesn't work" }).waitFor();
+      check((await page.getByRole("button", { name: "Join workspace" }).count()) === 0, "a Join button is offered for an ended link");
       const res = await api(bob, "GET", "/workflows", undefined, data.ws);
       check(res.status === 404, `bob got back in: ${res.status}`);
     });

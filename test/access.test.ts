@@ -256,24 +256,30 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
 
-    it("a link lets each account in once: someone removed or made a viewer can't walk back in with it", async () => {
+    it("removing someone, or making them a viewer, ends the link they joined with, for any account", async () => {
       const ws = await sharedWorkspace(alice, "Once");
-      const link = await invite(alice, ws, "editor");
-      const [ed, gone] = [await person("Ed"), await person("Gone")];
+      const [link, other] = [await invite(alice, ws, "editor"), await invite(alice, ws, "editor")];
+      const [ed, edAgain, gone, goneAgain, late] = await Promise.all(["Ed", "EdTwo", "Gone", "GoneTwo", "Late"].map(person));
       expect((await accept(link.token, ed)).status).toBe(200);
-      expect((await accept(link.token, gone)).status).toBe(200);
-      // Ed is made a viewer, leaves, and tries the link he joined with to become an editor again.
+      // Ed is made a viewer, leaves, and tries the link he joined with to become an editor again:
+      // with his own account, then with a second one he signs up.
       await call("PATCH", `/api/workspaces/${ws}/members/${ed.id}`, { cookie: alice.cookie, body: { role: "viewer" } });
+      expect(await raw.invites.countDocuments({ _id: link.id })).toBe(0);
       expect((await call("DELETE", `/api/workspaces/${ws}/members/${ed.id}`, { cookie: ed.cookie })).status).toBe(204);
-      expect((await accept(link.token, ed)).status).toBe(410);
-      expect((await call("GET", "/api/workflows", { cookie: ed.cookie, ws })).status).toBe(404);
-      // The owner removes Gone; the same link doesn't let them back in either.
+      expect((await accept(link.token, ed)).status).toBe(404);
+      expect((await accept(link.token, edAgain)).status).toBe(404);
+      expect((await call("GET", "/api/workflows", { cookie: edAgain.cookie, ws })).status).toBe(404);
+      // The owner removes Gone, who joined with the other link; it doesn't let them back in either.
+      expect((await accept(other.token, gone)).status).toBe(200);
       expect((await call("DELETE", `/api/workspaces/${ws}/members/${gone.id}`, { cookie: alice.cookie })).status).toBe(204);
-      expect((await accept(link.token, gone)).status).toBe(410);
-      expect((await call("POST", "/api/workflows", { cookie: gone.cookie, ws, body: flow("Back") })).status).toBe(404);
+      expect((await accept(other.token, gone)).status).toBe(404);
+      expect((await accept(other.token, goneAgain)).status).toBe(404);
+      expect((await call("POST", "/api/workflows", { cookie: goneAgain.cookie, ws, body: flow("Back") })).status).toBe(404);
       expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(0);
-      // A fresh link from the owner does.
-      await join(alice, ws, ed, "viewer");
+      // A link nobody who left has used stays open, and a fresh link lets Ed back in.
+      const fresh = await invite(alice, ws, "viewer");
+      expect((await accept(fresh.token, late)).status).toBe(200);
+      expect((await accept(fresh.token, ed)).status).toBe(200);
       expect((await call("GET", "/api/workflows", { cookie: ed.cookie, ws })).status).toBe(200);
       await call("DELETE", `/api/workspaces/${ws}`, { cookie: alice.cookie });
     });
@@ -625,7 +631,8 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       const ok = await recover(gina.email.toUpperCase(), typed, "gina-new-password-1");
       expect(ok.status).toBe(200);
       expect(ok.body.user.id).toBe(gina.id);
-      expect(ok.body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 1);
+      // The rest of the set ends with the one used: someone may have a copy of the sheet.
+      expect(ok.body.recoveryCodesLeft).toBe(0);
       expect(ok.cookie).toMatch(/^kw_session=/);
       expect((await call("GET", "/api/me", { cookie: gina.cookie })).status).toBe(401);
       expect((await call("GET", "/api/me", { cookie: ok.cookie })).status).toBe(200);
@@ -633,6 +640,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect((await login(gina.password)).status).toBe(401);
       expect((await login("gina-new-password-1")).status).toBe(200);
       expect((await recover(gina.email, codes[0], "attacker-password-1")).status).toBe(401);
+      expect((await recover(gina.email, codes[1], "attacker-password-1")).status).toBe(401);
       expect((await login("gina-new-password-1")).status).toBe(200);
       gina = { ...gina, cookie: ok.cookie, password: "gina-new-password-1" };
     });
@@ -657,6 +665,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
     });
 
     it("one code used twice at the same moment works once", async () => {
+      codes = (await call("POST", "/api/auth/recovery-codes", { cookie: gina.cookie, body: { password: gina.password } })).body.codes;
       const results = await Promise.all([
         recover(gina.email, codes[1], "race-password-aaa", "198.51.100.253"),
         recover(gina.email, codes[1], "race-password-bbb", "198.51.100.254"),
@@ -664,7 +673,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect(results.map((r) => r.status).sort()).toEqual([200, 401]);
       const winner = results.find((r) => r.status === 200)!;
       gina = { ...gina, cookie: winner.cookie, password: results[0].status === 200 ? "race-password-aaa" : "race-password-bbb" };
-      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 2);
+      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(0);
     });
 
     it("making new codes ends the old ones", async () => {

@@ -191,9 +191,9 @@ whoever started the run.
 
 **Secrets stored as hashes.** An invite link's token and an API key are shown once, when they are made.
 The database keeps only their SHA-256, so a copy of it holds no working links or keys. An invite link
-works for 7 days and for 10 people, and the owner can revoke it sooner. A link lets each account in
-once: someone who was removed, or made a viewer, can't walk back in with the link they first used and
-needs a new one from the owner. A used-up link is deleted. The token travels in the request body
+works for 7 days and for 10 people, and the owner can revoke it sooner. Removing someone, or making
+them a viewer, ends the link they joined with (for everyone who still holds it), so they can't walk back in
+with it from another account; a link also lets each account in only once. A used-up link is deleted. The token travels in the request body
 (`POST /api/invites/preview` and `/accept`), not in an API URL, so it stays out of request logs.
 
 **API keys.** A key works in one workspace, read-only or read and write, and never has more rights than
@@ -205,7 +205,8 @@ lookup.
 
 **Recovery codes.** Each code is 12 characters with 60 random bits, stored as an HMAC of the user id and
 the code keyed with `AUTH_PEPPER`, so the database alone can't be used to test guesses. A code works once:
-the update that sets the new password also takes the code out. Using one signs out every device and revokes the account's API keys. Changing the password in Settings
+the update that sets the new password also ends the whole set, since someone else may hold a copy of the
+sheet. Using one signs out every device and revokes the account's API keys; the owner then makes new codes. Changing the password in Settings
 does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
 new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
 email and IP per 15 minutes.

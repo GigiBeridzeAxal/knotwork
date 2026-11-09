@@ -1,5 +1,4 @@
 import { type FormEvent, useState } from "react";
-import { LIMITS } from "../../../shared/limits";
 import { api } from "../../api";
 import { Button, Card, cn, Field, inputClass } from "../../components/ui";
 import { useSession } from "../../session";
@@ -40,7 +39,7 @@ export function RecoveryCodes() {
       `Account: ${me.user.email}`,
       `Made: ${new Date().toISOString().slice(0, 10)}`,
       "",
-      `Each code works once. Use one at ${location.origin}/recover to set a new password.`,
+      `Use one at ${location.origin}/recover to set a new password. Using one ends the whole set, so make new codes afterwards.`,
       "",
       ...list,
       "",
@@ -78,7 +77,7 @@ export function RecoveryCodes() {
   return (
     <Card className="flex flex-col gap-5 p-5 sm:p-6">
       <div className="flex items-start gap-3">
-        <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", left <= 2 ? "bg-retry" : "bg-soft")} aria-hidden="true" />
+        <span className={cn("mt-1.5 size-2 shrink-0 rounded-full", left === 0 ? "bg-retry" : "bg-soft")} aria-hidden="true" />
         {left === 0 ? (
           <p className="text-sm text-soft">
             <span className="font-medium text-text">You have no recovery codes.</span> Knotwork never sends email, so if you lose your password without a
@@ -87,9 +86,9 @@ export function RecoveryCodes() {
         ) : (
           <p className="text-sm text-soft">
             <span className="font-medium text-text">
-              {left} of {LIMITS.recoveryCodes} codes left.
+              You have {left} recovery codes.
             </span>{" "}
-            {left <= 2 ? "You're running low. Make a new set soon." : "Each one works once."}
+            Any one of them sets a new password. Using one ends the whole set, so you make new codes afterwards.
           </p>
         )}
       </div>

@@ -45,7 +45,7 @@ export function Members() {
   }
 
   async function remove(m: Member) {
-    if (!confirm(`Remove ${m.name} from ${workspace.name}? They lose access right away, and API keys they made for it stop working. If they were an editor they have seen the webhook URLs: make new URLs in the editor for workflows they shouldn't be able to start.`)) return;
+    if (!confirm(`Remove ${m.name} from ${workspace.name}? They lose access right away, API keys they made for it stop working, and the invite link they joined with is ended. If they were an editor they have seen the webhook URLs: make new URLs in the editor for workflows they shouldn't be able to start.`)) return;
     setBusy(m.userId);
     setRowError(null);
     try {

@@ -31,6 +31,7 @@ import {
   joinedWorkspaceIds,
   listApiKeys,
   listWorkspacesFor,
+  endLinksOf,
   removeMember,
   team,
   touchApiKey,
@@ -346,9 +347,10 @@ api.post("/auth/recover", async (c) => {
   // An unknown email (or the demo account) gets the same update against an id nobody has, so it
   // makes the same database round trip as a real attempt.
   const target = user && !user.demo && user.password ? user._id : "usr_unknown";
-  const used = await db(c).users.updateOne({ _id: target, recoveryCodes: codeHash }, { $pull: { recoveryCodes: codeHash }, $set: { password: next } });
+  const used = await db(c).users.updateOne({ _id: target, recoveryCodes: codeHash }, { $unset: { recoveryCodes: "" }, $set: { password: next } });
   if (!user || !used.modifiedCount) return c.json({ error: "That email and recovery code don't match an account." }, 401);
-  // Whoever had a way in before is out: every session, and every API key the account made.
+  // Whoever had a way in before is out: every session, every API key the account made, and (in the
+  // update above) the rest of the code set, which someone else may have a copy of.
   await Promise.all([
     giveBack(db(c), key, 15 * MINUTE),
     db(c).sessions.deleteMany({ userId: user._id }),
@@ -552,7 +554,10 @@ api.patch("/workspaces/:id/members/:user", async (c) => {
   if (ws instanceof Response) return ws;
   const user = c.req.param("user");
   const res = await db(c).members.updateOne({ _id: memberId(ws._id, user), workspaceId: ws._id, userId: user }, { $set: { role: parsed.data.role } });
-  return res.matchedCount ? c.body(null, 204) : c.json({ error: "No member with that id" }, 404);
+  if (!res.matchedCount) return c.json({ error: "No member with that id" }, 404);
+  // Someone made a viewer still holds the link they joined with: end it, so a second account can't use it.
+  if (parsed.data.role === "viewer") await endLinksOf(db(c), ws._id, user);
+  return c.body(null, 204);
 });
 
 /** The owner removes a member, or a member leaves (their own id). The owner can't be removed. */
