@@ -1,8 +1,12 @@
 import { handle, HUB_TICK } from "./index";
 import { tick } from "./engine";
-import { type Env, isConnectionError, Mongo } from "./mongo";
+import { clientIsDead, type Env, Mongo } from "./mongo";
 
 const REPLACE_GAP_MS = 30_000;
+/** The wait before replacing a connection that never got through (the database was down when it was made). */
+const RETRY_GAP_MS = 5_000;
+/** A replaced connection is closed after this long even if something still counts as using it. */
+const RETIRED_MAX_MS = 120_000;
 
 /** A connection and how many requests and background jobs are still using it. */
 interface Conn {
@@ -53,7 +57,7 @@ export class Hub {
         await hold(this.work.tick(conn.mongo.c, Date.now(), conn.mongo.db, this.env.AUTH_PEPPER));
       } catch (err) {
         console.error("tick", err);
-        if (isConnectionError(err)) this.replace(conn);
+        if (clientIsDead(conn.mongo, err)) this.replace(conn);
       }
       return new Response(null, { status: 204 });
     }
@@ -66,24 +70,29 @@ export class Hub {
     const res = await hold(
       Promise.resolve(this.work.handle(request, { ...this.env, HUB: undefined, SHARED_MONGO: conn.mongo }, ctx)),
     );
-    // Only a connection error replaces the connection (the API marks it); a bug that answers 500 doesn't.
+    // Only a finished client is replaced (the API marks it). A bug that answers 500 doesn't replace
+    // it, and neither does a network error on a client that has connected: the driver repairs that.
     if (conn.mongo.broken) this.replace(conn);
     return res;
   }
 
   /**
    * Starts a new connection for later requests: once however many requests failed on the old one,
-   * and at most once in REPLACE_GAP_MS. Every new connection costs Atlas sockets and a handshake,
-   * and the driver repairs most network errors on the connection it has.
+   * and at most once in REPLACE_GAP_MS, because every new connection costs Atlas sockets and a
+   * handshake. A connection that never got through is retried sooner (RETRY_GAP_MS), so the hub
+   * is back within seconds of the database returning.
    */
   private replace(conn: Conn) {
     if (this.conn !== conn) return;
     const now = Date.now();
-    if (now - this.replacedAt < REPLACE_GAP_MS) return;
+    if (now - this.replacedAt < (conn.mongo.connected ? REPLACE_GAP_MS : RETRY_GAP_MS)) return;
     this.replacedAt = now;
     this.conn = this.open();
     conn.retired = true;
     if (conn.busy === 0) void conn.mongo.close();
+    // A request Cloudflare cancelled might never count itself out. Closing is safe either way: a
+    // closed connection throws when used, and closing twice does nothing.
+    else setTimeout(() => void conn.mongo.close(), RETIRED_MAX_MS);
   }
 
   /** A replaced connection closes when the last request or background job on it has finished. */

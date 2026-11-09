@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import worker, { nestedDeeperThan } from "../worker/index";
+import worker, { unstorable } from "../worker/index";
 import { Hub } from "../worker/hub";
 import { newHookKey } from "../worker/hookKey";
-import { type Env, isConnectionError, Mongo } from "../worker/mongo";
+import { clientIsDead, databaseUnavailable, type Env, isConnectionError, Mongo } from "../worker/mongo";
 
 /**
  * The hub's connection handling, and what the Worker does around the hub. No database is needed:
@@ -38,6 +38,9 @@ const gate = () => {
   return { wait, open };
 };
 const networkError = () => Object.assign(new Error("socket closed"), { name: "MongoNetworkError" });
+const closedError = () => Object.assign(new Error("Topology is closed"), { name: "MongoTopologyClosedError" });
+/** Marks a connection as having connected once, like the driver's connectionReady event does. */
+const connected = (mongo: Mongo) => ((mongo.connected = Date.now()), mongo);
 
 describe("Hub connection", () => {
   it("keeps its connection when a request answers 500 for another reason", async () => {
@@ -99,7 +102,7 @@ describe("Hub connection", () => {
     expect(first.closed).toBe(true);
   });
 
-  it("replaces the connection when the tick fails with a connection error, and not for other errors", async () => {
+  it("replaces the connection when the tick finds the client finished, and not for other errors", async () => {
     const hub = new TestHub();
     const first = hub.current;
     const tick = () => hub.fetch(new Request("https://hub.internal/__hub/tick", { method: "POST" }));
@@ -108,8 +111,16 @@ describe("Hub connection", () => {
     };
     expect((await tick()).status).toBe(204);
     expect(hub.current).toBe(first);
+    // A network error on a client that has connected is left to the driver, which reconnects.
+    connected(first);
     hub.tick = async () => {
       throw networkError();
+    };
+    expect((await tick()).status).toBe(204);
+    expect(hub.current).toBe(first);
+    // A closed client never comes back.
+    hub.tick = async () => {
+      throw closedError();
     };
     expect((await tick()).status).toBe(204);
     expect(hub.current).not.toBe(first);
@@ -127,7 +138,7 @@ describe("Hub connection", () => {
     try {
       clock.mockReturnValue(1_000_000);
       await get(hub);
-      const second = hub.current;
+      const second = connected(hub.current);
       expect(second).not.toBe(first);
       clock.mockReturnValue(1_000_000 + 29_000);
       await get(hub);
@@ -139,6 +150,51 @@ describe("Hub connection", () => {
       expect(second.closed).toBe(true);
     } finally {
       clock.mockRestore();
+    }
+  });
+
+  it("retries a connection that never got through after 5 seconds, not 30", async () => {
+    const hub = new TestHub();
+    hub.handle = async (_request, e) => {
+      e.SHARED_MONGO!.broken = true;
+      return new Response(null, { status: 503 });
+    };
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(2_000_000);
+      await get(hub);
+      const second = hub.current; // made while the database was down: never connects
+      clock.mockReturnValue(2_000_000 + 4_000);
+      await get(hub);
+      expect(hub.current).toBe(second);
+      clock.mockReturnValue(2_000_000 + 6_000);
+      await get(hub);
+      expect(hub.current).not.toBe(second);
+      expect(second.closed).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("closes a replaced connection after two minutes even if a request on it never finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const hub = new TestHub();
+      const first = hub.current;
+      hub.handle = () => new Promise<Response>(() => {});
+      void get(hub);
+      hub.handle = async (_request, e) => {
+        e.SHARED_MONGO!.broken = true;
+        return new Response(null, { status: 500 });
+      };
+      await get(hub);
+      expect(hub.current).not.toBe(first);
+      await vi.advanceTimersByTimeAsync(119_000);
+      expect(first.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(first.closed).toBe(true);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -160,6 +216,24 @@ describe("Mongo", () => {
     await mongo.close();
     expect(() => mongo.c).toThrow("closed");
     expect(() => mongo.db).toThrow("closed");
+  });
+
+  it("calls a client finished only when it is closed or never connected", () => {
+    const fresh = new Mongo(env);
+    const used = connected(new Mongo(env));
+    const selection = Object.assign(new Error("no server"), { name: "MongoServerSelectionError" });
+    expect(clientIsDead(used, networkError())).toBe(false);
+    expect(clientIsDead(used, selection)).toBe(false);
+    expect(clientIsDead(used, closedError())).toBe(true);
+    expect(clientIsDead(fresh, selection)).toBe(true);
+    expect(clientIsDead(fresh, new TypeError("bug"))).toBe(false);
+  });
+
+  it("treats an unreachable or overloaded database as unavailable, not as a bug", () => {
+    expect(databaseUnavailable(networkError())).toBe(true);
+    expect(databaseUnavailable(closedError())).toBe(true);
+    expect(databaseUnavailable(Object.assign(new Error("queue"), { name: "MongoWaitQueueTimeoutError" }))).toBe(true);
+    expect(databaseUnavailable(Object.assign(new Error("dup"), { name: "MongoServerError" }))).toBe(false);
   });
 
   it("tells connection errors from other errors, also when wrapped", () => {
@@ -207,11 +281,14 @@ describe("Worker in front of the hub", () => {
     expect(calls).toBe(0);
   });
 
-  it("refuses a made-up webhook key without calling the hub", async () => {
+  it("refuses a made-up webhook key, and any other path under /hooks/, without calling the hub", async () => {
     let calls = 0;
     const e = withHub(async () => (calls++, new Response("hub")));
-    const res = await worker.fetch(new Request(`https://kw.test/hooks/${"x".repeat(24)}`, { method: "POST" }) as never, e, ctx);
-    expect(res.status).toBe(404);
+    const key = await newHookKey(env.AUTH_PEPPER);
+    for (const path of [`/hooks/${"x".repeat(24)}`, "/hooks/a/b", `/hooks/${key}/`, `/hooks/${key}/extra`, "/hooks/"]) {
+      const res = await worker.fetch(new Request(`https://kw.test${path}`, { method: "POST" }) as never, e, ctx);
+      expect(res.status, path).toBe(404);
+    }
     expect(calls).toBe(0);
   });
 
@@ -232,10 +309,16 @@ describe("JSON depth", () => {
   };
 
   it("allows 50 levels and refuses 51, without recursing", () => {
-    expect(nestedDeeperThan(nest(50))).toBe(false);
-    expect(nestedDeeperThan(nest(51))).toBe(true);
-    expect(nestedDeeperThan(nest(100_000))).toBe(true);
-    expect(nestedDeeperThan("text")).toBe(false);
-    expect(nestedDeeperThan({ wide: Array.from({ length: 1000 }, (_, i) => ({ i })) })).toBe(false);
+    expect(unstorable(nest(50))).toBe("");
+    expect(unstorable(nest(51))).toMatch(/50 levels/);
+    expect(unstorable(nest(100_000))).toMatch(/50 levels/);
+    expect(unstorable("text")).toBe("");
+    expect(unstorable({ wide: Array.from({ length: 1000 }, (_, i) => ({ i })) })).toBe("");
+  });
+
+  it("refuses a name with a null character, at any level", () => {
+    expect(unstorable({ "a\u0000b": 1 })).toMatch(/null character/);
+    expect(unstorable({ list: [{ ok: { "\u0000": true } }] })).toMatch(/null character/);
+    expect(unstorable({ value: "a\u0000b" })).toBe("");
   });
 });
