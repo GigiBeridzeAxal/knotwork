@@ -121,6 +121,25 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect((await call("POST", "/api/workspaces", { cookie: alice.cookie, raw: JSON.stringify({ name: "x".repeat(70_000) }) })).status).toBe(413);
   });
 
+  it("answers 400, not 500, for JSON nested too deeply to store", async () => {
+    const deep = (levels: number) => '{"a":'.repeat(levels) + "1" + "}".repeat(levels);
+    const transform = (output: string) => ({
+      ...flow("Deep"),
+      steps: [{ id: "t_1", name: "T", type: "transform", retry: { max: 0, backoffSeconds: 5 }, config: { output: JSON.parse(output) } }],
+    });
+    const created = await call("POST", "/api/workflows", { ...alice, body: transform(deep(600)) });
+    expect(created.status).toBe(400);
+    const ok = await call("POST", "/api/workflows", { ...alice, body: flow("Deep hook", { type: "webhook" }) });
+    expect(ok.status).toBe(201);
+    const saved = await call("PUT", `/api/workflows/${ok.body.id}`, { ...alice, body: { ...transform(deep(600)), version: ok.body.version } });
+    expect(saved.status).toBe(400);
+    const run = await call("POST", `/api/workflows/${ok.body.id}/run`, { ...alice, raw: `{"input":${deep(600)}}` });
+    expect(run.status).toBe(400);
+    const hook = await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(600) });
+    expect(hook.status).toBe(400);
+    expect((await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(40) })).status).toBe(202);
+  });
+
   it("changing the password keeps this session and ends the others", async () => {
     const other = await call("POST", "/api/auth/login", { body: { email: "bob@example.com", password: "bob-password-12" } });
     const wrong = await call("POST", "/api/auth/password", { cookie: bob.cookie, body: { current: "not-it-at-all", next: "bob-password-new" } });
@@ -208,5 +227,70 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect(demo.body.user).toMatchObject({ demo: true });
     const res = await call("POST", "/api/auth/password", { cookie: demo.cookie, body: { current: "x", next: "demo-password-1" } });
     expect(res.status).toBe(403);
+  });
+
+  it("keeps a workflow's versions and hands back its newest finished run as sample data", async () => {
+    const opts = { cookie: alice.cookie, ws: alice.ws };
+    const wf = await call("POST", "/api/workflows", { ...opts, body: flow("History") });
+    const id = wf.body.id;
+    const saved = await call("PUT", `/api/workflows/${id}`, { ...opts, body: { ...flow("History two"), version: wf.body.version } });
+    expect(saved.status).toBe(200);
+    const list = await call("GET", `/api/workflows/${id}/versions`, opts);
+    expect(list.status).toBe(200);
+    expect(list.body.map((v: { version: number }) => v.version)).toEqual([2, 1]);
+    expect(list.body[0]).toMatchObject({ name: "History two", steps: [{ id: "log_1", name: "Log", type: "log" }] });
+    expect((await call("GET", `/api/workflows/${id}/versions/1`, opts)).body).toMatchObject({ version: 1, workflow: { name: "History" } });
+    expect((await call("GET", `/api/workflows/${id}/versions/0`, opts)).status).toBe(400);
+    expect((await call("GET", `/api/workflows/${id}/versions/two`, opts)).status).toBe(400);
+    expect((await call("GET", `/api/workflows/${id}/versions/99`, opts)).status).toBe(404);
+    // Bob, in his own workspace or naming Alice's: nothing.
+    expect((await call("GET", `/api/workflows/${id}/versions`, { cookie: bob.cookie, ws: bob.ws })).status).toBe(404);
+    expect((await call("GET", `/api/workflows/${id}/versions/1`, { cookie: bob.cookie, ws: alice.ws })).status).toBe(404);
+
+    const none = await call("GET", `/api/workflows/${id}/sample`, opts);
+    expect(none.status).toBe(200);
+    expect(none.body).toBeNull();
+    const run = await call("POST", `/api/workflows/${id}/run`, { ...opts, body: { input: { n: 5 } } });
+    expect(run.status).toBe(202);
+    const sample = await call("GET", `/api/workflows/${id}/sample`, opts);
+    expect(sample.body).toMatchObject({ runId: run.body.runId, trigger: { body: { n: 5 } }, steps: { log_1: { message: "hi" } }, trimmed: false });
+    expect((await call("GET", `/api/workflows/${id}/sample`, { cookie: bob.cookie, ws: bob.ws })).status).toBe(404);
+
+    expect((await call("DELETE", `/api/workflows/${id}`, opts)).status).toBe(204);
+    const client = await MongoClient.connect(uri!);
+    expect(await client.db(dbName).collection("versions").countDocuments({ workflowId: id })).toBe(0);
+    await client.close();
+  });
+
+  it("tests one step without storing anything, within an hourly limit", async () => {
+    const opts = { cookie: bob.cookie, ws: (await call("GET", "/api/me", { cookie: bob.cookie })).body.workspaces[0].id };
+    const transform = { id: "t", name: "T", type: "transform", config: { output: "{{ trigger.body.n }}" } };
+    const ok = await call("POST", "/api/steps/test", { ...opts, body: { step: transform, sample: { trigger: { body: { n: 5 } } } } });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ status: "ok", output: 5, message: null });
+    const delay = await call("POST", "/api/steps/test", { ...opts, body: { step: { id: "d", name: "D", type: "delay", config: { seconds: 60 } } } });
+    expect(delay.body).toMatchObject({ status: "waiting" });
+    expect((await call("POST", "/api/steps/test", { ...opts, body: { step: { id: "Not valid" } } })).status).toBe(400);
+    expect((await call("POST", "/api/steps/test", { ...opts, raw: "not json" })).status).toBe(400);
+    expect((await call("POST", "/api/steps/test", { ...opts, origin: "https://evil.example", body: { step: transform } })).status).toBe(403);
+    expect((await call("POST", "/api/steps/test", { body: { step: transform } })).status).toBe(401);
+
+    // The demo account's http steps stay on its allowed hosts here too.
+    const demo = await call("POST", "/api/auth/demo");
+    const demoWs = demo.body.workspaces[0].id;
+    const http = { id: "h", name: "H", type: "http", config: { url: "https://evil.example/" } };
+    const refused = await call("POST", "/api/steps/test", { cookie: demo.cookie, ws: demoWs, body: { step: http } });
+    expect(refused.body).toMatchObject({ status: "failed", message: expect.stringMatching(/demo account can only call/) });
+
+    // With the hour's tests used up, the next one is refused.
+    const me = await call("GET", "/api/me", { cookie: bob.cookie });
+    const client = await MongoClient.connect(uri!);
+    const window = Math.floor(Date.now() / 3_600_000);
+    await client
+      .db(dbName)
+      .collection("counters")
+      .updateOne({ _id: `steptest:${me.body.user.id}:${window}` } as never, { $set: { n: 60 } }, { upsert: true });
+    await client.close();
+    expect((await call("POST", "/api/steps/test", { ...opts, body: { step: transform } })).status).toBe(429);
   });
 });

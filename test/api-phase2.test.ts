@@ -5,6 +5,7 @@ import { LIMITS } from "../shared/limits";
 import worker from "../worker/index";
 import { collections, type Collections, ensureIndexes, type Env } from "../worker/mongo";
 import { dropAll } from "./dropAll";
+import { loadSecrets } from "../worker/secrets";
 
 /**
  * The HTTP API for workspace secrets, signed webhooks and "Run again", end to end through the Worker.
@@ -232,6 +233,32 @@ describe.skipIf(!uri)("HTTP API: secrets, signed webhooks and run again", () => 
     const run = await call("GET", `/api/runs/${ok.body.runId}`, { cookie: alice.cookie, ws: alice.ws });
     expect(run.body.status).toBe("succeeded");
     expect(run.body.logs[0].output).toBe("opened");
+  });
+
+  it("unwraps GitHub's default form-encoded delivery, so the event's fields are where templates expect them", async () => {
+    await freshRunBudget(alice.id);
+    const wf = await call("POST", "/api/workflows", {
+      cookie: alice.cookie,
+      ws: alice.ws,
+      body: flow("GitHub form", { type: "webhook", verify: { provider: "github", secret: "GH_SIGNING" } }, [
+        { id: "t", name: "T", type: "transform", retry, config: { output: "{{ trigger.body.ref }}" } },
+      ]),
+    });
+    const body = `payload=${encodeURIComponent(JSON.stringify({ ref: "refs/heads/main" }))}`;
+    const sent = await hook(wf.body.hookKey, body, {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-hub-signature-256": `sha256=${hmac(GH_SECRET, body)}`,
+    });
+    expect(sent.status).toBe(202);
+    const run = await call("GET", `/api/runs/${sent.body.runId}`, { cookie: alice.cookie, ws: alice.ws });
+    expect(run.body.logs[0].output).toBe("refs/heads/main");
+  });
+
+  it("trims a secret's value when it is saved", async () => {
+    const put = await call("PUT", "/api/secrets/PADDED", { cookie: alice.cookie, ws: alice.ws, body: { value: "  padded-value-123\n" } });
+    expect(put.status).toBeLessThan(300);
+    expect(await loadSecrets(c, env.AUTH_PEPPER, alice.ws, ["PADDED"])).toEqual({ PADDED: "padded-value-123" });
+    expect((await call("PUT", "/api/secrets/SPACES", { cookie: alice.cookie, ws: alice.ws, body: { value: "   abc    " } })).status).toBe(400);
   });
 
   it("checks Stripe signatures, their age, and accepts one good signature among several", async () => {

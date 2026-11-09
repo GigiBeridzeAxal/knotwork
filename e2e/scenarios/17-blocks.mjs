@@ -7,6 +7,7 @@ export default {
   async run({ actors: { alice, erin }, step, check, sees, runTag, data }) {
     await step(alice, "builds a loop that holds an if, with a step in each branch", async ({ page }) => {
       await page.goto("/workflows/new");
+      await page.getByRole("button", { name: "list", exact: true }).click();
       await page.locator("#wf-name").fill(`${runTag} blocks`);
       await page.getByRole("button", { name: /^Loop/ }).click();
       await page.getByLabel("List to go through").fill("{{ trigger.body.orders }}");
@@ -34,6 +35,19 @@ export default {
       check(loop?.type === "loop" && loop.steps[0]?.type === "if", `saved steps: ${JSON.stringify(wf.steps).slice(0, 300)}`);
       check(loop.steps[0].then.length === 1 && loop.steps[0].else.length === 1, "the if's branches don't hold one step each");
     });
+    await step(alice, "sees the same blocks drawn on the canvas, and the loop's item offered to a step inside", async ({ page }) => {
+      await page.getByRole("button", { name: "canvas", exact: true }).click();
+      await page.locator("[data-step]").first().waitFor();
+      const labels = await page.locator("[data-step]").evaluateAll((nodes) => nodes.map((n) => n.getAttribute("aria-label")));
+      check(labels.length === 4, `the canvas shows ${labels.length} steps, not 4: ${labels.join(" | ")}`);
+      check(labels.filter((l) => /Loop$/.test(l)).length === 1 && labels.filter((l) => /If \/ else$/.test(l)).length === 1, `blocks on the canvas: ${labels.join(" | ")}`);
+      await sees(alice, "For each item");
+      await sees(alice, "If true");
+      await sees(alice, "If false");
+      await page.locator("[data-step]").last().click();
+      await sees(alice, "{{ loop.item }}");
+      await page.getByRole("button", { name: "list", exact: true }).click();
+    });
     await step(alice, "runs it with three orders and reads one line per item, on the right branch", async ({ page }) => {
       await page.getByRole("button", { name: "Run now" }).click();
       await page.locator("#run-input").fill('{ "orders": [{ "id": "a1", "amount": 250 }, { "id": "a2", "amount": 20 }, { "id": "a3", "amount": 101 }] }');
@@ -57,6 +71,7 @@ export default {
     });
     await step(erin, "builds a block on her phone with no sideways scroll", async ({ page }) => {
       await page.goto("/workflows/new");
+      await page.getByRole("button", { name: "list", exact: true }).click();
       await page.locator("#wf-name").fill(`${runTag} phone blocks`);
       await page.getByRole("button", { name: /^If \/ else/ }).click();
       const then = page.getByRole("group", { name: "If: Then" });

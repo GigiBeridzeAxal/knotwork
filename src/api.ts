@@ -1,4 +1,20 @@
-import type { Me, Overview, Run, RunDetail, SecretInfo, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type {
+  Me,
+  Overview,
+  Run,
+  RunDetail,
+  RunSample,
+  SecretInfo,
+  Step,
+  StepSample,
+  StepTestResult,
+  Workflow,
+  WorkflowInput,
+  WorkflowSummary,
+  WorkflowVersion,
+  WorkflowVersionDetail,
+  Workspace,
+} from "../shared/schema";
 
 /**
  * The signed-in session lives in an HttpOnly cookie the browser sends by itself. The workspace being
@@ -85,4 +101,11 @@ export const api = {
   setSecret: (name: string, value: string) =>
     request<SecretInfo>(`/secrets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ value }) }),
   deleteSecret: (name: string) => request<void>(`/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  versions: (workflowId: string) => request<WorkflowVersion[]>(`/workflows/${workflowId}/versions`),
+  version: (workflowId: string, version: number) => request<WorkflowVersionDetail>(`/workflows/${workflowId}/versions/${version}`),
+  /** Data from the workflow's latest finished run, or null when it has never run. */
+  sample: (workflowId: string) => request<RunSample | null>(`/workflows/${workflowId}/sample`),
+  testStep: (step: Step, sample: StepSample, workflowName: string) =>
+    request<StepTestResult>("/steps/test", post({ step, sample, workflowName })),
 };

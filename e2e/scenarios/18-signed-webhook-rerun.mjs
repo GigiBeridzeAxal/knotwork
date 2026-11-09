@@ -25,6 +25,7 @@ export default {
       const made = (await api(alice, "POST", "/workflows", wf, data.ws)).body;
       data.id = made.id;
       await page.goto(`/workflows/${made.id}`);
+      await page.getByRole("button", { name: "list", exact: true }).click();
       await page.getByLabel("Check the sender's signature").selectOption("github");
       await page.getByLabel("Signing secret").selectOption(name);
       await page.getByRole("button", { name: "Save" }).click();

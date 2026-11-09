@@ -347,3 +347,57 @@ export interface Overview {
   /** This account's hourly run limit right now (lower in its first 24 hours). */
   runsLimit: number;
 }
+
+// ---------- Version history ----------
+
+/** One saved version of a workflow, as the history list shows it (steps without their settings). */
+export interface WorkflowVersion {
+  version: number;
+  savedAt: number;
+  name: string;
+  trigger: Trigger;
+  steps: Pick<Step, "id" | "name" | "type">[];
+}
+
+/** A saved version with everything needed to load it back into the editor. */
+export interface WorkflowVersionDetail {
+  version: number;
+  savedAt: number;
+  workflow: WorkflowInput;
+}
+
+// ---------- Testing one step ----------
+
+/** The data a step is tested with: what `{{ trigger }}` and `{{ steps.<id> }}` resolve to. */
+export const stepSample = z.object({
+  trigger: z.unknown().optional(),
+  steps: z.record(z.string(), z.unknown()).default({}),
+  /** For a step inside a loop: what `{{ loop.item }}`, `{{ loop.index }}` and `{{ loop.count }}` hold. */
+  loop: z.object({ item: z.unknown().optional(), index: z.number().int().min(0).default(0), count: z.number().int().min(0).default(1) }).optional(),
+});
+
+export const stepTestInput = z.object({
+  step: stepSchema,
+  sample: stepSample.default({ steps: {} }),
+  workflowName: z.string().max(80).default("Untitled workflow"),
+});
+
+export type StepSample = z.infer<typeof stepSample>;
+
+export interface StepTestResult {
+  /** `waiting` means a delay step: the test says how long it would wait, without waiting. */
+  status: "ok" | "failed" | "stopped" | "waiting";
+  message: string | null;
+  output: unknown;
+  durationMs: number;
+}
+
+/** Data from a workflow's most recent finished run, to test steps with. */
+export interface RunSample {
+  runId: string;
+  createdAt: number;
+  trigger: unknown;
+  steps: Record<string, unknown>;
+  /** True when some outputs were left out to keep the answer small. */
+  trimmed: boolean;
+}

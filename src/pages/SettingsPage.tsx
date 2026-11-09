@@ -374,6 +374,7 @@ export function SettingsPage() {
           <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Items per loop" value={`up to ${LIMITS.loopItems}`} />
+          <Row label="Steps one run can take" value={`up to ${LIMITS.stepRunsPerRun}`} />
           <Row label="Secrets per workspace" value={`up to ${LIMITS.secretsPerWorkspace}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>

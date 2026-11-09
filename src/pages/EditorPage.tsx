@@ -7,6 +7,9 @@ import { BLANK } from "../../shared/examples";
 import { Link, navigate } from "../router";
 import { useFindElsewhere } from "../session";
 import { StepList } from "./StepList";
+import { CanvasView } from "../canvas/CanvasView";
+import { stashedImport } from "../canvas/transfer";
+import { findTemplate } from "../../shared/templates";
 
 const CRON_PRESETS = [
   { label: "Every 5 minutes", cron: "*/5 * * * *" },
@@ -15,13 +18,35 @@ const CRON_PRESETS = [
   { label: "Mondays at 8:00 UTC", cron: "0 8 * * 1" },
 ];
 
+type View = "canvas" | "list";
+const VIEW_KEY = "knotwork.editorView";
+
+/** A new workflow starts blank, from a template (`?template=<id>`) or from an imported file (`?import`). */
+function startingPoint(): { draft: WorkflowInput; input?: unknown } {
+  const query = new URLSearchParams(location.search);
+  const template = findTemplate(query.get("template") ?? "");
+  if (template) return { draft: structuredClone(template.workflow), input: template.sampleInput };
+  const imported = query.has("import") ? stashedImport() : null;
+  return { draft: imported ?? structuredClone(BLANK) };
+}
+
+const DEFAULT_INPUT = { amount: 120, id: "order_1" };
+
 function toInput(wf: Workflow): WorkflowInput {
   return { name: wf.name, description: wf.description, enabled: wf.enabled, trigger: wf.trigger, steps: wf.steps };
 }
 
 export function EditorPage({ id }: { id: string | null }) {
   const [saved, setSaved] = useState<Workflow | null>(null);
-  const [draft, setDraft] = useState<WorkflowInput | null>(id ? null : structuredClone(BLANK));
+  const [start] = useState(() => (id ? null : startingPoint()));
+  const [draft, setDraft] = useState<WorkflowInput | null>(start?.draft ?? null);
+  const [view, setView] = useState<View>(() => {
+    try {
+      return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "canvas";
+    } catch {
+      return "canvas";
+    }
+  });
   const [issues, setIssues] = useState<Issue[]>([]);
   const [message, setMessage] = useState("");
   /** Someone saved this workflow elsewhere (another tab or device) after it was opened here. */
@@ -30,7 +55,7 @@ export function EditorPage({ id }: { id: string | null }) {
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [showRun, setShowRun] = useState(false);
-  const [runInput, setRunInput] = useState('{\n  "amount": 120,\n  "id": "order_1"\n}');
+  const [runInput, setRunInput] = useState(() => JSON.stringify(start?.input ?? DEFAULT_INPUT, null, 2));
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
   const findElsewhere = useFindElsewhere();
@@ -38,7 +63,13 @@ export function EditorPage({ id }: { id: string | null }) {
   const [secrets, setSecrets] = useState<SecretInfo[]>([]);
   useEffect(() => {
     let stale = false;
-    const load = () => api.secrets().then((list) => !stale && setSecrets(list), () => {});
+    let loadedAt = 0;
+    const load = () => {
+      // Coming back to the tab asks again, but not more than twice a minute.
+      if (Date.now() - loadedAt < 30_000) return;
+      loadedAt = Date.now();
+      api.secrets().then((list) => !stale && setSecrets(list), () => {});
+    };
     load();
     // Settings opens in another tab from here; coming back picks up a secret added there.
     window.addEventListener("focus", load);
@@ -155,7 +186,7 @@ export function EditorPage({ id }: { id: string | null }) {
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div className="flex min-w-0 flex-1 basis-64 flex-col gap-2">
           <Link href="/workflows" className="text-sm text-soft hover:text-text">
             ← Workflows
           </Link>
@@ -172,10 +203,33 @@ export function EditorPage({ id }: { id: string | null }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {message && (
-            <span role="status" className={cn("text-sm", message === "Saved" ? "text-soft" : "text-fail")}>
+            <span role="status" className={cn("text-sm max-sm:order-last max-sm:basis-full", message === "Saved" ? "text-soft" : "text-fail")}>
               {message}
             </span>
           )}
+          <div role="group" aria-label="View" className="flex h-11 items-center gap-1 rounded-[10px] border border-line p-1">
+            {(["canvas", "list"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                aria-pressed={view === v}
+                onClick={() => {
+                  setView(v);
+                  try {
+                    localStorage.setItem(VIEW_KEY, v);
+                  } catch {
+                    // Storage blocked: the choice lasts until the page is reloaded.
+                  }
+                }}
+                className={cn(
+                  "h-full rounded-md px-3 text-[13px] font-medium capitalize transition-colors",
+                  view === v ? "bg-raised text-text" : "text-muted hover:text-text",
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
           <Button onClick={save} disabled={busy || !dirty}>
             {saved ? (dirty ? "Save" : "Saved") : "Create"}
           </Button>
@@ -235,6 +289,36 @@ export function EditorPage({ id }: { id: string | null }) {
         </Card>
       )}
 
+      {view === "canvas" && (
+        <CanvasView
+          draft={draft}
+          saved={saved}
+          runs={runs}
+          issues={issues}
+          resetKey={version}
+          update={update}
+          secretNames={secrets.map((x) => x.name)}
+          sampleInput={(() => {
+            try {
+              return JSON.parse(runInput);
+            } catch {
+              return {};
+            }
+          })()}
+          triggerEditor={
+            <TriggerCard bare trigger={draft.trigger} onChange={(trigger) => update({ trigger })} hookUrl={hookUrl} cronError={cronError} secrets={secrets} />
+          }
+          onRestore={(workflow) => {
+            touched.current = true;
+            setDraft(workflow);
+            setIssues([]);
+            setVersion((v) => v + 1);
+          }}
+          onDelete={remove}
+        />
+      )}
+
+      {view === "list" && (
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
         {/* min-w-0: a grid column is otherwise as wide as its longest unbroken line (the webhook URL). */}
         <div className="flex min-w-0 flex-col">
@@ -298,6 +382,7 @@ export function EditorPage({ id }: { id: string | null }) {
           )}
         </aside>
       </div>
+      )}
     </div>
   );
 }
@@ -308,7 +393,10 @@ function TriggerCard({
   hookUrl,
   cronError,
   secrets,
+  bare = false,
 }: {
+  /** Without the card around it, for the canvas's side panel. */
+  bare?: boolean;
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
@@ -322,9 +410,9 @@ function TriggerCard({
     { type: "schedule", label: "Schedule", blurb: "Runs on a cron, in UTC" },
   ];
   return (
-    <Card className="flex flex-col gap-4 p-4">
-      <span className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Trigger</span>
-      <fieldset className="grid gap-2 sm:grid-cols-3">
+    <div className={cn("flex flex-col gap-4", !bare && "rounded-2xl border border-line bg-graphite p-4")}>
+      {!bare && <span className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Trigger</span>}
+      <fieldset className={cn("grid gap-2", !bare && "sm:grid-cols-3")}>
         <legend className="sr-only">How this workflow starts</legend>
         {types.map((t) => (
           <label
@@ -394,13 +482,23 @@ function TriggerCard({
         ))}
 
       {trigger.type === "webhook" && <SignatureCheck trigger={trigger} onChange={onChange} secrets={secrets} />}
-    </Card>
+    </div>
   );
 }
 
 const PROVIDER = {
-  github: { label: "GitHub", where: "the Secret field of the webhook in the repository's settings" },
-  stripe: { label: "Stripe", where: "the signing secret (whsec_…) of the endpoint in Stripe's dashboard" },
+  github: {
+    label: "GitHub",
+    where: "the Secret field of the webhook in the repository's settings",
+    setup: "In the repository, open Settings, then Webhooks, then Add webhook. Payload URL: the URL above. Content type: application/json. Secret: the same value you saved here.",
+    trace: "the webhook's Recent Deliveries on GitHub",
+  },
+  stripe: {
+    label: "Stripe",
+    where: "the signing secret (whsec_…, the whole text) of the endpoint in Stripe's dashboard",
+    setup: "In Stripe, open Developers, then Webhooks, and add an endpoint with the URL above. Copy its signing secret and save it here.",
+    trace: "the event's delivery attempts in Stripe",
+  },
 } as const;
 
 /** Lets a webhook refuse calls that weren't signed by GitHub or Stripe with a secret kept in the workspace. */
@@ -460,7 +558,8 @@ function SignatureCheck({
           <a href="/settings" target="_blank" rel="noreferrer" className="text-soft underline underline-offset-2 hover:text-text">
             Settings
           </a>{" "}
-          (opens in a new tab, so nothing here is lost), then pick it here.
+          (opens in a new tab, so nothing here is lost), then pick it here. {PROVIDER[verify.provider].setup} A refused call leaves no run
+          here; {PROVIDER[verify.provider].trace} show the answer and why.
         </p>
       )}
     </div>

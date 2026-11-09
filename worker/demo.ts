@@ -87,6 +87,7 @@ export async function resetDemo(c: Collections, now: number, pepper: string) {
   const extra = await c.workspaces.find({ ownerId: DEMO_USER_ID, _id: { $ne: DEMO_WORKSPACE_ID } }).toArray();
   const ids = [DEMO_WORKSPACE_ID, ...extra.map((w) => w._id)];
   await c.runs.deleteMany({ workspaceId: { $in: ids } });
+  await c.versions.deleteMany({ workspaceId: { $in: ids } });
   await c.workflows.deleteMany({ workspaceId: { $in: ids } });
   await c.secrets.deleteMany({ workspaceId: { $in: ids } });
   await c.workspaces.deleteMany({ _id: { $in: extra.map((w) => w._id) } });
