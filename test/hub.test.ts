@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
-import worker from "../worker/index";
+import { describe, expect, it, vi } from "vitest";
+import worker, { nestedDeeperThan } from "../worker/index";
 import { Hub } from "../worker/hub";
+import { newHookKey } from "../worker/hookKey";
 import { type Env, isConnectionError, Mongo } from "../worker/mongo";
 
 /**
@@ -115,6 +116,32 @@ describe("Hub connection", () => {
     expect(first.closed).toBe(true);
   });
 
+  it("replaces the connection at most once in 30 seconds, however often requests fail", async () => {
+    const hub = new TestHub();
+    const first = hub.current;
+    hub.handle = async (_request, e) => {
+      e.SHARED_MONGO!.broken = true;
+      return new Response(null, { status: 500 });
+    };
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValue(1_000_000);
+      await get(hub);
+      const second = hub.current;
+      expect(second).not.toBe(first);
+      clock.mockReturnValue(1_000_000 + 29_000);
+      await get(hub);
+      await get(hub);
+      expect(hub.current).toBe(second);
+      clock.mockReturnValue(1_000_000 + 31_000);
+      await get(hub);
+      expect(hub.current).not.toBe(second);
+      expect(second.closed).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("only answers the tick on its internal address", async () => {
     const hub = new TestHub();
     let ticks = 0;
@@ -156,9 +183,10 @@ describe("Worker in front of the hub", () => {
       paths.push(new URL(r.url).pathname);
       return new Response("hub");
     });
+    const key = await newHookKey(env.AUTH_PEPPER);
     await worker.fetch(request("/api/health") as never, e, ctx);
-    await worker.fetch(request("/hooks/abc") as never, e, ctx);
-    expect(paths).toEqual(["/api/health", "/hooks/abc"]);
+    await worker.fetch(request(`/hooks/${key}`) as never, e, ctx);
+    expect(paths).toEqual(["/api/health", `/hooks/${key}`]);
   });
 
   it("answers 503 JSON when the hub can't be reached", async () => {
@@ -179,11 +207,35 @@ describe("Worker in front of the hub", () => {
     expect(calls).toBe(0);
   });
 
+  it("refuses a made-up webhook key without calling the hub", async () => {
+    let calls = 0;
+    const e = withHub(async () => (calls++, new Response("hub")));
+    const res = await worker.fetch(new Request(`https://kw.test/hooks/${"x".repeat(24)}`, { method: "POST" }) as never, e, ctx);
+    expect(res.status).toBe(404);
+    expect(calls).toBe(0);
+  });
+
   it("runs without the hub when HUB_OFF is set", async () => {
     let calls = 0;
     const e = withHub(async () => (calls++, new Response("hub")), { HUB_OFF: "1" });
     const res = await worker.fetch(request("/api/health") as never, e, ctx);
     expect(res.status).toBe(200);
     expect(calls).toBe(0);
+  });
+});
+
+describe("JSON depth", () => {
+  const nest = (levels: number) => {
+    let value: unknown = 1;
+    for (let i = 0; i < levels; i++) value = i % 2 ? [value] : { a: value };
+    return value;
+  };
+
+  it("allows 50 levels and refuses 51, without recursing", () => {
+    expect(nestedDeeperThan(nest(50))).toBe(false);
+    expect(nestedDeeperThan(nest(51))).toBe(true);
+    expect(nestedDeeperThan(nest(100_000))).toBe(true);
+    expect(nestedDeeperThan("text")).toBe(false);
+    expect(nestedDeeperThan({ wide: Array.from({ length: 1000 }, (_, i) => ({ i })) })).toBe(false);
   });
 });

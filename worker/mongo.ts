@@ -182,6 +182,10 @@ export class Mongo {
         serverMonitoringMode: "poll",
         serverSelectionTimeoutMS: 8_000,
         connectTimeoutMS: 8_000,
+        // A socket that hangs, or a queue behind two busy sockets, becomes an error instead of a
+        // request that waits for ever. No query here should take anywhere near this long.
+        socketTimeoutMS: 20_000,
+        waitQueueTimeoutMS: 10_000,
         appName: "knotwork",
       });
       this.started = Date.now();

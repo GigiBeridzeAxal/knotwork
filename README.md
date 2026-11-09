@@ -48,8 +48,8 @@ Browser ──► Cloudflare Worker ──► hub (one Durable Object) ──►
                        every 10 min check storage, hourly check indexes, daily reset the demo
 ```
 
-The Worker checks the per-IP rate limit and passes `/api/*`, `/hooks/*` and the cron tick to the hub, which
-runs them on a database connection it keeps open.
+The Worker checks the per-IP rate limit and a webhook key's signature, and passes `/api/*`, `/hooks/*` and
+the cron tick to the hub, which runs them on a database connection it keeps open.
 
 | Part | Where |
 | --- | --- |
@@ -93,8 +93,9 @@ the Worker hands `/api/` and `/hooks/` requests and the cron tick to one Durable
 ([`worker/hub.ts`](worker/hub.ts)), placed in western Europe next to the cluster. The hub keeps its
 connection open between requests (two pooled sockets, monitors polling instead of streaming), so only its
 first request after it starts pays the handshake. If a request fails with a connection error, the hub
-starts a new connection for later requests and closes the old one once the work still using it has
-finished; other errors leave the connection alone. Without the `HUB` binding (the tests) or with `HUB_OFF`
+starts a new connection for later requests (at most one every 30 seconds) and closes the old one once the
+work still using it has finished; other errors leave the connection alone. A query that hangs fails after
+20 seconds, and one that waits more than 10 seconds for a free socket fails too. Without the `HUB` binding (the tests) or with `HUB_OFF`
 set, each request opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
 time, and the connect time when the request had to open the connection.
 
@@ -231,8 +232,9 @@ password and webhook URL stop working.
   (about 2 seconds slower, and over the free plan's CPU limit, which Cloudflare enforces loosely), so use it
   only until the fix is deployed. Rollbacks between versions that both have the hub work as usual.
 - **Daily limits on the free plan.** 100,000 requests to the hub (every `/api/` and `/hooks/` call that
-  passes the rate limit, plus 1,440 cron ticks) and 13,000 GB-s of duration (the hub uses about 11,060).
-  They are separate from the Worker's own 100,000 requests.
+  passes the rate limit and, for a webhook, has a real key, plus 1,440 cron ticks) and 13,000 GB-s of duration (the hub uses about 11,060).
+  They are separate from the Worker's own 100,000 requests, and they are per Cloudflare account: a second
+  always-on Durable Object (a staging copy, say) would take the duration over the limit.
 - **At a limit.** Calls to the hub fail until 00:00 UTC. The Worker then answers `/api/` and `/hooks/` with
   503 and a plain message, the dashboard shows "Knotwork isn't answering right now" instead of the login
   page, and schedules and waiting runs pick up again after midnight. Workers & Pages > Durable Objects in
@@ -249,6 +251,7 @@ Because anyone can sign up, there are limits ([`shared/limits.ts`](shared/limits
 person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
+- JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400.
 - 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
   first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's

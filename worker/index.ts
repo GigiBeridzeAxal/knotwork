@@ -57,6 +57,28 @@ const MAX_API_BODY = 64 * 1024;
 /** How much of a webhook call's headers and query string a run keeps (characters). */
 const MAX_HOOK_HEADER_CHARS = 8_000;
 const MAX_HOOK_QUERY_CHARS = 2_000;
+/**
+ * How deeply JSON from a client may be nested. MongoDB refuses documents nested more than 100
+ * levels, and a workflow's step or a run's input sits a few levels inside its document.
+ */
+const MAX_JSON_DEPTH = 50;
+
+/** True when a parsed JSON value is nested more than `max` levels (no recursion: the input may be very deep). */
+export function nestedDeeperThan(value: unknown, max = MAX_JSON_DEPTH): boolean {
+  let level: unknown[] = [value];
+  for (let depth = 0; level.length; depth++) {
+    const next: unknown[] = [];
+    for (const item of level) {
+      if (item && typeof item === "object") {
+        if (depth >= max) return true;
+        for (const child of Array.isArray(item) ? item : Object.values(item)) next.push(child);
+      }
+    }
+    level = next;
+  }
+  return false;
+}
+const TOO_DEEP = `That JSON is nested more than ${MAX_JSON_DEPTH} levels deep`;
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -397,6 +419,7 @@ scoped.get("/overview", async (c) => {
 scoped.post("/workflows", async (c) => {
   const parsed = workflowInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
+  if (nestedDeeperThan(parsed.data)) return c.json({ error: TOO_DEEP }, 400);
   const res = await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now(), await newHookKey(c.env.AUTH_PEPPER));
   if (res === "full") return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
   if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
@@ -412,6 +435,7 @@ scoped.put("/workflows/:id", async (c) => {
   const body = await c.req.json().catch(() => null);
   const parsed = workflowInput.safeParse(body);
   if (!parsed.success) return c.json(issues(parsed.error), 400);
+  if (nestedDeeperThan(parsed.data)) return c.json({ error: TOO_DEEP }, 400);
   const version = workflowSave.safeParse(body);
   if (!version.success) return c.json({ error: "Missing the version this workflow was loaded at" }, 400);
   const res = await updateWorkflow(db(c), c.req.param("id"), c.var.workspace, parsed.data, version.data.version, Date.now());
@@ -436,6 +460,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   } catch {
     return c.json({ error: "The test input isn't valid JSON" }, 400);
   }
+  if (nestedDeeperThan(body)) return c.json({ error: TOO_DEEP }, 400);
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
   const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "manual", runBytes(body?.input, doc.steps));
@@ -503,6 +528,7 @@ app.all(
       } catch {
         return c.json({ error: "The body isn't valid JSON" }, 400);
       }
+      if (nestedDeeperThan(body)) return c.json({ error: TOO_DEEP }, 400);
     } else if (type.includes("application/x-www-form-urlencoded")) {
       body = Object.fromEntries(new URLSearchParams(text));
     }
@@ -549,6 +575,12 @@ export default {
     if (useHub(env) && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) {
       const refused = await overLimit(env, request);
       if (refused) return refused;
+      // A made-up webhook key is refused here with CPU alone, so it costs none of the hub's daily
+      // requests. (The hub checks again; this must never be the only check.)
+      const hook = /^\/hooks\/([^/]+)$/.exec(pathname);
+      if (hook && !(await hookKeyValid(hook[1], env.AUTH_PEPPER).catch(() => true))) {
+        return Response.json({ error: "Unknown webhook" }, { status: 404 });
+      }
       try {
         return await hub(env).fetch(request);
       } catch (err) {

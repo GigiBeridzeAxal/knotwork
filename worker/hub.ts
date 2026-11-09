@@ -2,6 +2,8 @@ import { handle, HUB_TICK } from "./index";
 import { tick } from "./engine";
 import { type Env, isConnectionError, Mongo } from "./mongo";
 
+const REPLACE_GAP_MS = 30_000;
+
 /** A connection and how many requests and background jobs are still using it. */
 interface Conn {
   mongo: Mongo;
@@ -24,6 +26,8 @@ export class Hub {
   private conn: Conn;
   private env: Env;
   private state: DurableObjectState;
+  /** When the connection was last replaced (ms), so a burst of failures can't open one after another. */
+  private replacedAt = 0;
   /** What the hub runs; a field so tests can replace it. */
   protected work = { handle, tick };
 
@@ -67,9 +71,16 @@ export class Hub {
     return res;
   }
 
-  /** Starts a new connection for later requests, once, however many requests failed on the old one. */
+  /**
+   * Starts a new connection for later requests: once however many requests failed on the old one,
+   * and at most once in REPLACE_GAP_MS. Every new connection costs Atlas sockets and a handshake,
+   * and the driver repairs most network errors on the connection it has.
+   */
   private replace(conn: Conn) {
     if (this.conn !== conn) return;
+    const now = Date.now();
+    if (now - this.replacedAt < REPLACE_GAP_MS) return;
+    this.replacedAt = now;
     this.conn = this.open();
     conn.retired = true;
     if (conn.busy === 0) void conn.mongo.close();
