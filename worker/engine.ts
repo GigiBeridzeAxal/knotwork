@@ -5,7 +5,7 @@ import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
 import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
-import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
+import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc, unstorable } from "./mongo";
 import { compile, type Op } from "./program";
 import { loadSecrets, redactor, secretRefs } from "./secrets";
 import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loopItems, type Scope, type StepResult } from "./steps";
@@ -26,6 +26,8 @@ import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loo
 const LEASE_MS = 60_000;
 /** Stop after this long in one invocation and let the next tick carry on. */
 const TIME_BUDGET_MS = 25_000;
+const PAUSED_OWN = "Paused: this run made as many requests as fit in one go. It carries on within a minute.";
+const PAUSED_SHARED = "Paused: Knotwork made as many requests as fit in this minute. This run carries on within a minute.";
 /** Steps that only compute are saved together: after this long, or this many log lines. */
 const SAVE_EVERY_MS = 1_000;
 const SAVE_EVERY_LINES = 25;
@@ -161,7 +163,14 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
       cut = Math.floor((cut * max) / size) - 8;
     }
   }
-  return { value: JSON.parse(text), bytes };
+  const copy = JSON.parse(text);
+  // The database refuses very deep values and names with a null character; an http step can return either.
+  const why = unstorable(copy);
+  if (why) {
+    const note = { unsaved: true, reason: `The output couldn't be saved. ${why}` };
+    return { value: note, bytes: utf8Bytes(JSON.stringify(note)) };
+  }
+  return { value: copy, bytes };
 }
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
@@ -279,6 +288,8 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
   let attempt = run.attempt;
   let outputBytes = run.outputBytes;
   let stepRuns = run.stepRuns ?? 0;
+  /** Requests this run may still make in this invocation, whatever is left of the shared allowance. */
+  let mine: number = LIMITS.httpCallsPerGo;
   // Log ids only need to be unique and increasing within a run; an invocation logs at most
   // LIMITS.stepRunsPerRun lines, and the next one starts at least a millisecond later.
   let logId = started * 1000;
@@ -544,7 +555,7 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
       if (stepRuns >= LIMITS.stepRunsPerRun) {
         await finish(
           "failed",
-          `The run reached ${LIMITS.stepRunsPerRun} steps, the most one run can take (each pass of a loop and each retry counts)`,
+          `The run reached ${LIMITS.stepRunsPerRun} steps, the most one run can take (every step in every pass of a loop counts, and every retry)`,
           entry(op, "failed", at, "Too many steps"),
         );
         return;
@@ -552,11 +563,15 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
       // A step that reaches outside starts from a saved place, so a crash can't make it happen twice.
       const outside = op.kind === "step" && (current.type === "http" || current.type === "delay");
       if (op.kind === "step" && current.type === "http") {
-        if (allowance.calls <= 0) {
-          await park(Date.now(), undefined, "Paused: this run made as many requests as fit in one go. It carries on within a minute.");
+        // Its own share first, then what the runs woken together may still make between them.
+        if (mine <= 0) {
+          await park(Date.now(), undefined, PAUSED_OWN);
           return;
         }
-        allowance.calls -= 1;
+        if (allowance.calls <= 0) {
+          await park(Date.now(), undefined, PAUSED_SHARED);
+          return;
+        }
       }
       if (outside && unsaved()) await save({ leaseUntil: Date.now() + LEASE_MS });
 
@@ -566,6 +581,10 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
       } catch (err) {
         result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
       }
+      // Every request counts, redirects too. (A step that made none, say a refused address, costs nothing.)
+      const made = "calls" in result ? (result.calls ?? 0) : 0;
+      mine -= made;
+      allowance.calls -= made;
 
       switch (result.kind) {
         case "ok":
@@ -616,13 +635,15 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
           return;
         }
         case "fail": {
-          // The platform's own cap on outgoing requests, not the step's fault: carry on next minute.
-          if (/too many subrequests/i.test(result.message)) {
+          stepRuns += 1; // every try counts, so retries can't multiply what a run may do
+          // The platform's own cap on outgoing requests, not the step's fault: carry on next minute. The
+          // sign comes from the thrown error only (never from text a step wrote), and the try still
+          // counts as a step run, so a run can't sit in this state for ever.
+          if (result.outOfCalls) {
             allowance.calls = 0;
-            await park(Date.now(), undefined, "Paused: this run made as many requests as fit in one go. It carries on within a minute.");
+            await park(Date.now(), undefined, PAUSED_SHARED);
             return;
           }
-          stepRuns += 1; // every try counts, so retries can't multiply what a run may do
           if (attempt < current.retry.max) {
             const wait = current.retry.backoffSeconds * 4 ** attempt;
             const message = `${result.message}. Trying again in ${formatSeconds(wait)} (${attempt + 1} of ${current.retry.max} retries)`;

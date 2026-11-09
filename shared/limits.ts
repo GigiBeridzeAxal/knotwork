@@ -18,9 +18,10 @@ export const LIMITS = {
    */
   stepRunsPerRun: 200,
   /**
-   * Requests to other sites one run makes before it steps aside until the next minute, and the most
-   * all the runs woken in one minute make together. Cloudflare's free plan allows 50 outgoing requests
-   * per invocation; redirects use some of them too.
+   * Requests to other sites one run makes in one invocation before it steps aside until the next
+   * minute, and the most all the runs woken by one cron tick make together (each of them still at
+   * most its own share). A redirect followed counts as a request. Cloudflare's free plan allows 50
+   * outgoing requests per invocation.
    */
   httpCallsPerGo: 30,
   httpCallsPerTick: 40,
@@ -74,4 +75,16 @@ export const LIMITS = {
   stepTestsPerHour: 60,
   /** The most run data `GET /workflows/:id/sample` hands back for testing steps. */
   sampleBytes: 32_000,
+  /** People in one workspace besides its owner, and open invite links it can have at once. */
+  membersPerWorkspace: 10,
+  invitesPerWorkspace: 5,
+  /** An invite link stops working after this many days, or once this many people joined with it. */
+  inviteDays: 7,
+  inviteUses: 10,
+  /** Workspaces of other people one account can be a member of. */
+  joinedWorkspacesPerAccount: 20,
+  /** Recovery codes made at a time. Each works once. */
+  recoveryCodes: 8,
+  /** API keys one account can have. */
+  apiKeysPerAccount: 10,
 } as const;

@@ -39,14 +39,18 @@ attempt is written to a run log you can open in the dashboard.
   layout of its own to save: it is drawn from the same steps as the list view, and a switch flips between the two.
 - **Test one step.** A step's Test tab runs just that step against test data you can edit, or load from the
   last run, and shows what it returned. Nothing is saved and no run is started. A step that passes adds its
-  output to the test data, so you can test your way down the workflow.
+  output to the test data, so you can test your way down the workflow. Testing an `if` says which way it
+  would go and testing a `loop` what it would go through (its first item becomes `loop.item` for testing
+  the steps inside); the steps a block holds don't run. A step that uses a secret really sends it, and the
+  answer hides it the way a run's log does.
 - **Version history.** Every save keeps a copy (the newest 20). Pick one to see it on the canvas, read-only,
   and restore it into the editor if you want it back; it only replaces the current version when you save.
 - **Templates, import and export.** Nine ready-made workflows open on the canvas unsaved, so you can look one
   over before pressing Create. Any workflow exports as a small JSON file (trigger and steps only: no webhook
   URL, no history) and imports through the same checks as a save. The file holds whatever was typed into
   the steps, API keys in headers included, so check it before sharing.
-- **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
+- **Durable runs.** A run saves its place in the database as it goes: before and after every step that
+  reaches outside, and every few steps in between. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
 - **Run history.** Every attempt, a preview of its output, and how long it took. History is kept for 7 days
@@ -55,7 +59,14 @@ attempt is written to a run log you can open in the dashboard.
   shared **demo account** with one click. Every account starts with a **Personal** workspace and can add more;
   the sidebar switches between them, and its **+** adds a workflow to the one you're in. A workspace only ever
   sees its own workflows and runs, and a link to a workflow or run in another of your workspaces switches there.
-  Settings can change your password (which logs out your other devices) or delete the account with everything in it.
+  Settings can change your password (which logs out your other devices and revokes your API keys) or delete the account with everything in it.
+- **Teams.** The owner of a workspace can share it with an invite link, as an **editor** (changes workflows
+  and starts runs) or a **viewer** (only looks). The owner can change a member's role or remove them at any
+  time, and a member can leave.
+- **Recovery codes.** Knotwork sends no email, so there is no reset link. Instead, Settings makes 8
+  one-time recovery codes; one of them, with your email, sets a new password.
+- **API keys.** Scripts can list and change workflows, start runs and read results with a key made in
+  Settings, read-only or read and write, for one workspace. See the [API reference](docs/api.md).
 - **Safe concurrent edits.** Every save carries the version it was loaded at. If someone saved in between
   (another tab, another device), you're asked to keep your version or load theirs, so nothing is lost silently.
 
@@ -65,8 +76,8 @@ attempt is written to a run log you can open in the dashboard.
 
 ```
 Browser ──► Cloudflare Worker ──► hub (one Durable Object) ──► MongoDB Atlas (free M0 cluster)
-              │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
-              │  /api/*       Hono JSON API for the dashboard
+              │  /api/auth/*  sign up, log in, demo, log out, password, recovery codes, delete account (session cookie)
+              │  /api/*       Hono JSON API for the dashboard, and for scripts with an API key
               │  /hooks/*     public webhook endpoints
               │  /*           React dashboard (static assets, served without the hub), incl. /docs and /demo
               └─ cron: every minute → fire schedules, resume parked runs;
@@ -85,7 +96,9 @@ the cron tick to the hub, which runs them on a database connection it keeps open
 | Webhook signature checks (GitHub, Stripe) | [`worker/signature.ts`](worker/signature.ts) |
 | Testing one step from the editor | [`worker/stepTest.ts`](worker/stepTest.ts) |
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
-| Accounts: password hashing, sessions, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
+| Accounts: password hashing, sessions, recovery codes, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
+| Teams and API keys: roles, invite links, members | [`worker/access.ts`](worker/access.ts) |
+| Signed webhook keys and API keys | [`worker/hookKey.ts`](worker/hookKey.ts) |
 | Queries, and the limits that need the database | [`worker/db.ts`](worker/db.ts) |
 | Collections, indexes and the database connection | [`worker/mongo.ts`](worker/mongo.ts) |
 | The Durable Object that keeps the connection open | [`worker/hub.ts`](worker/hub.ts) |
@@ -124,11 +137,13 @@ is 151). A loop inside a loop can't run away.
 
 **Saving as it goes.** A step that reaches outside (an `http` call, a `delay`) starts from a saved place and
 is saved right after, so a Worker that stops can't make it happen twice. Steps that only compute (`if`,
-`transform`, `filter`, `log`, a loop moving on) are saved together, about once a second; if the Worker
+`transform`, `filter`, `log`, a loop moving on) are saved together, every 25 log lines or every second,
+whichever comes first; if the Worker
 stops in between they run again and give the same result. A 50-item loop of such steps costs a handful of
 database writes, not 150. A run makes at most 30 requests to other sites in one go, and the runs woken in
 the same minute at most 40 together, because Cloudflare's free plan allows 50 outgoing requests per
-invocation; a run that reaches that says so and carries on within a minute.
+invocation; every redirect followed counts as a request. A run that reaches either number says so and
+carries on within a minute, so a loop of 50 requests takes two or three minutes.
 
 **Secrets.** A secret's value is encrypted with AES-256-GCM before it is stored. The key is derived
 (HKDF-SHA-256) from `AUTH_PEPPER`, which only the Worker has, with the workspace id as salt, so a copy of the
@@ -136,8 +151,8 @@ database alone can't be read and each workspace has its own key; the workspace i
 bound into the ciphertext, so a stored value can't be moved to another name or workspace. The API lists
 names and dates and never sends a value back. A run reads and decrypts only the secrets its steps name. Every
 output, log line and error a run stores goes through one function that replaces each secret's value (as it
-is, as it looks inside JSON text, URL-encoded, and, for a secret that is a web address, without its scheme
-or as its path alone) with `[secret NAME]`, also in what later steps see. What a step says about itself in
+is, as it looks inside JSON text, URL-encoded, and, for a secret that is a web address, without its scheme,
+as its path alone, or as one of its query values of 8 characters or more) with `[secret NAME]`, also in what later steps see. What a step says about itself in
 the log (the address it called, the two sides of a condition) is written with the secret already swapped
 for its mark, so cutting or parsing the text can't leave part of one: a Slack webhook URL kept as a secret
 logs as `POST [secret SLACK_URL] → 200`. A value changed some other way (hashed, base64) can't be
@@ -168,9 +183,9 @@ Setting one up:
    signing secret (`whsec_…`, the whole text).
 
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs`, `secrets`, `versions` (each
-workflow's saved versions) and `counters` (rate limits).
-TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
-data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
+workflow's saved versions), `counters` (rate limits), `members`, `invites` and `apiKeys`.
+TTL indexes delete runs after 7 days, sessions after 30 (1 for the demo) and invite links when they expire,
+so nothing has to scan for old data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
 the pending runs of accounts holding more than 20 (biggest backlogs first), then each account's finished
 runs beyond its newest 50 are deleted (longest histories first, 5 accounts a check, oldest runs first).
@@ -190,7 +205,8 @@ only), and `GET /api/workflows/:id/versions/:version` returns one with everythin
 **Testing one step.** `POST /api/steps/test` runs one step once against sample data (`trigger` and earlier
 `steps` outputs) and answers with its status (`ok`, `failed`, `stopped`, or `waiting` for a delay, which
 doesn't actually wait), message (cut to 1,000 characters), output (at most 32 KB, or a note that it was
-cut) and how long it took. Nothing is stored. The step goes through the same code as in a run, so the
+cut) and how long it took. Nothing is stored. A step that isn't a block goes through the same code as in a
+run (a block answers with its condition or its list, without running what it holds), so the
 private-address check on every redirect hop, the demo's host list, the 15 s timeout and the 256 KB
 response cap all apply; a step that throws is a failed test, not an error. `GET /api/workflows/:id/sample`
 hands back the trigger data and outputs of the workflow's newest finished run (or `null`), cut to 32 KB by
@@ -201,11 +217,15 @@ Atlas (DNS, TLS, SCRAM) measured 30 to 90 ms of CPU in production, several times
 the Worker hands `/api/` and `/hooks/` requests and the cron tick to one Durable Object, the hub
 ([`worker/hub.ts`](worker/hub.ts)), placed in western Europe next to the cluster. The hub keeps its
 connection open between requests (two pooled sockets, monitors polling instead of streaming), so only its
-first request after it starts pays the handshake. If a request fails with a connection error, the hub
-starts a new connection for later requests (at most one every 30 seconds) and closes the old one once the
-work still using it has finished; other errors leave the connection alone. A query that hangs fails after
-20 seconds, and one that waits more than 10 seconds for a free socket fails too. Without the `HUB` binding (the tests) or with `HUB_OFF`
-set, each request opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
+first request after it starts pays the handshake. When the database can't be reached, the request answers
+503 with a `retry-after` header, and a network error on a connection that has worked before is left to the
+driver, which reconnects on its own. The hub starts a new connection only when the old client is finished
+(it was closed, or it never connected): at most one every 30 seconds, or after 5 seconds for one that never
+got through. As a last resort, a connection that has had nothing but connection errors for three minutes
+is replaced too. The hub closes the old one once the work still using it has finished, after two minutes
+at the latest. Other errors leave the connection alone. A query that hangs fails after 20 seconds, and one that
+waits more than 10 seconds for a free socket fails too. Without the `HUB` binding (the tests) or with
+`HUB_OFF` set, each request opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
 time, and the connect time when the request had to open the connection.
 
 Measured in production over an hour (2026-11-09): the Worker's CPU was at most 2 ms for a request and 6 ms
@@ -240,6 +260,50 @@ owner to move them to.
 Everything fits free plans: Cloudflare Workers, static assets, cron triggers, the rate limiter and one
 Durable Object, and a MongoDB Atlas M0 cluster. It doesn't call any paid AI API.
 
+### Teams, recovery codes and API keys
+
+**Roles.** A workspace has one owner, for good. Others join with an invite link as an editor or a viewer.
+The owner does everything; only the owner renames or deletes the workspace, makes and revokes invite
+links, and changes or removes members. Editors change workflows and start runs. Viewers read workflows
+and runs and change nothing. A personal workspace can't be shared.
+
+**Checked on every request.** A session lists only the workspaces its user owns. Membership and role are
+read from `members` on every request (one lookup by id), so a removal or a role change applies on the
+member's very next request. Runs, run limits and storage are always charged to the workspace's owner,
+whoever started the run.
+
+**Secrets stored as hashes.** An invite link's token and an API key are shown once, when they are made.
+The database keeps only their SHA-256, so a copy of it holds no working links or keys. An invite link
+works for 7 days and for 10 people, and the owner can revoke it sooner. Removing someone, or making
+them a viewer, ends the link they joined with (for everyone who still holds it), so they can't walk back in
+with it from another account; a link also lets each account in only once. A used-up link stops counting as open and is removed. The token travels in the request body
+(`POST /api/invites/preview` and `/accept`), not in an API URL, so it stays out of request logs.
+
+**API keys.** A key works in one workspace, read-only or read and write, and never has more rights than
+its maker has right now: the maker's role is read on every request, and their keys are deleted when they
+are removed from the workspace. A key reaches only workflows, runs and the overview (`KEY_PATHS` in
+[`worker/index.ts`](worker/index.ts)), never accounts, members, invite links or other keys. Like webhook
+URLs, a key carries a signature made with `AUTH_PEPPER`, so a made-up key is refused before any database
+lookup.
+
+**Recovery codes.** Each code is 12 characters with 60 random bits, stored as an HMAC of the user id and
+the code keyed with `AUTH_PEPPER`, so the database alone can't be used to test guesses. A code works once:
+the update that sets the new password also ends the whole set, since someone else may hold a copy of the
+sheet. Using one signs out every device and revokes the account's API keys; the owner then makes new codes. Changing the password in Settings
+does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
+new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
+email and IP per 15 minutes.
+
+**Webhook URLs.** A webhook URL starts runs for whoever has it, so viewers and read-only keys get workflows
+with an empty `hookKey`. Editors do see them, so after removing an editor the owner can press **New URL**
+on a workflow's trigger (`POST /api/workflows/:id/hook-key`) to end the old URL.
+
+**No framing.** [`public/_headers`](public/_headers) tells browsers never to show the app inside another
+site's frame, so its delete and revoke buttons can't be clicked through a disguised page.
+
+**The demo account** is shared by everyone, so it can't make invite links, join a workspace, or make API
+keys or recovery codes.
+
 ## Run it locally
 
 You need Node.js 22.6 or newer and a MongoDB to talk to: a free Atlas cluster, or one on your machine
@@ -266,7 +330,8 @@ The cron doesn't fire on its own in local development: click **Check now** on a 
 (schedules and waiting runs) with `curl http://localhost:5173/cdn-cgi/handler/scheduled`.
 
 ```sh
-npm test                                              # unit tests: templates, cron, filters, auth helpers
+npm test                                              # unit tests: templates, cron, filters, auth helpers,
+                                                      # and teams, recovery codes and API keys (in memory)
 MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test   # also the engine and data tests, in a throwaway
                                                       # database that is dropped afterwards
 npm run build                                         # type-check and build
@@ -318,13 +383,15 @@ npm run deploy
 ```
 
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
-password, webhook URL and stored secret stop working. After a change, each secret still shows under
-Settings but can't be read; steps that use one say so, and its value has to be entered again (Replace).
+password, webhook URL, API key, recovery code and stored secret stop working. After a change, each secret
+still shows under Settings but can't be read; steps that use one say so, and its value has to be entered
+again (Replace).
 
-**Upgrading a deployment.** Run `npm run db:setup` again after a release that adds indexes (the cron also
-creates them within the hour, and nothing breaks in between). The release that added secrets, blocks and
-signed webhooks needs no new setting, secret or migration: it reuses `AUTH_PEPPER`, and old workflows and
-runs in flight carry on as they were.
+A later deploy that adds collections or indexes needs no `db:setup`: the cron creates any missing index
+within the hour (at minute 7). Until then the new collections are nearly empty, so nothing is slow.
+Running `db:setup` anyway does no harm. The release that added secrets, blocks and signed webhooks needs no
+new setting, secret or migration: it reuses `AUTH_PEPPER`, and old workflows and runs in flight carry on as
+they were.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
@@ -373,7 +440,9 @@ person from using up the free plans:
   each `if` check and each start of a loop. Moving a loop to its next item doesn't.
 - 30 requests to other sites per run in one go; a run that makes more carries on within a minute.
 - 20 secrets per workspace, each 8 to 4,000 characters.
-- JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400.
+- JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400,
+  and so does a field name containing a null character. Neither counts as a run. A step output like
+  that is replaced by a note saying it couldn't be saved.
 - 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
   first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
@@ -393,7 +462,11 @@ person from using up the free plans:
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
-  attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
+  attempts per email and IP per 15 minutes (recovery codes have their own 10); 30 demo sign-ins per network
+  per hour; 20 sessions per account.
+- Teams: 10 members per workspace besides its owner; 5 open invite links per workspace, each working for
+  7 days and for 10 people; an account can join 20 other people's workspaces.
+- 8 recovery codes at a time, each used once; 10 API keys per account.
 - Schedules run at most every 5 minutes, in UTC.
 - 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8,000 characters of headers and 2,000 of query); 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
@@ -408,6 +481,8 @@ person from using up the free plans:
   can only call a few public test APIs, and it is reset every day at 03:00 UTC.
 
 ## Roadmap
+
+Built: teams with invite links and roles, recovery codes, and API keys (2026-11-09; live from the next deploy).
 
 - An "on failure" step, so a workflow can report that it broke
 - Ready-made Slack, Discord, Telegram and GitHub steps

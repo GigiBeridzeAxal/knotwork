@@ -33,8 +33,8 @@ const LIMIT_ROWS: [string, string][] = [
   ["Steps per workflow", `${LIMITS.stepsPerWorkflow}, counting the ones inside blocks`],
   ["Blocks inside blocks", `${LIMITS.stepDepth} levels`],
   ["Items per loop", String(LIMITS.loopItems)],
-  ["Steps one run can take", `${LIMITS.stepRunsPerRun} (each loop pass, retry and if check counts)`],
-  ["Requests to other sites per run", `${LIMITS.httpCallsPerGo} in one go, then it carries on within a minute`],
+  ["Steps one run can take", `${LIMITS.stepRunsPerRun} (every step in every loop pass counts, and every retry)`],
+  ["Requests to other sites per run", `${LIMITS.httpCallsPerGo} in one go (redirects count), then it carries on within a minute`],
   ["Secrets per workspace", `${LIMITS.secretsPerWorkspace}, each ${LIMITS.secretMinChars} to ${LIMITS.secretMaxChars.toLocaleString("en")} characters`],
   ["Size of a saved workflow", `${LIMITS.workflowBytes / 1000} KB`],
   ["Saved versions per workflow", `the newest ${LIMITS.versionsPerWorkflow}`],
@@ -153,7 +153,9 @@ export function DocsPage() {
                 Press a step, open its <b>Test</b> tab and press <b>Test this step</b>. Only that step runs, against the test
                 data shown, which you can type or fill with <b>Use the last run's data</b>. Nothing is saved, no run is
                 started, and a delay doesn't wait. A step that passes adds its output to the test data, so you can test your
-                way down. You get {LIMITS.stepTestsPerHour} tests an hour.
+                way down. Testing an if says which way it would go; testing a loop says what it would go through and
+                sets its first item as <code>loop.item</code>, so the steps inside can be tested next. A step that uses a
+                secret really sends it; the answer shows <code>[secret NAME]</code>. You get {LIMITS.stepTestsPerHour} tests an hour.
               </dd>
               <dt>Version history</dt>
               <dd>
@@ -266,11 +268,24 @@ export function DocsPage() {
             <p>
               Each pass starts clean: a step inside a loop holds its result for the current item only, and after the loop
               only the last pass is left. To keep something from every item, send it somewhere inside the loop. A filter
-              inside a block still stops the whole run; to skip one item, use an if. A run can take{" "}
-              {LIMITS.stepRunsPerRun} steps in all, where every pass, retry and if check counts, and makes{" "}
-              {LIMITS.httpCallsPerGo} requests to other sites in one go: a longer loop of requests pauses and carries on
-              within a minute.
+              inside a block still stops the whole run; to skip one item, use an if.
             </p>
+            <p>
+              A run can take {LIMITS.stepRunsPerRun} steps in all. Every time a step runs counts: each step in each pass of
+              a loop, each retry, each if check and each start of a loop. So {LIMITS.loopItems} items with 3 steps inside is
+              151, and with 4 steps it is 201, one too many. A run also makes at most {LIMITS.httpCallsPerGo} requests to
+              other sites in one go (a redirect counts as one more): a longer loop of requests pauses, says so, and carries
+              on within a minute.
+            </p>
+            <p>An example that takes a signed GitHub push, and posts each commit by someone other than a bot to a chat:</p>
+            <pre>{`Trigger: Webhook, signature check: GitHub, secret GH_SIGNING
+1. If       {{ trigger.headers.x-github-event }} equals push
+   Then:
+   2. Loop  {{ trigger.body.commits }}
+      3. If {{ loop.item.author.name }} not_equals dependabot[bot]
+         Then:
+         4. HTTP request  POST {{ secrets.CHAT_URL }}
+            body { "text": "{{ loop.item.message }}" }`}</pre>
           </Section>
 
           <Section id="secrets" title="Secrets">
@@ -380,6 +395,27 @@ export function DocsPage() {
               <dd>The URL changed or the workflow's trigger isn't Webhook any more. Copy the URL from the editor again.</dd>
               <dt>My webhook answers 409</dt>
               <dd>The workflow is turned off.</dd>
+              <dt>My webhook answers 401</dt>
+              <dd>
+                Its signature check refused the call: the signing secret here and in the service differ, the secret isn't
+                in this workspace, or (Stripe) the call was signed more than 5 minutes ago. The answer says which. Save the
+                secret again on both sides.
+              </dd>
+              <dt>A step fails with "The secret … isn't set"</dt>
+              <dd>
+                The step names a secret this workspace doesn't have. Add it under Settings, then Secrets; each workspace has
+                its own. If it says the secret "can't be read any more", save its value again.
+              </dd>
+              <dt>A run says "Paused: … as many requests as fit"</dt>
+              <dd>
+                It made {LIMITS.httpCallsPerGo} requests in one go, or many runs were making requests in the same minute.
+                Nothing is lost: it carries on from the same step within a minute.
+              </dd>
+              <dt>A run fails with "The run reached {LIMITS.stepRunsPerRun} steps"</dt>
+              <dd>
+                Every step in every pass of a loop counts, and every retry. Loop over fewer items, put fewer steps inside,
+                or split the work over several runs.
+              </dd>
               <dt>A run answers 429 or won't start</dt>
               <dd>You reached a limit above. Runs per hour reset at the start of each clock hour.</dd>
               <dt>Saving says "This workflow was saved somewhere else"</dt>

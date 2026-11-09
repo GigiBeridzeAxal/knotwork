@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { type Run, type SecretInfo, signatureProviders, type Step, type Trigger, walkSteps, type Workflow, type WorkflowInput } from "../../shared/schema";
+import { canEdit, type Run, type SecretInfo, signatureProviders, type Step, type Trigger, walkSteps, type Workflow, type WorkflowInput } from "../../shared/schema";
 import { validateCron } from "../../shared/cron";
 import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
 import { BLANK } from "../../shared/examples";
 import { Link, navigate } from "../router";
-import { useFindElsewhere } from "../session";
+import { useFindElsewhere, useSession } from "../session";
 import { StepList } from "./StepList";
 import { CanvasView } from "../canvas/CanvasView";
 import { stashedImport } from "../canvas/transfer";
@@ -40,7 +40,7 @@ export function EditorPage({ id }: { id: string | null }) {
   const [saved, setSaved] = useState<Workflow | null>(null);
   const [start] = useState(() => (id ? null : startingPoint()));
   const [draft, setDraft] = useState<WorkflowInput | null>(start?.draft ?? null);
-  const [view, setView] = useState<View>(() => {
+  const [chosenView, setView] = useState<View>(() => {
     try {
       return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "canvas";
     } catch {
@@ -78,6 +78,23 @@ export function EditorPage({ id }: { id: string | null }) {
       window.removeEventListener("focus", load);
     };
   }, []);
+  /** Viewers see the workflow but can't change or run it; the server refuses those requests too. */
+  const readOnly = !canEdit(useSession().workspace.role);
+  // The canvas is for building. A viewer gets the list, which shows every setting read-only.
+  const view: View = readOnly ? "list" : chosenView;
+  /** Ends the current webhook URL, for when someone who has seen it shouldn't be able to start runs any more. */
+  const newHook =
+    saved && !readOnly
+      ? async () => {
+          if (!confirm("Make a new webhook URL? The current one stops working right away, so anything that calls it needs the new one.")) return;
+          try {
+            const { hookKey } = await api.newHookKey(saved.id);
+            setSaved((now) => (now ? { ...now, hookKey } : now));
+          } catch (err) {
+            alert((err as Error).message);
+          }
+        }
+      : undefined;
 
   /** True once the user has changed the draft: a late or repeated load must not replace their edit. */
   const touched = useRef(false);
@@ -108,6 +125,7 @@ export function EditorPage({ id }: { id: string | null }) {
     [saved, draft],
   );
 
+  if (readOnly && !id) return <ViewerNote />;
   if (!draft) return message ? <p className="text-fail">{message}</p> : null;
 
   const update = (patch: Partial<WorkflowInput>) => {
@@ -181,7 +199,7 @@ export function EditorPage({ id }: { id: string | null }) {
   // Problems with the step list as a whole (too many steps), not with one step in it.
   const listError = issues.find((x) => x.path[0] === "steps" && x.path.length === 1)?.message;
 
-  const hookUrl = saved ? `${location.origin}/hooks/${saved.hookKey}` : "";
+  const hookUrl = saved?.hookKey ? `${location.origin}/hooks/${saved.hookKey}` : "";
 
   return (
     <div className="flex flex-col gap-8">
@@ -195,6 +213,7 @@ export function EditorPage({ id }: { id: string | null }) {
           </label>
           <input
             id="wf-name"
+            readOnly={readOnly}
             value={draft.name}
             onChange={(e) => update({ name: e.target.value })}
             className="w-full rounded-[10px] border border-transparent bg-transparent px-0 font-display text-3xl font-bold tracking-tight hover:border-line focus:border-wire focus:px-2 focus:outline-none sm:text-4xl"
@@ -207,7 +226,7 @@ export function EditorPage({ id }: { id: string | null }) {
               {message}
             </span>
           )}
-          <div role="group" aria-label="View" className="flex h-11 items-center gap-1 rounded-[10px] border border-line p-1">
+          <div role="group" aria-label="View" className={cn("flex h-11 items-center gap-1 rounded-[10px] border border-line p-1", readOnly && "hidden")}>
             {(["canvas", "list"] as const).map((v) => (
               <button
                 key={v}
@@ -230,14 +249,20 @@ export function EditorPage({ id }: { id: string | null }) {
               </button>
             ))}
           </div>
-          <Button onClick={save} disabled={busy || !dirty}>
-            {saved ? (dirty ? "Save" : "Saved") : "Create"}
-          </Button>
-          <Button variant="primary" onClick={() => setShowRun((v) => !v)} disabled={busy} aria-expanded={showRun}>
-            Run now
-          </Button>
+          {!readOnly && (
+            <>
+              <Button onClick={save} disabled={busy || !dirty}>
+                {saved ? (dirty ? "Save" : "Saved") : "Create"}
+              </Button>
+              <Button variant="primary" onClick={() => setShowRun((v) => !v)} disabled={busy} aria-expanded={showRun}>
+                Run now
+              </Button>
+            </>
+          )}
         </div>
       </div>
+
+      {readOnly && <ViewerNote banner />}
 
       {conflict && (
         <div role="alert" className="flex flex-col gap-4 rounded-2xl border border-retry/40 bg-retry/5 p-5 sm:flex-row sm:items-center">
@@ -306,7 +331,7 @@ export function EditorPage({ id }: { id: string | null }) {
             }
           })()}
           triggerEditor={
-            <TriggerCard bare trigger={draft.trigger} onChange={(trigger) => update({ trigger })} hookUrl={hookUrl} cronError={cronError} secrets={secrets} />
+            <TriggerCard bare trigger={draft.trigger} onChange={(trigger) => update({ trigger })} hookUrl={hookUrl} onNewHook={newHook} cronError={cronError} secrets={secrets} />
           }
           onRestore={(workflow) => {
             touched.current = true;
@@ -322,13 +347,17 @@ export function EditorPage({ id }: { id: string | null }) {
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
         {/* min-w-0: a grid column is otherwise as wide as its longest unbroken line (the webhook URL). */}
         <div className="flex min-w-0 flex-col">
-          <TriggerCard
-            trigger={draft.trigger}
-            onChange={(trigger) => update({ trigger })}
-            hookUrl={hookUrl}
-            cronError={cronError}
-            secrets={secrets}
-          />
+          <fieldset disabled={readOnly} className="contents">
+            <TriggerCard
+              trigger={draft.trigger}
+              onChange={(trigger) => update({ trigger })}
+              hookUrl={hookUrl}
+              hookHidden={!!saved && !saved.hookKey}
+              onNewHook={newHook}
+              cronError={cronError}
+              secrets={secrets}
+            />
+          </fieldset>
 
           <StepList
             steps={draft.steps}
@@ -338,26 +367,29 @@ export function EditorPage({ id }: { id: string | null }) {
             tailRefs={["run.id", "workflow.name", ...secrets.map((x) => `secrets.${x.name}`)]}
             takenIds={takenIds}
             rev={version}
+            readOnly={readOnly}
           />
           {listError && <p className="mt-3 text-[13px] text-fail">{listError}</p>}
         </div>
 
         <aside className="flex flex-col gap-6">
           <Card className="flex flex-col gap-4 p-5">
-            <Field label="Description" htmlFor="wf-desc">
-              <textarea
-                id="wf-desc"
-                rows={3}
-                className={cn(textareaClass, "font-sans")}
-                value={draft.description}
-                onChange={(e) => update({ description: e.target.value })}
-              />
-            </Field>
-            <label className="flex items-center gap-3 text-sm">
-              <input type="checkbox" className="size-4 accent-spark" checked={draft.enabled} onChange={(e) => update({ enabled: e.target.checked })} />
-              On (schedules and webhooks start runs)
-            </label>
-            {saved && (
+            <fieldset disabled={readOnly} className="contents">
+              <Field label="Description" htmlFor="wf-desc">
+                <textarea
+                  id="wf-desc"
+                  rows={3}
+                  className={cn(textareaClass, "font-sans")}
+                  value={draft.description}
+                  onChange={(e) => update({ description: e.target.value })}
+                />
+              </Field>
+              <label className="flex items-center gap-3 text-sm">
+                <input type="checkbox" className="size-4 accent-spark" checked={draft.enabled} onChange={(e) => update({ enabled: e.target.checked })} />
+                On (schedules and webhooks start runs)
+              </label>
+            </fieldset>
+            {saved && !readOnly && (
               <Button variant="danger" onClick={remove}>
                 Delete workflow
               </Button>
@@ -387,10 +419,32 @@ export function EditorPage({ id }: { id: string | null }) {
   );
 }
 
+/** For viewers: says why nothing here can be changed. */
+function ViewerNote({ banner = false }: { banner?: boolean }) {
+  return (
+    <div role="note" className={cn("flex items-center gap-3 rounded-xl border border-line px-4 py-3 text-sm text-soft", !banner && "mt-2")}>
+      <span className="size-2 shrink-0 rounded-full ring-1 ring-muted ring-inset" aria-hidden="true" />
+      <span>
+        You're a viewer here. You can look, but not change or run workflows.
+        {!banner && (
+          <>
+            {" "}
+            <Link href="/workflows" className="text-text underline decoration-edge underline-offset-4 hover:decoration-text">
+              Back to workflows
+            </Link>
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function TriggerCard({
   trigger,
   onChange,
   hookUrl,
+  hookHidden = false,
+  onNewHook,
   cronError,
   secrets,
   bare = false,
@@ -400,6 +454,9 @@ function TriggerCard({
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
+  hookHidden?: boolean;
+  /** Replaces the webhook URL, e.g. after someone who knew it left the workspace. */
+  onNewHook?: () => void;
   cronError: string | null;
   secrets: SecretInfo[];
 }) {
@@ -475,8 +532,11 @@ function TriggerCard({
               >
                 {copied ? "Copied" : "Copy"}
               </Button>
+              {onNewHook && <Button onClick={onNewHook}>New URL</Button>}
             </div>
           </div>
+        ) : hookHidden ? (
+          <p className="text-[13px] text-muted">The webhook URL is hidden from viewers, since anyone with it can start a run.</p>
         ) : (
           <p className="text-[13px] text-muted">Save the workflow to get its webhook URL.</p>
         ))}

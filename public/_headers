@@ -1,0 +1,5 @@
+# No other site may show Knotwork inside a frame, so a page elsewhere can't trick a signed-in visitor
+# into clicking a button here (e.g. "Join workspace").
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'

@@ -4,10 +4,17 @@ import { type Budget, newBudget, render, renderString, renderText } from "../sha
 import { secretRefs } from "./secrets";
 
 export type StepResult =
-  | { kind: "ok"; output: unknown; message?: string }
+  | { kind: "ok"; output: unknown; message?: string; calls?: number }
   | { kind: "wait"; seconds: number; output: unknown; message: string }
   | { kind: "stop"; message: string }
-  | { kind: "fail"; message: string; output?: unknown };
+  | {
+      kind: "fail";
+      message: string;
+      output?: unknown;
+      calls?: number;
+      /** The platform refused another outgoing request in this invocation. Set only from the thrown error, never from text a step wrote. */
+      outOfCalls?: boolean;
+    };
 
 export interface Scope {
   trigger: unknown;
@@ -98,11 +105,19 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
   // How the address is written in log lines and errors: with secrets as their marks.
   const show = forShow(scope);
   const shownUrl = show === scope ? url : renderText(config.url, show, newBudget()).trim();
-  // Host and path as written (the parser would percent-encode a mark); the query stays out, as always.
-  const written = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)([^?#]*)/i.exec(shownUrl);
-  // No scheme and host to be seen: the address, or its start, is a secret. It is shown as its mark.
-  const shownHost = written ? written[1].replace(/^.*@/, "") : clip(shownUrl.split(/[?#]/)[0], 200);
-  const shownPath = written ? clip(written[2], 200) : "";
+  // Host and path come from the parser, the same one that decides where the request goes, so the log
+  // can't name another host than the one called. The query stays out, as always. When the copy with
+  // marks doesn't parse (the address, or its start, is a secret), it is shown as written, mark and all.
+  let shownHost = clip(shownUrl.split(/[?#]/)[0], 200);
+  let shownPath = "";
+  try {
+    const shown = new URL(shownUrl);
+    shownHost = shown.host;
+    // The parser percent-encodes the space in a mark; put it back.
+    shownPath = clip(shown.pathname.replace(/\[secret%20([A-Z0-9_]+)\]/g, "[secret $1]"), 200);
+  } catch {
+    // Shown as written.
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -137,19 +152,21 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
 
   // Redirects are followed by hand, so every hop is checked against private addresses too.
   let res: Response;
+  let calls = 0;
   const signal = AbortSignal.timeout(HTTP_TIMEOUT_MS);
   try {
     let target = parsed;
     let method: string = config.method;
     let sendBody = body;
     for (let hop = 0; ; hop++) {
+      calls += 1;
       res = await fetch(target.toString(), { method, headers, body: sendBody, redirect: "manual", signal });
       const location = res.headers.get("location");
       if (res.status < 300 || res.status > 399 || !location) break;
-      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${shownHost} redirected more than ${MAX_REDIRECTS} times` };
+      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${shownHost} redirected more than ${MAX_REDIRECTS} times`, calls };
       const next = new URL(location, target);
       if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
-        return { kind: "fail", message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}, which steps can't call` };
+        return { kind: "fail", message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}, which steps can't call`, calls };
       }
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
         method = "GET";
@@ -163,6 +180,7 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
           return {
             kind: "fail",
             message: `${hop === 0 ? shownHost : target.host} redirected to ${next.host}; the body holds a secret, so it was not sent on`,
+            calls,
           };
         }
       }
@@ -171,7 +189,8 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     }
   } catch (err) {
     const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
-    return { kind: "fail", message: `${config.method} ${shownHost} failed: ${reason}` };
+    const outOfCalls = /too many subrequests/i.test((err as Error).message ?? "");
+    return { kind: "fail", message: `${config.method} ${shownHost} failed: ${clip(reason, 300)}`, calls, ...(outOfCalls ? { outOfCalls } : {}) };
   }
 
   const text = await readLimited(res, MAX_RESPONSE_BYTES);
@@ -190,8 +209,8 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     body: responseBody,
   };
   const message = `${config.method} ${shownHost}${shownPath} → ${res.status}`;
-  if (!res.ok && config.failOnError) return { kind: "fail", message, output };
-  return { kind: "ok", output, message };
+  if (!res.ok && config.failOnError) return { kind: "fail", message, output, calls };
+  return { kind: "ok", output, message, calls };
 }
 
 async function readLimited(res: Response, limit: number): Promise<string> {

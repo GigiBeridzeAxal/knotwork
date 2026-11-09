@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import type { WorkflowSummary } from "../../shared/schema";
+import { canEdit, type WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { PlusIcon } from "../components/icons";
 import { Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { TEMPLATES } from "../../shared/templates";
 import { ImportButton } from "./TemplatesPage";
 import { Link } from "../router";
+import { useSession } from "../session";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
   if (wf.trigger.type === "schedule") return `Schedule · ${wf.trigger.cron}`;
@@ -16,6 +17,7 @@ export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
 export function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [error, setError] = useState("");
+  const editable = canEdit(useSession().workspace.role);
 
   useEffect(() => {
     api.workflows().then(setWorkflows, (e) => setError(e.message));
@@ -28,6 +30,7 @@ export function WorkflowsPage() {
           <PageTitle>Workflows</PageTitle>
           <p className="text-soft">Wire a trigger to steps. Failed steps retry on their own, and every run is logged.</p>
         </div>
+        {editable && (
         <div className="flex flex-wrap items-center gap-3">
           <ImportButton onError={setError} />
           <Link
@@ -38,6 +41,7 @@ export function WorkflowsPage() {
             New workflow
           </Link>
         </div>
+        )}
       </div>
 
       {error && <p className="text-fail">{error}</p>}
@@ -79,10 +83,13 @@ export function WorkflowsPage() {
       {workflows && workflows.length === 0 && (
         <Card className="dots flex flex-col items-center gap-3 px-6 py-14 text-center">
           <p className="font-display text-2xl font-bold">No workflows yet</p>
-          <p className="max-w-md text-soft">Start from scratch, or open a template below and run it straight away.</p>
+          <p className="max-w-md text-soft">
+            {editable ? "Start from scratch, or open a template below and run it straight away." : "Workflows the owner or an editor adds show up here."}
+          </p>
         </Card>
       )}
 
+      {editable && (
       <section className="flex flex-col gap-4" aria-labelledby="templates">
         <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h2 id="templates" className="font-display text-xl font-bold tracking-tight">
@@ -108,6 +115,7 @@ export function WorkflowsPage() {
           ))}
         </div>
       </section>
+      )}
     </div>
   );
 }

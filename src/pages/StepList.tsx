@@ -25,6 +25,7 @@ export function StepList({
   tailRefs,
   takenIds,
   rev,
+  readOnly = false,
 }: {
   steps: Step[];
   onChange: (steps: Step[]) => void;
@@ -40,6 +41,8 @@ export function StepList({
   takenIds: string[];
   /** Changes when the step editors must throw away their local text (after a save or a load). */
   rev: number;
+  /** For viewers: everything shows, nothing can be changed. */
+  readOnly?: boolean;
 }) {
   const [open, setOpen] = useState<number | null>(null);
   const [picking, setPicking] = useState(false);
@@ -113,6 +116,7 @@ export function StepList({
               refs={[...inner, ...tailRefs]}
               errors={own.map((x) => `${x.path.slice(at.length).join(".") || "step"}: ${x.message}`)}
               open={open === i}
+              readOnly={readOnly}
               onToggle={() => setOpen(open === i ? null : i)}
               onChange={(s) => onChange(steps.map((x, j) => (j === i ? s : x)))}
               onMove={(dir) => move(i, dir)}
@@ -135,6 +139,7 @@ export function StepList({
                   tailRefs={tailRefs}
                   takenIds={takenIds}
                   rev={rev}
+                  readOnly={readOnly}
                 />
               </div>
             ))}
@@ -142,7 +147,9 @@ export function StepList({
         );
       })}
 
-      {top ? (
+      {readOnly ? (
+        !top && steps.length === 0 && <p className="pt-3 text-[13px] text-muted">No steps here.</p>
+      ) : top ? (
         <>
           <Wire dashed />
           <div className="flex flex-col gap-3 rounded-2xl border border-dashed border-line bg-graphite p-4">

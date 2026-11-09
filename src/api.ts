@@ -1,5 +1,11 @@
 import type {
+  ApiKey,
+  ApiKeyAccess,
+  InvitePreview,
   Me,
+  MemberRole,
+  NewApiKey,
+  NewInvite,
   Overview,
   Run,
   RunDetail,
@@ -8,6 +14,7 @@ import type {
   Step,
   StepSample,
   StepTestResult,
+  Team,
   Workflow,
   WorkflowInput,
   WorkflowSummary,
@@ -69,6 +76,28 @@ export const api = {
   logout: () => request<void>("/auth/logout", post()),
   changePassword: (current: string, next: string) => request<void>("/auth/password", post({ current, next })),
   deleteAccount: (password: string) => request<void>("/auth/delete-account", post({ password })),
+  /** Sets a new password with a recovery code, and signs in. The code stops working. */
+  recover: (input: { email: string; code: string; password: string }) => request<Me>("/auth/recover", post(input)),
+  /** Makes a fresh set of recovery codes (the old ones stop working). Shown once. */
+  newRecoveryCodes: (password: string) => request<{ codes: string[] }>("/auth/recovery-codes", post({ password })),
+
+  /** The people in a workspace, and (for its owner) its open invite links. */
+  team: (workspaceId: string) => request<Team>(`/workspaces/${workspaceId}/team`),
+  createInvite: (workspaceId: string, role: MemberRole) => request<NewInvite>(`/workspaces/${workspaceId}/invites`, post({ role })),
+  revokeInvite: (workspaceId: string, inviteId: string) =>
+    request<void>(`/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}`, { method: "DELETE" }),
+  changeRole: (workspaceId: string, userId: string, role: MemberRole) =>
+    request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  /** Removes a member; with your own id, leaves the workspace. */
+  removeMember: (workspaceId: string, userId: string) => request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "DELETE" }),
+  // The token goes in the body, so it stays out of request logs.
+  invite: (token: string) => request<InvitePreview>("/invites/preview", post({ token })),
+  acceptInvite: (token: string) => request<{ workspaceId: string }>("/invites/accept", post({ token })),
+
+  apiKeys: () => request<ApiKey[]>("/keys"),
+  createApiKey: (input: { name: string; workspaceId: string; access: ApiKeyAccess }) => request<NewApiKey>("/keys", post(input)),
+  revokeApiKey: (id: string) => request<void>(`/keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   /** Which of the user's workspaces holds a workflow or run. */
   locate: (kind: "workflow" | "run", id: string) =>
     request<{ workspaceId: string }>(`/locate/${kind}/${encodeURIComponent(id)}`),
@@ -84,6 +113,8 @@ export const api = {
   createWorkflow: (input: WorkflowInput) => request<Workflow>("/workflows", post(input)),
   updateWorkflow: (id: string, input: WorkflowInput, version: number) =>
     request<Workflow>(`/workflows/${id}`, { method: "PUT", body: JSON.stringify({ ...input, version }) }),
+  /** Replaces the workflow's webhook URL; the old one stops working. */
+  newHookKey: (id: string) => request<{ hookKey: string }>(`/workflows/${id}/hook-key`, post()),
   deleteWorkflow: (id: string) => request<void>(`/workflows/${id}`, { method: "DELETE" }),
   runWorkflow: (id: string, input: unknown) => request<{ runId: string }>(`/workflows/${id}/run`, post({ input })),
   runs: (workflowId?: string, limit?: number) => {

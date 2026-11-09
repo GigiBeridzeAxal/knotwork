@@ -781,4 +781,73 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     expect(stored).toBeLessThanOrEqual(16_000 + 40);
     expect(kept.bytes).toBe(stored);
   });
+
+  // ---------- round 2 ----------
+
+  it("doesn't take a step's own words for the platform's request limit", async () => {
+    // Text the author controls ends up in these messages; it must fail like any other step.
+    const shared = { calls: 40 };
+    for (const url of ["too many subrequests", "https://x.example/Too many subrequests"]) {
+      const { runId } = await start([post("call", url)]);
+      await withFetch(() => new Response("no", { status: 500 }), () => advance(c, runId, "", shared));
+      const run = await load(runId);
+      expect([run.status, run.stepRuns]).toEqual(["failed", 1]);
+    }
+    expect(shared.calls).toBe(39);
+  });
+
+  it("parks when the platform itself refuses another request, and counts the try", async () => {
+    const shared = { calls: 40 };
+    const { runId } = await start([post("call", "https://api.example/a")]);
+    const real = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("Too many subrequests.");
+    }) as typeof fetch;
+    try {
+      await advance(c, runId, "", shared);
+    } finally {
+      globalThis.fetch = real;
+    }
+    const run = await load(runId);
+    expect([run.status, run.stepRuns, run.attempt]).toEqual(["waiting", 1, 0]);
+    expect(run.error).toMatch(/Knotwork made as many requests as fit in this minute/);
+    expect(shared.calls).toBe(0);
+  });
+
+  it("keeps one run to its own 30 requests even when the tick has more left, and counts redirects", async () => {
+    const list = Array.from({ length: 45 }, (_, i) => i);
+    const a = await start([loop("each", "{{ trigger.body.list }}", [post("call", "https://api.example/x")])], { body: { list } });
+    const shared = { calls: 40 };
+    let calls = await withFetch(() => new Response("ok"), () => advance(c, a.runId, "", shared));
+    expect(calls.length).toBe(LIMITS.httpCallsPerGo);
+    expect(shared.calls).toBe(10);
+    expect((await load(a.runId)).error).toMatch(/this run made as many requests/);
+
+    // Each call here is two requests: the redirect and where it leads.
+    const b = await start([loop("each", "{{ trigger.body.list }}", [post("call", "https://hop.example/x")])], { body: { list } });
+    calls = await withFetch(
+      (to) => (to.startsWith("https://hop.example/x") ? new Response(null, { status: 302, headers: { location: "https://hop.example/y" } }) : new Response("ok")),
+      () => advance(c, b.runId),
+    );
+    expect(calls.length).toBe(LIMITS.httpCallsPerGo);
+    expect((await load(b.runId)).outputs.each).toMatchObject({ index: LIMITS.httpCallsPerGo / 2 });
+  });
+
+  it("names the host the request really went to", async () => {
+    const { runId } = await start([post("call", "https://evil.example.net\\@api.github.example/repos")]);
+    const calls = await withFetch(() => new Response("ok"), () => advance(c, runId));
+    expect(new URL(calls[0].url).host).toBe("evil.example.net");
+    expect((await load(runId)).logs[0].message).toMatch(/^POST evil\.example\.net\//);
+  });
+
+  it("hides the parts of a URL secret, and a secret as a URL encodes it, when a service echoes them", async () => {
+    const { redactor } = await import("../worker/secrets");
+    const hook = redactor({ HOOK: "https://user:Passw0rdValue@Chat.Example.COM:8443/v1/spaces/AAAA/messages?key=QUERYKEY12345678&token=tok-abcdefgh" });
+    expect(hook({ args: { key: "QUERYKEY12345678", token: "tok-abcdefgh" } })).toEqual({ args: { key: "[secret HOOK]", token: "[secret HOOK]" } });
+    expect(hook("failed (?key=QUERYKEY12345678&token=tok-abcdefgh)")).toBe("failed (?[secret HOOK])");
+    expect(hook("auth Passw0rdValue")).toBe("auth [secret HOOK]");
+    const odd = redactor({ A: "ab|cd ef[1]", B: "it's a secret", HOST: "Api.Internal-Name.example" });
+    expect(odd("https://x.example/ab|cd%20ef[1]/send?k=it%27s%20a%20secret")).toBe("https://x.example/[secret A]/send?k=[secret B]");
+    expect(odd("called api.internal-name.example")).toBe("called [secret HOST]");
+  });
 });

@@ -143,6 +143,9 @@ export function secretRefs(value: unknown, into = new Set<string>()): Set<string
  * service that echoes a request back doesn't put the key in the run log. A value changed in another
  * way (hashed, base64, cut in pieces) can't be recognised.
  */
+/** A piece of a URL secret is hidden by itself only from this length, so short common words aren't. */
+const PART_MIN = 8;
+
 /** The shapes one secret value can take in text. */
 function shapes(value: string): Set<string> {
   const found = new Set<string>();
@@ -161,10 +164,28 @@ function shapes(value: string): Set<string> {
       add(url.href);
       add(url.host + url.pathname + url.search);
       if (url.pathname.length >= 8) add(url.pathname + url.search), add(url.pathname);
+      // Some services keep the key in the query (`?key=…&token=…`) or before the host, and echo it by itself.
+      const parts = [...url.searchParams.values(), url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)];
+      if (url.search.length >= PART_MIN) add(url.search.slice(1));
+      for (const part of parts) if (part.length >= PART_MIN) add(part);
     } catch {
       // Not an address after all.
     }
   }
+  // Put into a URL, a value is encoded the parser's way, which differs from encodeURIComponent for
+  // characters like | [ ] and '. And a host name comes back in small letters.
+  for (const [prefix, read] of [
+    ["https://x.invalid/", (u: URL) => u.pathname.slice(1)],
+    ["https://x.invalid/?", (u: URL) => u.search.slice(1)],
+    ["https://x.invalid/?k=", (u: URL) => u.search.slice(3)],
+  ] as const) {
+    try {
+      add(read(new URL(prefix + value.trim())));
+    } catch {
+      // Can't be part of a URL as it is.
+    }
+  }
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(value.trim())) add(value.trim().toLowerCase());
   return found;
 }
 

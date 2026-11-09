@@ -67,14 +67,27 @@ export async function testStep(
     demo = false,
     now = Date.now(),
     secrets = {},
+    unreadable = new Set<string>(),
   }: {
     demo?: boolean;
     now?: number;
     /** The workspace secrets the step names, already decrypted. They are hidden in the answer, as in a run. */
     secrets?: Record<string, string>;
+    /** Names that are saved but can't be decrypted (the server's key changed). */
+    unreadable?: Set<string>;
   } = {},
 ): Promise<StepTestResult> {
   const missing = [...secretRefs(step.config)].filter((name) => !Object.hasOwn(secrets, name));
+  const lost = missing.filter((name) => unreadable.has(name));
+  if (lost.length) {
+    return toTestResult(
+      {
+        kind: "fail",
+        message: `The secret ${lost.join(", ")} is saved but can't be read any more (the server's key changed). Set its value again under Settings, then Secrets.`,
+      },
+      0,
+    );
+  }
   if (missing.length) {
     return toTestResult(
       { kind: "fail", message: `The secret ${missing.join(", ")} isn't set in this workspace. Add it under Settings, then Secrets.` },
