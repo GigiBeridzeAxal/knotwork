@@ -3,7 +3,7 @@ import type { WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { PlusIcon } from "../components/icons";
 import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
-import { EXAMPLES } from "../examples";
+import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {

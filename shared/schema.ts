@@ -129,16 +129,60 @@ export type FilterOp = (typeof filterOps)[number];
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "stopped";
 export type LogStatus = "ok" | "failed" | "retrying" | "stopped" | "waiting";
 
+/** Saving sends the version it was loaded at; a newer version on the server means someone else saved first. */
+export const workflowSave = z.object({ version: z.number().int().min(0) });
+
 export interface Workflow extends WorkflowInput {
   id: string;
   workspaceId: string;
   hookKey: string;
+  version: number;
   createdAt: number;
   updatedAt: number;
+  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
 }
 
-export interface WorkflowSummary extends Workflow {
-  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
+export type WorkflowSummary = Workflow;
+
+// ---------- Accounts ----------
+
+const email = z.string().trim().toLowerCase().max(254).email("Enter an email address like name@example.com");
+export const PASSWORD_MIN = 10;
+
+export const signupInput = z.object({
+  name: z.string().trim().min(1, "Tell us what to call you").max(60),
+  email,
+  password: z.string().min(PASSWORD_MIN, `Use at least ${PASSWORD_MIN} characters`).max(200),
+});
+
+export const loginInput = z.object({
+  email,
+  password: z.string().min(1, "Enter your password").max(200),
+});
+
+export const workspaceInput = z.object({
+  name: z.string().trim().min(1, "Give it a name").max(40),
+});
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  /** The shared demo account: anyone can sign in to it, and it is reset every day. */
+  demo: boolean;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  /** Every account has one personal workspace. It can be renamed but not deleted. */
+  personal: boolean;
+  createdAt: number;
+}
+
+export interface Me {
+  user: User;
+  workspaces: Workspace[];
 }
 
 export interface Run {
@@ -172,4 +216,12 @@ export interface StepLog {
 export interface RunDetail extends Run {
   logs: StepLog[];
   stepCount: number;
+}
+
+export interface Overview {
+  workflows: WorkflowSummary[];
+  /** The workspace's newest 200 runs. */
+  runs: Run[];
+  /** Runs the whole account started in the last hour (the limit is per account). */
+  runsThisHour: number;
 }

@@ -1,8 +1,8 @@
-import { StrictMode } from "react";
+import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import "./api";
 import { AppShell } from "./components/AppShell";
 import "./index.css";
+import { AuthPage } from "./pages/AuthPage";
 import { EditorPage } from "./pages/EditorPage";
 import { HomePage } from "./pages/HomePage";
 import { LandingPage } from "./pages/LandingPage";
@@ -10,7 +10,8 @@ import { RunPage } from "./pages/RunPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
-import { Link, match, usePath } from "./router";
+import { Link, match, navigate, usePath } from "./router";
+import { SessionProvider, useSession } from "./session";
 import { WorkspaceProvider } from "./workspace";
 
 function Routes({ path }: { path: string }) {
@@ -32,13 +33,24 @@ function Routes({ path }: { path: string }) {
   );
 }
 
+function Redirect({ to }: { to: string }) {
+  useEffect(() => navigate(to, { replace: true }), [to]);
+  return null;
+}
+
 function App() {
   const path = usePath();
+  const { state } = useSession();
   if (path === "/") return <LandingPage />;
+  if (state.status === "loading") return <div className="min-h-screen bg-ink" aria-busy="true" />;
+  if (path === "/login" || path === "/signup") {
+    return state.status === "signed-in" ? <Redirect to="/home" /> : <AuthPage key={path} mode={path === "/login" ? "login" : "signup"} />;
+  }
+  if (state.status === "signed-out") return <Redirect to={`/login?next=${encodeURIComponent(path + location.search)}`} />;
   return (
-    <WorkspaceProvider path={path}>
+    <WorkspaceProvider key={state.workspaceId} path={path}>
       <AppShell>
-        <Routes path={path} />
+        <Routes key={state.workspaceId} path={path} />
       </AppShell>
     </WorkspaceProvider>
   );
@@ -46,6 +58,8 @@ function App() {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <SessionProvider>
+      <App />
+    </SessionProvider>
   </StrictMode>,
 );

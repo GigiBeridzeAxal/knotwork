@@ -1,0 +1,193 @@
+import { type Collection, type Db, MongoClient } from "mongodb";
+import type { LogStatus, RunStatus, Step, Trigger, WorkflowInput } from "../shared/schema";
+
+export interface Env {
+  /** mongodb+srv://… for the Atlas cluster. A Wrangler secret in production, `.dev.vars` locally. */
+  MONGODB_URI: string;
+  /** Database name inside the cluster. */
+  MONGODB_DB?: string;
+  ASSETS: Fetcher;
+}
+
+// ---------- Documents ----------
+
+export interface UserDoc {
+  _id: string;
+  name: string;
+  email: string;
+  /** PBKDF2-SHA-256. Null for the demo account, which can only be entered with the demo button. */
+  password: { hash: string; salt: string; iterations: number } | null;
+  demo: boolean;
+  createdAt: number;
+}
+
+export interface SessionDoc {
+  /** SHA-256 of the cookie token, so a database leak doesn't leak working sessions. */
+  _id: string;
+  userId: string;
+  demo: boolean;
+  /** The user's workspaces, copied here so one lookup authorizes a request. */
+  workspaceIds: string[];
+  createdAt: number;
+  expiresAt: Date;
+}
+
+export interface WorkspaceDoc {
+  _id: string;
+  ownerId: string;
+  name: string;
+  personal: boolean;
+  createdAt: number;
+}
+
+export interface WorkflowDoc extends WorkflowInput {
+  _id: string;
+  workspaceId: string;
+  ownerId: string;
+  hookKey: string;
+  version: number;
+  /** Minute (ms) the schedule last fired, so a minute never fires twice. */
+  lastScheduledAt: number | null;
+  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LogDoc {
+  id: number;
+  stepId: string;
+  stepName: string;
+  stepType: Step["type"];
+  attempt: number;
+  status: LogStatus;
+  message: string | null;
+  output: unknown;
+  startedAt: number;
+  durationMs: number;
+}
+
+export interface RunDoc {
+  _id: string;
+  workflowId: string;
+  workflowName: string;
+  workspaceId: string;
+  ownerId: string;
+  status: RunStatus;
+  triggerType: Trigger["type"];
+  input: unknown;
+  /** The steps as they were when the run started. */
+  steps: Step[];
+  /** Each finished step's output, by step id. Set one key at a time, never rewritten whole. */
+  outputs: Record<string, unknown>;
+  outputBytes: number;
+  stepIndex: number;
+  attempt: number;
+  /** Claims in a row that ended without saving progress. Too many and the run is failed. */
+  claims: number;
+  nextRunAt: number | null;
+  leaseUntil: number | null;
+  error: string | null;
+  logs: LogDoc[];
+  createdAt: number;
+  finishedAt: number | null;
+  /** A TTL index deletes the run at this time, finished or not. */
+  expiresAt: Date;
+}
+
+export interface CounterDoc {
+  _id: string;
+  n: number;
+  expiresAt: Date;
+}
+
+export interface Collections {
+  users: Collection<UserDoc>;
+  sessions: Collection<SessionDoc>;
+  workspaces: Collection<WorkspaceDoc>;
+  workflows: Collection<WorkflowDoc>;
+  runs: Collection<RunDoc>;
+  counters: Collection<CounterDoc>;
+}
+
+export function collections(db: Db): Collections {
+  return {
+    users: db.collection("users"),
+    sessions: db.collection("sessions"),
+    workspaces: db.collection("workspaces"),
+    workflows: db.collection("workflows"),
+    runs: db.collection("runs"),
+    counters: db.collection("counters"),
+  };
+}
+
+/**
+ * A Worker can't keep a socket from one request for the next, so each request (and each cron tick)
+ * opens its own connection the first time it needs one and closes it when its work is done. The
+ * Worker uses Smart Placement, so it runs next to the cluster and the handshake stays short.
+ */
+export class Mongo {
+  private client: MongoClient | null = null;
+  private cols: Collections | null = null;
+
+  private env: Env;
+
+  constructor(env: Env) {
+    this.env = env;
+  }
+
+  get c(): Collections {
+    if (!this.cols) {
+      if (!this.env.MONGODB_URI) throw new Error("MONGODB_URI is not set");
+      this.client = new MongoClient(this.env.MONGODB_URI, {
+        maxPoolSize: 4,
+        serverSelectionTimeoutMS: 8_000,
+        connectTimeoutMS: 8_000,
+        appName: "knotwork",
+      });
+      this.cols = collections(this.client.db(this.env.MONGODB_DB || "knotwork"));
+    }
+    return this.cols;
+  }
+
+  async close() {
+    const client = this.client;
+    this.client = null;
+    this.cols = null;
+    await client?.close().catch(() => {});
+  }
+}
+
+/**
+ * Every index the app relies on. Run once with `npm run db:setup` (and again after adding one).
+ * Returns the ones the server refused, e.g. TTL indexes on a MongoDB-compatible test server.
+ */
+export async function ensureIndexes(c: Collections): Promise<string[]> {
+  const results = await Promise.allSettled([
+    c.users.createIndex({ email: 1 }, { unique: true }),
+    c.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.sessions.createIndex({ userId: 1 }),
+    c.workspaces.createIndex({ ownerId: 1, createdAt: 1 }),
+    c.workflows.createIndex({ workspaceId: 1, updatedAt: -1 }),
+    c.workflows.createIndex({ hookKey: 1 }, { unique: true }),
+    c.workflows.createIndex({ "trigger.type": 1, enabled: 1 }),
+    c.runs.createIndex({ workspaceId: 1, createdAt: -1 }),
+    c.runs.createIndex({ workflowId: 1, createdAt: -1 }),
+    c.runs.createIndex({ ownerId: 1, createdAt: -1 }),
+    c.runs.createIndex({ createdAt: -1 }),
+    c.runs.createIndex({ status: 1, nextRunAt: 1 }),
+    c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+  ]);
+  return results.flatMap((r) => (r.status === "rejected" ? [(r.reason as Error).message] : []));
+}
+
+export function randomId(bytes: number): string {
+  const data = crypto.getRandomValues(new Uint8Array(bytes));
+  return btoa(String.fromCharCode(...data)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+export const newUserId = () => `usr_${randomId(9)}`;
+export const newWorkspaceId = () => `ws_${randomId(12)}`;
+export const newWorkflowId = () => `wf_${randomId(8)}`;
+export const newRunId = () => `run_${randomId(10)}`;
+export const newHookKey = () => randomId(18);

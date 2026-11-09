@@ -15,12 +15,17 @@ export function RunPage({ id }: { id: string }) {
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    const schedule = (ms: number) => {
+      timer = setTimeout(() => (document.visibilityState === "visible" ? load() : schedule(ms)), ms);
+    };
     const load = async () => {
       try {
         const next = await api.run(id);
         if (stopped) return;
         setRun(next);
-        if (!DONE.has(next.status)) timer = setTimeout(load, 1500);
+        // Poll quickly while a run is moving, slowly while it waits for a delay or retry, and not
+        // at all while the tab is hidden.
+        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 1500);
       } catch (e) {
         if (!stopped) setError((e as Error).message);
       }
@@ -61,8 +66,8 @@ export function RunPage({ id }: { id: string }) {
               disabled={nudging}
               onClick={async () => {
                 setNudging(true);
-                await api.tick().catch(() => {});
-                setRun(await api.run(id));
+                const fresh = await api.checkRun(id).catch(() => null);
+                if (fresh) setRun(fresh);
                 setNudging(false);
               }}
             >

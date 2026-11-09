@@ -5,8 +5,9 @@
  * (`steps.fetch.body.items.0.name`). No expressions are evaluated, so a template can't run code.
  */
 
-const TEMPLATE = /\{\{\s*([^{}]*?)\s*\}\}/g;
-const WHOLE = /^\{\{\s*([^{}]*?)\s*\}\}$/;
+// No lazy quantifiers next to \s*: the old /\{\{\s*([^{}]*?)\s*\}\}/ took super-linear time on "{{" + spaces.
+const TEMPLATE = /\{\{([^{}]*)\}\}/g;
+const WHOLE = /^\{\{([^{}]*)\}\}$/;
 const PATH = /^[A-Za-z_$][\w$-]*(\.[\w$-]+)*$/;
 
 export function lookup(scope: unknown, path: string): unknown {
@@ -31,8 +32,8 @@ function toText(value: unknown): string {
 
 export function renderString(template: string, scope: unknown): unknown {
   const whole = WHOLE.exec(template);
-  if (whole) return lookup(scope, whole[1]);
-  return template.replace(TEMPLATE, (_, path: string) => toText(lookup(scope, path)));
+  if (whole) return lookup(scope, whole[1].trim());
+  return template.replace(TEMPLATE, (_, path: string) => toText(lookup(scope, path.trim())));
 }
 
 /** Render every string inside a JSON value. */

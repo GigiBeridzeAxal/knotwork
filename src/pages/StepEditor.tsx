@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { filterOps, type FilterOp, type Step } from "../../shared/schema";
 import { Button, cn, Eyebrow, Field, inputClass, textareaClass } from "../components/ui";
-import { STEP_TYPES } from "../examples";
+import { STEP_TYPES } from "../../shared/examples";
 
 const OP_LABELS: Record<FilterOp, string> = {
   equals: "equals",

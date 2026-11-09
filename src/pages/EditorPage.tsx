@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Run, Step, StepType, Trigger, Workflow, WorkflowInput } from "../../shared/schema";
 import { validateCron } from "../../shared/cron";
 import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
-import { BLANK, newStep, STEP_TYPES } from "../examples";
+import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
 import { Link, navigate } from "../router";
 import { StepEditor } from "./StepEditor";
 
@@ -24,6 +24,9 @@ export function EditorPage({ id }: { id: string | null }) {
   const [openStep, setOpenStep] = useState<number | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [message, setMessage] = useState("");
+  /** Someone saved this workflow elsewhere (another tab or device) after it was opened here. */
+  const [conflict, setConflict] = useState<Workflow | null>(null);
+  const saveRef = useRef<(() => Promise<Workflow | null>) | null>(null);
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [showRun, setShowRun] = useState(false);
@@ -59,11 +62,12 @@ export function EditorPage({ id }: { id: string | null }) {
   const cronError = draft.trigger.type === "schedule" ? validateCron(draft.trigger.cron) : null;
 
   async function save(): Promise<Workflow | null> {
+    if (conflict) return null;
     setBusy(true);
     setMessage("");
     setIssues([]);
     try {
-      const wf = saved ? await api.updateWorkflow(saved.id, draft!) : await api.createWorkflow(draft!);
+      const wf = saved ? await api.updateWorkflow(saved.id, draft!, saved.version) : await api.createWorkflow(draft!);
       setSaved(wf);
       setDraft(toInput(wf));
       setVersion((v) => v + 1);
@@ -71,8 +75,12 @@ export function EditorPage({ id }: { id: string | null }) {
       setMessage("Saved");
       return wf;
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && e.data.current) {
+        setConflict(e.data.current as Workflow);
+        return null;
+      }
       if (e instanceof ApiError) {
-        setIssues(e.issues);
+        setIssues(e.issues ?? []);
         const firstStep = e.issues.find((x) => x.path[0] === "steps");
         if (firstStep && typeof firstStep.path[1] === "number") setOpenStep(firstStep.path[1]);
       }
@@ -82,6 +90,8 @@ export function EditorPage({ id }: { id: string | null }) {
       setBusy(false);
     }
   }
+
+  saveRef.current = save;
 
   async function run() {
     let input: unknown = {};
@@ -160,6 +170,39 @@ export function EditorPage({ id }: { id: string | null }) {
           </Button>
         </div>
       </div>
+
+      {conflict && (
+        <div role="alert" className="flex flex-col gap-4 rounded-2xl border border-retry/40 bg-retry/5 p-5 sm:flex-row sm:items-center">
+          <p className="text-sm text-soft">
+            <span className="font-medium text-text">This workflow was saved somewhere else</span> after you opened it here
+            {conflict.updatedAt ? ` (${timeAgo(conflict.updatedAt)})` : ""}. Keep your version, or load theirs and lose your changes.
+          </p>
+          <div className="flex shrink-0 gap-2 sm:ml-auto">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSaved(conflict);
+                setDraft(toInput(conflict));
+                setVersion((v) => v + 1);
+                setConflict(null);
+                setMessage("");
+              }}
+            >
+              Load theirs
+            </Button>
+            <Button
+              onClick={() => {
+                // Save on top of the newer version: take its version number, keep this draft.
+                setSaved(conflict);
+                setConflict(null);
+                setTimeout(() => saveRef.current?.(), 0);
+              }}
+            >
+              Keep mine
+            </Button>
+          </div>
+        </div>
+      )}
 
       {showRun && (
         <Card className="flex flex-col gap-4 p-5">
