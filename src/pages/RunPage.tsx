@@ -64,7 +64,9 @@ export function RunPage({ id }: { id: string }) {
         </p>
         {run.status === "waiting" && run.nextRunAt && (
           <div className="flex flex-wrap items-center gap-3 text-sm text-retry">
-            Continues around {new Date(run.nextRunAt).toLocaleTimeString()}, on the next minute tick.
+            {run.error
+              ? run.error
+              : `Continues around ${new Date(run.nextRunAt).toLocaleTimeString()} (${new Date(run.nextRunAt).toISOString().slice(11, 16)} UTC), on the next minute tick.`}
             <Button
               variant="ghost"
               disabled={nudging}
@@ -79,7 +81,7 @@ export function RunPage({ id }: { id: string }) {
             </Button>
           </div>
         )}
-        {run.error && <p className="text-fail">{run.error}</p>}
+        {run.error && run.status !== "waiting" && <p className="text-fail">{run.error}</p>}
       </div>
 
       <div className="grid gap-8 lg:grid-cols-[1fr_360px]">

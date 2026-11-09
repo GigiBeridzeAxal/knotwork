@@ -54,9 +54,19 @@ const STATUS: Record<RunStatus | LogStatus, { label: string; color: string }> = 
 
 /** `error` tells a run stopped for another reason (e.g. to free space) from one a filter step stopped. */
 export function StatusBadge({ status, error }: { status: RunStatus | LogStatus; error?: string | null }) {
-  const s = status === "stopped" && error ? { ...STATUS.stopped, label: "Stopped" } : STATUS[status];
+  const s =
+    status === "stopped" && error
+      ? { ...STATUS.stopped, label: "Stopped" }
+      : status === "waiting" && error
+        ? { ...STATUS.waiting, label: "Paused" }
+        : STATUS[status];
+  // A waiting run with a note was paused for lack of storage budget; the note says until when.
+  const note = status === "waiting" && error && error.startsWith("Paused") ? error : undefined;
   return (
-    <span className={cn("inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap", s.color)}>
+    <span
+      title={note}
+      className={cn("inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap", s.color)}
+    >
       <span className={cn("size-2 rounded-full bg-current", status === "running" && "animate-pulse")} />
       {s.label}
     </span>

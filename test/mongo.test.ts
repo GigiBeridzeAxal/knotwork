@@ -226,7 +226,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(counter?.n).toBeLessThan(2_000);
   });
 
-  it("pauses a run until the next hour when there's no room, before its next step runs", async () => {
+  it("pauses a run when there's no room, before its next step runs, and says why", async () => {
     await account("usr_writer");
     const big = { id: "big", name: "Big", type: "transform" as const, retry: { max: 0, backoffSeconds: 5 }, config: { output: "€".repeat(6_000) } };
     const { runId } = await start([big, transform("b", 1)], "usr_writer", "ws_writer");
@@ -234,9 +234,21 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await advance(c, runId);
     const run = await c.runs.findOne({ _id: runId });
     expect(run?.status).toBe("waiting");
-    expect(run?.nextRunAt).toBe((Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000);
-    expect(run?.logs.at(-1)?.message).toMatch(/^Paused: this account's runs have stored their limit this hour\. Continues at \d\d:\d\d UTC\.$/);
+    // Tries again in 10 minutes, or when the next hour starts if that's sooner.
+    expect(run?.nextRunAt).toBeGreaterThan(Date.now());
+    expect(run?.nextRunAt).toBeLessThanOrEqual(Math.min((Math.floor(Date.now() / 3_600_000) + 1) * 3_600_000, Date.now() + 600_000));
+    expect(run?.error).toMatch(/^Paused: this account's runs have stored their limit this hour\. Tries again at \d\d:\d\d UTC\.$/);
+    expect(run?.logs).toEqual([]);
     expect(run?.outputs).toEqual({});
+    const wf = await c.workflows.findOne({ "lastRun.id": runId });
+    expect(wf?.lastRun).toMatchObject({ status: "waiting", error: run?.error });
+    // Once there's room, it runs on and the note goes.
+    await bump(c, "runbytes:usr_writer", 3_600_000, Date.now(), -3_990_000);
+    await c.runs.updateOne({ _id: runId }, { $set: { nextRunAt: Date.now() } });
+    await advance(c, runId);
+    const done = await c.runs.findOne({ _id: runId });
+    expect([done?.status, done?.error]).toEqual(["succeeded", null]);
+    expect((await c.workflows.findOne({ "lastRun.id": runId }))?.lastRun?.error).toBeUndefined();
     // 6,000 "€" are 18 KB in UTF-8: over the 16 KB a step keeps, so it would be cut, by bytes.
     const { keepable } = await import("../worker/engine");
     expect(keepable("€".repeat(6_000)).bytes).toBe(16_040);

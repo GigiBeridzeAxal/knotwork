@@ -139,13 +139,29 @@ export function clipBytes(text: string, max: number): string {
   if (bytes.byteLength <= max) return text;
   return `${new TextDecoder().decode(bytes.slice(0, max)).replace(/\uFFFD$/, "")}…`;
 }
-/** Most a log entry can add: a 1 KB message, a 1 KB output preview, names, and JSON escaping. */
-const LOG_MAX_BYTES = 5_500;
+/**
+ * About the most a log entry adds: a 1 KB message, a 1 KB output preview and names. (JSON escaping can
+ * add more; what's really written is charged when the run gives back its reservation.)
+ */
+const LOG_MAX_BYTES = 2_500;
+/** How soon a run paused for lack of byte budget tries again (or at the next hour, if sooner). */
+const PAUSE_RETRY_MS = 10 * 60_000;
 /** About what a log entry adds to its run. */
 const logBytes = (log: LogDoc) => utf8Bytes(JSON.stringify(log));
 
-async function updateLastRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, status: Run["status"]) {
-  await c.workflows.updateOne({ _id: run.workflowId, "lastRun.id": run._id }, { $set: { "lastRun.status": status } });
+/** `note` says why the run is where it is (e.g. paused); the workflow list shows it. */
+async function updateLastRun(
+  c: Collections,
+  run: Pick<RunDoc, "_id" | "workflowId">,
+  status: Run["status"],
+  note: string | null = null,
+) {
+  await c.workflows.updateOne(
+    { _id: run.workflowId, "lastRun.id": run._id },
+    note === null
+      ? { $set: { "lastRun.status": status }, $unset: { "lastRun.error": "" } }
+      : { $set: { "lastRun.status": status, "lastRun.error": note } },
+  );
 }
 
 async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, error: string) {
@@ -239,12 +255,13 @@ async function step(c: Collections, run: RunDoc, started: number) {
 
   // A waiting run is kept for the full history period after it wakes up, so a week-long delay
   // can't outlive its own run.
-  const park = async (nextRunAt: number, log?: LogDoc) => {
+  const park = async (nextRunAt: number, log?: LogDoc, note: string | null = null) => {
     await c.runs.updateOne(
       { _id: run._id },
       {
         $set: {
           status: "waiting",
+          error: note,
           stepIndex: index,
           attempt,
           claims: 0,
@@ -255,7 +272,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
         ...(log ? { $push: pushLog(log) } : {}),
       },
     );
-    await updateLastRun(c, run, "waiting");
+    await updateLastRun(c, run, "waiting", note);
   };
   const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
 
@@ -265,18 +282,15 @@ async function step(c: Collections, run: RunDoc, started: number) {
     Math.min(stepsLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
   const noRoom = await chargeRunBytes(c, run.ownerId, pool, reserve, started);
   if (noRoom) {
-    // No step has run in this invocation yet, so nothing is repeated: the run waits for the next hour,
-    // when the budgets start again, and says why.
-    const nextHour = (Math.floor(started / HOUR) + 1) * HOUR;
-    const at = new Date(nextHour).toISOString().slice(11, 16);
+    // No step has run in this invocation yet, so nothing is repeated: the run waits, and says why. It
+    // tries again in a few minutes (other runs in flight may give back what they reserved), and at the
+    // latest when the next hour's budgets start.
+    const retryAt = Math.min((Math.floor(started / HOUR) + 1) * HOUR, started + PAUSE_RETRY_MS);
+    const at = new Date(retryAt).toISOString().slice(11, 16);
     const why = noRoom.startsWith("Your account")
-      ? "this account's runs have stored their limit"
-      : "Knotwork's storage for runs is busy";
-    const pausedAt = steps[Math.min(index, steps.length - 1)];
-    await park(
-      nextHour,
-      pausedAt && entry(pausedAt, "waiting", started, `Paused: ${why} this hour. Continues at ${at} UTC.`),
-    );
+      ? "this account's runs have stored their limit this hour"
+      : "Knotwork's storage for runs is busy this hour";
+    await park(retryAt, undefined, `Paused: ${why}. Tries again at ${at} UTC.`);
     await chargeRunBytes(c, run.ownerId, pool, used, started, false);
     return;
   }
@@ -289,6 +303,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
   }
 
   async function runSteps() {
+    if (run.error) await c.runs.updateOne({ _id: run._id }, { $set: { error: null } }); // a pause note
     await updateLastRun(c, run, "running");
 
     while (index < steps.length) {
@@ -434,7 +449,13 @@ async function trimHistories(c: Collections): Promise<{ deleted: number; more: b
     .aggregate<{
       _id: string;
       n: number;
-    }>([{ $match: { status: { $in: FINISHED } } }, { $group: { _id: "$ownerId", n: { $sum: 1 } } }, { $match: { n: { $gt: HISTORY_KEPT_PER_ACCOUNT } } }, { $sort: { n: -1 } }, { $limit: HISTORY_OWNERS_PER_CHECK }])
+    }>([
+      { $match: { status: { $in: FINISHED } } },
+      { $group: { _id: "$ownerId", n: { $sum: 1 } } },
+      { $match: { n: { $gt: HISTORY_KEPT_PER_ACCOUNT } } },
+      { $sort: { n: -1 } },
+      { $limit: HISTORY_OWNERS_PER_CHECK },
+    ])
     .toArray();
   const ids: string[] = [];
   for (const h of heavy) {

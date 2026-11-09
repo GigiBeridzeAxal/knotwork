@@ -55,8 +55,8 @@ const HOUR = 60 * MINUTE;
 /** Biggest request body the API accepts. A workflow is at most LIMITS.workflowBytes of JSON. */
 const MAX_API_BODY = 64 * 1024;
 /** How much of a webhook call's headers and query string a run keeps (characters). */
-const MAX_HOOK_HEADER_BYTES = 8_000;
-const MAX_HOOK_QUERY_BYTES = 2_000;
+const MAX_HOOK_HEADER_CHARS = 8_000;
+const MAX_HOOK_QUERY_CHARS = 2_000;
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -500,13 +500,13 @@ app.all(
     c.req.raw.headers.forEach((value, name) => {
       if (name === "cookie" || name === "authorization" || name.startsWith("cf-") || name.startsWith("x-forwarded")) return;
       headerBytes += name.length + value.length;
-      if (headerBytes <= MAX_HOOK_HEADER_BYTES) headers[name] = value;
+      if (headerBytes <= MAX_HOOK_HEADER_CHARS) headers[name] = value;
     });
     const query: Record<string, string> = {};
     let queryBytes = 0;
     for (const [name, value] of Object.entries(c.req.query())) {
       queryBytes += name.length + value.length;
-      if (queryBytes <= MAX_HOOK_QUERY_BYTES) query[name] = value;
+      if (queryBytes <= MAX_HOOK_QUERY_CHARS) query[name] = value;
     }
     const input = { method: c.req.method, query, headers, body };
 

@@ -202,15 +202,16 @@ person from using up the free plans:
   webhook and manual runs together and 30 MB for scheduled runs, each a pool of its own; past half of a
   pool, accounts that had stored more than 200 KB this hour wait for the next. A new run is charged for
   its input and steps; each time it moves, it reserves the most its remaining steps could write and gives
-  back what they didn't. A run that started but can't reserve waits for the next hour, before its next
-  step, with the reason in its log; it never fails after a step has done its work. Workflows with big outputs can reach
-  the 4 MB before the 60 runs an hour (about 60 KB per run on average).
+  back what they didn't. A run that can't reserve is paused before its next step (shown as Paused, with the
+  reason) and tries again in 10 minutes or at the next hour, whichever is sooner; so the hourly budgets
+  never fail a run after a step has done its work. (The 64 KB of outputs per run still can.) Workflows
+  with big outputs can reach the 4 MB before the 60 runs an hour (about 60 KB per run on average).
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
   attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.
-- 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8 KB of headers and 2 KB of query); 64 KB of rendered templates per step.
+- 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8,000 characters of headers and 2,000 of query); 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
   64 KB per run (UTF-8 bytes); the last 50 log lines are kept.
 - Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
