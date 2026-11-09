@@ -71,3 +71,105 @@ body {
   scrollbar-width: thin;
   scrollbar-color: var(--color-edge) transparent;
 }
+
+/* ---------- docs (src/pages/DocsPage.tsx) ---------- */
+
+/* Reading styles for the user guide: body copy, lists, definitions, code and the limits table. */
+.docs > p.lead {
+  margin-top: 20px;
+  font-size: 18px;
+  line-height: 1.6;
+  color: var(--color-soft);
+}
+.docs section {
+  margin-top: 64px;
+}
+.docs h2 {
+  font-family: var(--font-display);
+  font-size: 28px;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.docs section > * + * {
+  margin-top: 16px;
+}
+.docs section p,
+.docs li,
+.docs dd {
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--color-soft);
+}
+.docs b {
+  color: var(--color-text);
+  font-weight: 600;
+}
+.docs section a {
+  color: var(--color-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.docs section a:hover {
+  color: var(--color-wire);
+}
+.docs ol {
+  padding-left: 20px;
+  list-style: decimal;
+}
+.docs ol > li + li {
+  margin-top: 8px;
+}
+.docs dt {
+  margin-top: 24px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+.docs dt:first-child {
+  margin-top: 0;
+}
+.docs dd {
+  margin: 4px 0 0;
+}
+.docs code {
+  border-radius: 6px;
+  background: var(--color-graphite);
+  box-shadow: inset 0 0 0 1px var(--color-line);
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--color-text);
+}
+.docs pre {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid var(--color-line);
+  background: var(--color-deep);
+  padding: 16px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-text);
+}
+.docs table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+.docs th,
+.docs td {
+  border-bottom: 1px solid var(--color-line);
+  padding: 12px 0;
+  text-align: left;
+  vertical-align: top;
+}
+.docs th {
+  padding-right: 24px;
+  font-weight: 400;
+  color: var(--color-soft);
+}
+.docs td {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--color-text);
+}

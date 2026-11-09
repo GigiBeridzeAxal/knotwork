@@ -11,6 +11,9 @@ Knotwork wires a **trigger** (a webhook, a schedule, or a button) to a list of *
 transforms, filters, delays, log lines). When a step fails it waits and tries again with backoff, and every
 attempt is written to a run log you can open in the dashboard.
 
+**Try it:** [open the live demo](https://knotwork.gigiberidze.com/demo) (one click, no account) ·
+[user guide](https://knotwork.gigiberidze.com/docs) · [case study](https://gigiberidze.com/work/knotwork)
+
 ![The workflow editor](docs/editor.png)
 
 ## What it does
@@ -43,7 +46,7 @@ Browser ──► Cloudflare Worker ──► MongoDB Atlas (free M0 cluster)
               │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
               │  /api/*       Hono JSON API for the dashboard
               │  /hooks/*     public webhook endpoints
-              │  /*           React dashboard (static assets)
+              │  /*           React dashboard (static assets), incl. /docs (user guide) and /demo
               └─ cron: every minute → fire schedules, resume parked runs;
                        every 10 min check storage, hourly check indexes, daily reset the demo
 ```

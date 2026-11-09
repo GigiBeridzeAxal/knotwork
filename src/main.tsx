@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { AppShell } from "./components/AppShell";
 import "./index.css";
 import { AuthPage } from "./pages/AuthPage";
+import { DemoPage } from "./pages/DemoPage";
+import { DocsPage } from "./pages/DocsPage";
 import { EditorPage } from "./pages/EditorPage";
 import { HomePage } from "./pages/HomePage";
 import { LandingPage } from "./pages/LandingPage";
@@ -42,10 +44,12 @@ function App() {
   const path = usePath();
   const { state } = useSession();
   if (path === "/") return <LandingPage />;
+  if (path === "/docs") return <DocsPage />;
   if (state.status === "loading") return <div className="min-h-screen bg-ink" aria-busy="true" />;
   if (path === "/login" || path === "/signup") {
     return state.status === "signed-in" ? <Redirect to="/home" /> : <AuthPage key={path} mode={path === "/login" ? "login" : "signup"} />;
   }
+  if (path === "/demo") return <DemoPage />;
   if (state.status === "signed-out") return <Redirect to={`/login?next=${encodeURIComponent(path + location.search)}`} />;
   return (
     <WorkspaceProvider key={state.workspaceId} path={path}>
