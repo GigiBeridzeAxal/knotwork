@@ -1,0 +1,70 @@
+name: Live check
+
+# Every 30 minutes: is knotwork.gigiberidze.com up, and does the demo account open? When it isn't,
+# an issue labelled "live-check" is opened (or commented on); when it works again, the issue closes.
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+  pull_request:
+    paths: [scripts/live-check.mjs, .github/workflows/live-check.yml]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the live site
+        id: check
+        run: |
+          set +e
+          node scripts/live-check.mjs > result.txt 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            # One retry after a minute, so a single dropped request doesn't open an issue.
+            sleep 60
+            node scripts/live-check.mjs > result.txt 2>&1
+            code=$?
+          fi
+          cat result.txt
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Open or close the issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CODE: ${{ steps.check.outputs.code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create live-check --color B60205 --description "The live site failed its check" 2>/dev/null || true
+          open=$(gh issue list --label live-check --state open --json number --jq '.[0].number')
+          body="$(printf '```\n%s\n```\n[Run](%s)' "$(cat result.txt)" "$RUN_URL")"
+          if [ "$CODE" != "0" ]; then
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "Still failing.
+
+          $body"
+            else
+              gh issue create --label live-check --title "The live site failed its check" --body "$body"
+            fi
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --comment "Working again.
+
+          $body"
+          fi
+      - name: Fail the run when the site is down
+        if: steps.check.outputs.code != '0'
+        run: exit 1
