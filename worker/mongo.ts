@@ -1,5 +1,5 @@
 import { type Collection, type Db, MongoClient } from "mongodb";
-import type { LogStatus, RunStatus, Step, Trigger, WorkflowInput } from "../shared/schema";
+import type { ApiKeyAccess, LogStatus, MemberRole, RunStatus, Step, Trigger, WorkflowInput } from "../shared/schema";
 
 export interface Env {
   /** mongodb+srv://… for the Atlas cluster. A Wrangler secret in production, `.dev.vars` locally. */
@@ -37,6 +37,11 @@ export interface UserDoc {
   password: { hash: string; salt: string; iterations: number } | null;
   demo: boolean;
   createdAt: number;
+  /**
+   * Unused recovery codes, each stored as HMAC-SHA-256(pepper, user id and code), so neither the
+   * database alone nor another account's codes can be used to get in. Using one removes it.
+   */
+  recoveryCodes?: string[];
 }
 
 export interface SessionDoc {
@@ -44,7 +49,11 @@ export interface SessionDoc {
   _id: string;
   userId: string;
   demo: boolean;
-  /** The user's workspaces, copied here so one lookup authorizes a request. */
+  /**
+   * The workspaces the user owns, copied here so one lookup authorizes a request. Workspaces they
+   * joined are not in it: membership and role are read from `members` on every request, so a removed
+   * member or a changed role takes effect at once.
+   */
   workspaceIds: string[];
   createdAt: number;
   expiresAt: Date;
@@ -56,6 +65,47 @@ export interface WorkspaceDoc {
   name: string;
   personal: boolean;
   createdAt: number;
+}
+
+/** Someone who joined another account's workspace. The owner has no row: `workspaces.ownerId` says who it is. */
+export interface MemberDoc {
+  /** `<workspace id>:<user id>`, so a person is in a workspace at most once and the check is one lookup by id. */
+  _id: string;
+  workspaceId: string;
+  userId: string;
+  /** The workspace's owner, copied here: runs and limits are charged to them. */
+  ownerId: string;
+  role: MemberRole;
+  createdAt: number;
+}
+
+export interface InviteDoc {
+  /** SHA-256 of the token in the invite link, so a database leak doesn't leak working links. */
+  _id: string;
+  workspaceId: string;
+  ownerId: string;
+  role: MemberRole;
+  uses: number;
+  maxUses: number;
+  /** The accounts that joined with it. A link lets each account in once (see `acceptInvite`). */
+  joined: string[];
+  createdAt: number;
+  /** A TTL index deletes the invite at this time; the code also checks it. */
+  expiresAt: Date;
+}
+
+export interface ApiKeyDoc {
+  /** SHA-256 of the key, so a database leak doesn't leak working keys. Also its id in lists. */
+  _id: string;
+  userId: string;
+  workspaceId: string;
+  /** The workspace's owner. When it is `userId`, the key's maker owns the workspace. */
+  ownerId: string;
+  name: string;
+  access: ApiKeyAccess;
+  prefix: string;
+  createdAt: number;
+  lastUsedAt: number | null;
 }
 
 export interface WorkflowDoc extends WorkflowInput {
@@ -147,6 +197,9 @@ export interface Collections {
   runs: Collection<RunDoc>;
   counters: Collection<CounterDoc>;
   versions: Collection<VersionDoc>;
+  members: Collection<MemberDoc>;
+  invites: Collection<InviteDoc>;
+  apiKeys: Collection<ApiKeyDoc>;
 }
 
 export function collections(db: Db): Collections {
@@ -158,6 +211,9 @@ export function collections(db: Db): Collections {
     runs: db.collection("runs"),
     counters: db.collection("counters"),
     versions: db.collection("versions"),
+    members: db.collection("members"),
+    invites: db.collection("invites"),
+    apiKeys: db.collection("apiKeys"),
   };
 }
 
@@ -307,6 +363,15 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.versions.createIndex({ workflowId: 1, version: -1 }),
+    c.members.createIndex({ userId: 1, createdAt: 1 }),
+    c.members.createIndex({ workspaceId: 1, createdAt: 1 }),
+    c.members.createIndex({ ownerId: 1 }),
+    c.invites.createIndex({ workspaceId: 1, createdAt: 1 }),
+    c.invites.createIndex({ ownerId: 1 }),
+    c.invites.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.apiKeys.createIndex({ userId: 1, createdAt: 1 }),
+    c.apiKeys.createIndex({ workspaceId: 1 }),
+    c.apiKeys.createIndex({ ownerId: 1 }),
   ]);
   // Indexes that newer ones above replaced. Dropping one that isn't there is fine.
   await Promise.allSettled([c.runs.dropIndex("status_1_nextRunAt_1"), c.workflows.dropIndex("trigger.type_1_enabled_1")]);
@@ -355,3 +420,4 @@ export const newUserId = () => `usr_${randomId(9)}`;
 export const newWorkspaceId = () => `ws_${randomId(12)}`;
 export const newWorkflowId = () => `wf_${randomId(8)}`;
 export const newRunId = () => `run_${randomId(10)}`;
+export const memberId = (workspaceId: string, userId: string) => `${workspaceId}:${userId}`;

@@ -46,7 +46,14 @@ attempt is written to a run log you can open in the dashboard.
   shared **demo account** with one click. Every account starts with a **Personal** workspace and can add more;
   the sidebar switches between them, and its **+** adds a workflow to the one you're in. A workspace only ever
   sees its own workflows and runs, and a link to a workflow or run in another of your workspaces switches there.
-  Settings can change your password (which logs out your other devices) or delete the account with everything in it.
+  Settings can change your password (which logs out your other devices and revokes your API keys) or delete the account with everything in it.
+- **Teams.** The owner of a workspace can share it with an invite link, as an **editor** (changes workflows
+  and starts runs) or a **viewer** (only looks). The owner can change a member's role or remove them at any
+  time, and a member can leave.
+- **Recovery codes.** Knotwork sends no email, so there is no reset link. Instead, Settings makes 8
+  one-time recovery codes; one of them, with your email, sets a new password.
+- **API keys.** Scripts can list and change workflows, start runs and read results with a key made in
+  Settings, read-only or read and write, for one workspace. See the [API reference](docs/api.md).
 - **Safe concurrent edits.** Every save carries the version it was loaded at. If someone saved in between
   (another tab, another device), you're asked to keep your version or load theirs, so nothing is lost silently.
 
@@ -56,8 +63,8 @@ attempt is written to a run log you can open in the dashboard.
 
 ```
 Browser ──► Cloudflare Worker ──► hub (one Durable Object) ──► MongoDB Atlas (free M0 cluster)
-              │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
-              │  /api/*       Hono JSON API for the dashboard
+              │  /api/auth/*  sign up, log in, demo, log out, password, recovery codes, delete account (session cookie)
+              │  /api/*       Hono JSON API for the dashboard, and for scripts with an API key
               │  /hooks/*     public webhook endpoints
               │  /*           React dashboard (static assets, served without the hub), incl. /docs and /demo
               └─ cron: every minute → fire schedules, resume parked runs;
@@ -73,7 +80,9 @@ the cron tick to the hub, which runs them on a database connection it keeps open
 | Step types, private-address and demo host checks | [`worker/steps.ts`](worker/steps.ts) |
 | Testing one step from the editor | [`worker/stepTest.ts`](worker/stepTest.ts) |
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
-| Accounts: password hashing, sessions, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
+| Accounts: password hashing, sessions, recovery codes, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
+| Teams and API keys: roles, invite links, members | [`worker/access.ts`](worker/access.ts) |
+| Signed webhook keys and API keys | [`worker/hookKey.ts`](worker/hookKey.ts) |
 | Queries, and the limits that need the database | [`worker/db.ts`](worker/db.ts) |
 | Collections, indexes and the database connection | [`worker/mongo.ts`](worker/mongo.ts) |
 | The Durable Object that keeps the connection open | [`worker/hub.ts`](worker/hub.ts) |
@@ -96,9 +105,9 @@ Limits that two requests could race past are enforced atomically: run budgets an
 taken out again if it went over.
 
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs`, `versions` (each workflow's
-saved versions) and `counters` (rate limits).
-TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
-data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
+saved versions), `counters` (rate limits), `members`, `invites` and `apiKeys`.
+TTL indexes delete runs after 7 days, sessions after 30 (1 for the demo) and invite links when they expire,
+so nothing has to scan for old data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
 the pending runs of accounts holding more than 20 (biggest backlogs first), then each account's finished
 runs beyond its newest 50 are deleted (longest histories first, 5 accounts a check, oldest runs first).
@@ -172,6 +181,50 @@ owner to move them to.
 Everything fits free plans: Cloudflare Workers, static assets, cron triggers, the rate limiter and one
 Durable Object, and a MongoDB Atlas M0 cluster. It doesn't call any paid AI API.
 
+### Teams, recovery codes and API keys
+
+**Roles.** A workspace has one owner, for good. Others join with an invite link as an editor or a viewer.
+The owner does everything; only the owner renames or deletes the workspace, makes and revokes invite
+links, and changes or removes members. Editors change workflows and start runs. Viewers read workflows
+and runs and change nothing. A personal workspace can't be shared.
+
+**Checked on every request.** A session lists only the workspaces its user owns. Membership and role are
+read from `members` on every request (one lookup by id), so a removal or a role change applies on the
+member's very next request. Runs, run limits and storage are always charged to the workspace's owner,
+whoever started the run.
+
+**Secrets stored as hashes.** An invite link's token and an API key are shown once, when they are made.
+The database keeps only their SHA-256, so a copy of it holds no working links or keys. An invite link
+works for 7 days and for 10 people, and the owner can revoke it sooner. Removing someone, or making
+them a viewer, ends the link they joined with (for everyone who still holds it), so they can't walk back in
+with it from another account; a link also lets each account in only once. A used-up link stops counting as open and is removed. The token travels in the request body
+(`POST /api/invites/preview` and `/accept`), not in an API URL, so it stays out of request logs.
+
+**API keys.** A key works in one workspace, read-only or read and write, and never has more rights than
+its maker has right now: the maker's role is read on every request, and their keys are deleted when they
+are removed from the workspace. A key reaches only workflows, runs and the overview (`KEY_PATHS` in
+[`worker/index.ts`](worker/index.ts)), never accounts, members, invite links or other keys. Like webhook
+URLs, a key carries a signature made with `AUTH_PEPPER`, so a made-up key is refused before any database
+lookup.
+
+**Recovery codes.** Each code is 12 characters with 60 random bits, stored as an HMAC of the user id and
+the code keyed with `AUTH_PEPPER`, so the database alone can't be used to test guesses. A code works once:
+the update that sets the new password also ends the whole set, since someone else may hold a copy of the
+sheet. Using one signs out every device and revokes the account's API keys; the owner then makes new codes. Changing the password in Settings
+does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
+new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
+email and IP per 15 minutes.
+
+**Webhook URLs.** A webhook URL starts runs for whoever has it, so viewers and read-only keys get workflows
+with an empty `hookKey`. Editors do see them, so after removing an editor the owner can press **New URL**
+on a workflow's trigger (`POST /api/workflows/:id/hook-key`) to end the old URL.
+
+**No framing.** [`public/_headers`](public/_headers) tells browsers never to show the app inside another
+site's frame, so its delete and revoke buttons can't be clicked through a disguised page.
+
+**The demo account** is shared by everyone, so it can't make invite links, join a workspace, or make API
+keys or recovery codes.
+
 ## Run it locally
 
 You need Node.js 22.6 or newer and a MongoDB to talk to: a free Atlas cluster, or one on your machine
@@ -198,7 +251,8 @@ The cron doesn't fire on its own in local development: click **Check now** on a 
 (schedules and waiting runs) with `curl http://localhost:5173/cdn-cgi/handler/scheduled`.
 
 ```sh
-npm test                                              # unit tests: templates, cron, filters, auth helpers
+npm test                                              # unit tests: templates, cron, filters, auth helpers,
+                                                      # and teams, recovery codes and API keys (in memory)
 MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test   # also the engine and data tests, in a throwaway
                                                       # database that is dropped afterwards
 npm run build                                         # type-check and build
@@ -248,7 +302,11 @@ npm run deploy
 ```
 
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
-password and webhook URL stop working.
+password, webhook URL, API key and recovery code stop working.
+
+A later deploy that adds collections or indexes needs no `db:setup`: the cron creates any missing index
+within the hour (at minute 7). Until then the new collections are nearly empty, so nothing is slow.
+Running `db:setup` anyway does no harm.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
@@ -314,7 +372,11 @@ person from using up the free plans:
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
-  attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
+  attempts per email and IP per 15 minutes (recovery codes have their own 10); 30 demo sign-ins per network
+  per hour; 20 sessions per account.
+- Teams: 10 members per workspace besides its owner; 5 open invite links per workspace, each working for
+  7 days and for 10 people; an account can join 20 other people's workspaces.
+- 8 recovery codes at a time, each used once; 10 API keys per account.
 - Schedules run at most every 5 minutes, in UTC.
 - 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8,000 characters of headers and 2,000 of query); 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
@@ -328,6 +390,8 @@ person from using up the free plans:
   can only call a few public test APIs, and it is reset every day at 03:00 UTC.
 
 ## Roadmap
+
+Built: teams with invite links and roles, recovery codes, and API keys (2026-11-09; live from the next deploy).
 
 - Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
 - Branching (if / else) and loops over arrays

@@ -186,17 +186,119 @@ export interface User {
   demo: boolean;
 }
 
+/** What someone may do in a workspace. Its owner made it; editors and viewers joined by an invite link. */
+export const ROLES = ["owner", "editor", "viewer"] as const;
+export type Role = (typeof ROLES)[number];
+/** The roles an invite link or a role change can give. A workspace keeps the one owner it started with. */
+export const memberRole = z.enum(["editor", "viewer"]);
+export type MemberRole = z.infer<typeof memberRole>;
+/** Viewers only read. Everything that changes a workflow or starts a run needs an editor or the owner. */
+export const canEdit = (role: Role) => role === "owner" || role === "editor";
+
 export interface Workspace {
   id: string;
   name: string;
-  /** Every account has one personal workspace. It can be renamed but not deleted. */
+  /** Every account has one personal workspace. It can be renamed but not deleted, and it isn't shared. */
   personal: boolean;
   createdAt: number;
+  /** The signed-in user's role here: "owner" for their own workspaces. */
+  role: Role;
 }
 
 export interface Me {
   user: User;
+  /** The user's own workspaces first, then the ones they joined. */
   workspaces: Workspace[];
+  /** Unused recovery codes left (0 when none were ever made). */
+  recoveryCodesLeft: number;
+}
+
+// ---------- Recovery codes ----------
+
+/** A recovery code as typed: 12 letters and digits, with or without the dashes, in either case. */
+export const recoveryCode = z
+  .string()
+  .trim()
+  .max(40)
+  .transform((code) => code.toUpperCase().replace(/[\s-]/g, ""))
+  .refine((code) => /^[0-9A-Z]{12}$/.test(code), "A recovery code looks like ABCD-EFGH-JKMN");
+
+export const recoverInput = z.object({ email, code: recoveryCode, password: newPassword });
+export const recoveryCodesInput = z.object({ password: z.string().min(1, "Enter your password").max(200) });
+
+// ---------- Teams ----------
+
+export const inviteInput = z.object({ role: memberRole });
+export const inviteTokenInput = z.object({ token: z.string().regex(/^[A-Za-z0-9_-]{43}$/) });
+export const roleChange = z.object({ role: memberRole });
+
+export interface Member {
+  userId: string;
+  name: string;
+  role: Role;
+  joinedAt: number;
+  /** True for the signed-in user's own row. */
+  you: boolean;
+}
+
+/** An open invite link. The link itself is only returned once, when it is made. */
+export interface Invite {
+  id: string;
+  role: MemberRole;
+  createdAt: number;
+  expiresAt: number;
+  /** People who joined with it so far, and the most it lets in. */
+  uses: number;
+  maxUses: number;
+}
+
+export interface NewInvite extends Invite {
+  /** The secret in the link: `/join/<token>`. Not stored; it can't be shown again. */
+  token: string;
+}
+
+/** What someone holding an invite link sees before joining. */
+export interface InvitePreview {
+  workspaceId: string;
+  workspaceName: string;
+  ownerName: string;
+  role: MemberRole;
+  /** True when the signed-in user already owns or belongs to the workspace. */
+  already: boolean;
+}
+
+export interface Team {
+  members: Member[];
+  /** Open invite links. Only the owner gets these; for everyone else the list is empty. */
+  invites: Invite[];
+}
+
+// ---------- API keys ----------
+
+export const apiKeyAccess = z.enum(["read", "write"]);
+export type ApiKeyAccess = z.infer<typeof apiKeyAccess>;
+
+export const apiKeyInput = z.object({
+  name: z.string().trim().min(1, "Give it a name").max(40),
+  workspaceId: z.string().min(1).max(60),
+  access: apiKeyAccess,
+});
+
+/** An API key as lists show it. The key itself is only returned once, when it is made. */
+export interface ApiKey {
+  id: string;
+  name: string;
+  workspaceId: string;
+  access: ApiKeyAccess;
+  /** The first characters of the key, to tell keys apart. */
+  prefix: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export interface NewApiKey extends ApiKey {
+  /** The whole key, e.g. `kw_…`. Not stored; it can't be shown again. */
+  key: string;
 }
 
 export interface Run {
@@ -234,12 +336,14 @@ export interface RunDetail extends Run {
 }
 
 export interface Overview {
+  /** What the caller may do in this workspace right now. The dashboard uses it to notice a role change. */
+  role: Role;
   workflows: WorkflowSummary[];
   /** The workspace's newest 100 runs. */
   runs: Run[];
-  /** Runs the whole account started this clock hour (the limit is per account). */
+  /** Runs the workspace's owner started this clock hour, in all their workspaces (the limit is the owner's). */
   runsThisHour: number;
-  /** This account's hourly run limit right now (lower in its first 24 hours). */
+  /** The owner's hourly run limit right now (lower in their first 24 hours). */
   runsLimit: number;
 }
 
