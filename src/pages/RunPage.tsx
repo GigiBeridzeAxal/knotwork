@@ -10,6 +10,8 @@ const DONE = new Set(["succeeded", "failed", "stopped"]);
 export function RunPage({ id }: { id: string }) {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState("");
+  /** The last refresh failed for a passing reason (the server is busy or restarting); it is tried again. */
+  const [retrying, setRetrying] = useState("");
   const [open, setOpen] = useState<number | null>(null);
   const [nudging, setNudging] = useState(false);
   const findElsewhere = useFindElsewhere();
@@ -26,13 +28,18 @@ export function RunPage({ id }: { id: string }) {
         const next = await api.run(id);
         if (stopped) return;
         setRun(next);
+        setRetrying("");
         // Poll quickly while a run is moving, slowly while it waits for a delay or retry, and not
         // at all while the tab is hidden.
         if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 3000);
       } catch (e) {
         if (stopped) return;
         if (e instanceof ApiError && e.status === 404 && (await findElsewhere("run", id))) return;
-        setError((e as Error).message);
+        // Not found or signed out ends it. Anything else (a 503 during a deploy, a 429, the network)
+        // passes: keep what is on screen and try again.
+        if (e instanceof ApiError && (e.status === 404 || e.status === 401)) return setError(e.message);
+        setRetrying((e as Error).message);
+        schedule(15_000);
       }
     };
     load();
@@ -43,7 +50,7 @@ export function RunPage({ id }: { id: string }) {
   }, [id, findElsewhere]);
 
   if (error) return <p className="text-fail">{error}</p>;
-  if (!run) return null;
+  if (!run) return retrying ? <p className="text-sm text-soft">Couldn't load this run just now. Trying again shortly.</p> : null;
 
   const done = run.logs.filter((l) => l.status === "ok" || l.status === "waiting").length;
   const remaining = DONE.has(run.status) ? 0 : Math.max(0, run.stepCount - done);
@@ -63,6 +70,11 @@ export function RunPage({ id }: { id: string }) {
           {run.id} · {run.triggerType} · started {timeAgo(run.createdAt)}
           {total !== null && ` · took ${duration(total)}`}
         </p>
+        {retrying && (
+          <p role="status" className="text-sm text-soft">
+            Couldn't refresh this run just now. Trying again shortly.
+          </p>
+        )}
         {run.status === "waiting" && run.nextRunAt && (
           <div className="flex flex-wrap items-center gap-3 text-sm text-retry">
             {run.error

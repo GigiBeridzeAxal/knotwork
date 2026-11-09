@@ -237,8 +237,10 @@ export class Mongo {
   private shared: boolean;
   /** Set by close(). A closed Mongo never reconnects, so nothing can open a client that nobody closes. */
   closed = false;
-  /** Set when a request failed with a connection error; the hub then replaces this connection. */
+  /** Set when a request found this client finished (see clientIsDead); the hub then replaces it. */
   broken = false;
+  /** When connection errors began with nothing working since (ms), or 0. See clientIsDead. */
+  failingSince = 0;
 
   constructor(env: Env, { shared = false } = {}) {
     this.env = env;
@@ -265,6 +267,8 @@ export class Mongo {
       });
       this.started = Date.now();
       this.client.once("connectionReady", () => (this.connected = Date.now()));
+      // A new pooled connection got through: whatever was failing has ended.
+      this.client.on("connectionReady", () => (this.failingSince = 0));
       this.database = this.client.db(this.env.MONGODB_DB || "knotwork");
       this.cols = collections(this.database);
     }
@@ -296,12 +300,45 @@ const CONNECTION_ERRORS = new Set([
   "MongoPoolClearedError",
 ]);
 
-/** True for errors that mean the connection itself failed, as opposed to a bug or a refused write. */
-export function isConnectionError(err: unknown): boolean {
+/** Errors a client never recovers from: it has been closed, or it never connected. */
+const DEAD_CLIENT_ERRORS = new Set(["MongoTopologyClosedError", "MongoNotConnectedError"]);
+
+const named = (err: unknown, names: Set<string>): boolean => {
   for (let e = err as { name?: string; cause?: unknown } | undefined, depth = 0; e && depth < 4; e = e.cause as typeof e, depth++) {
-    if (e.name && CONNECTION_ERRORS.has(e.name)) return true;
+    if (e.name && names.has(e.name)) return true;
   }
   return false;
+};
+
+/** How long a connected client may fail with connection errors only before it is given up on. */
+const STUCK_MS = 180_000;
+
+/**
+ * True when this error means the client itself is finished and a new one is needed. A network error
+ * on a client that has connected before is not that: the driver reconnects on its own, and a second
+ * client opened during an outage is the one that can't recover (its first connect fails and it stays
+ * closed). A client that never connected and fails to is finished.
+ *
+ * The last resort: a connected client that has had nothing but connection errors for STUCK_MS is
+ * finished too, in case the driver can't repair it. This call notes when the errors began
+ * (`failingSince`); a new connection getting through, or a tick that worked, clears it.
+ */
+export function clientIsDead(mongo: Mongo, err: unknown, now = Date.now()): boolean {
+  if (named(err, DEAD_CLIENT_ERRORS)) return true;
+  if (!named(err, CONNECTION_ERRORS)) return false;
+  if (mongo.connected === 0) return true;
+  if (!mongo.failingSince) mongo.failingSince = now;
+  return now - mongo.failingSince >= STUCK_MS;
+}
+
+/** True when the database couldn't be reached or was too busy to answer in time: a 503, not a bug. */
+export function databaseUnavailable(err: unknown): boolean {
+  return named(err, CONNECTION_ERRORS) || named(err, new Set(["MongoWaitQueueTimeoutError"]));
+}
+
+/** True for errors that mean the connection itself failed, as opposed to a bug or a refused write. */
+export function isConnectionError(err: unknown): boolean {
+  return named(err, CONNECTION_ERRORS);
 }
 
 /**
@@ -339,6 +376,39 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
   // Indexes that newer ones above replaced. Dropping one that isn't there is fine.
   await Promise.allSettled([c.runs.dropIndex("status_1_nextRunAt_1"), c.workflows.dropIndex("trigger.type_1_enabled_1")]);
   return results.flatMap((r) => (r.status === "rejected" ? [(r.reason as Error).message] : []));
+}
+
+/**
+ * How deeply JSON from a client or a step may be nested. MongoDB refuses documents nested more than
+ * 100 levels, and a workflow's step, a run's input or a step's output sits a few levels inside its
+ * document.
+ */
+export const MAX_JSON_DEPTH = 50;
+
+/**
+ * Why a parsed JSON value can't be stored, or "" when it can: nested more than `max` levels, or an
+ * object key with a null byte (the database driver refuses those). No recursion: the input may be
+ * very deep.
+ */
+export function unstorable(value: unknown, max = MAX_JSON_DEPTH): string {
+  let level: unknown[] = [value];
+  for (let depth = 0; level.length; depth++) {
+    const next: unknown[] = [];
+    for (const item of level) {
+      if (!item || typeof item !== "object") continue;
+      if (depth >= max) return `That JSON is nested more than ${max} levels deep`;
+      if (Array.isArray(item)) {
+        for (const child of item) next.push(child);
+      } else {
+        for (const [key, child] of Object.entries(item)) {
+          if (key.includes("\u0000")) return "A field name contains a null character";
+          next.push(child);
+        }
+      }
+    }
+    level = next;
+  }
+  return "";
 }
 
 export function randomId(bytes: number): string {
