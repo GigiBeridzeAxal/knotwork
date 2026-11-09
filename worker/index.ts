@@ -48,7 +48,7 @@ import {
 } from "./db";
 import { DEMO_USER_ID, ensureDemo } from "./demo";
 import { advance, createRun, tick } from "./engine";
-import { type Env, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
+import { type Env, isConnectionError, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -65,6 +65,8 @@ const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 app.onError((err, c) => {
   console.error(err);
+  // Tells the hub that its connection failed, so it starts a new one. Other errors keep it.
+  if (c.env.SHARED_MONGO && isConnectionError(err)) c.env.SHARED_MONGO.broken = true;
   return c.json({ error: "Something went wrong on our side" }, 500);
 });
 
@@ -89,21 +91,21 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "local"]);
 // Webhooks are limited per hook key instead (below): senders such as GitHub, Stripe or another
 // Worker deliver for many customers from a few shared addresses, so a per-IP limit would let one
 // noisy sender block everyone else's webhooks.
-app.use("*", async (c, next) => {
-  const from = c.req.header("cf-connecting-ip") ?? "local";
-  if (!LOOPBACK.has(from) && !c.req.path.startsWith("/hooks/")) {
-    // Per address (IPv6 per /64), and per network (IPv6 per /48, which anyone can get for free and
-    // which holds 65,536 /64s).
-    const [address, network] = await Promise.all([
-      c.env.IP_LIMITER?.limit({ key: ipKey(from) }),
-      c.env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
-    ]);
-    if (address?.success === false || network?.success === false) {
-      return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
-    }
-  }
-  return next();
-});
+async function overLimit(env: Env, request: Request): Promise<Response | null> {
+  const from = request.headers.get("cf-connecting-ip") ?? "local";
+  if (LOOPBACK.has(from) || new URL(request.url).pathname.startsWith("/hooks/")) return null;
+  // Per address (IPv6 per /64), and per network (IPv6 per /48, which anyone can get for free and
+  // which holds 65,536 /64s).
+  const [address, network] = await Promise.all([
+    env.IP_LIMITER?.limit({ key: ipKey(from) }),
+    env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
+  ]);
+  if (address?.success !== false && network?.success !== false) return null;
+  return Response.json({ error: "Too many requests from your network. Wait a minute and try again." }, { status: 429 });
+}
+// Inside the hub this is skipped: the Worker already checked before forwarding, so a request that
+// is turned away costs none of the hub's daily requests.
+app.use("*", async (c, next) => (c.env.SHARED_MONGO ? null : await overLimit(c.env, c.req.raw)) ?? next());
 
 // The hub's long-lived database connection, or (without the hub) one per request, opened on first
 // use and closed once the response and any background work (a run started by this request) are done.
@@ -536,17 +538,38 @@ export const handle = app.fetch;
 
 export { Hub } from "./hub";
 
+/** The hub is used unless the binding is missing (tests) or switched off with HUB_OFF. */
+const useHub = (env: Env) => Boolean(env.HUB) && !env.HUB_OFF;
+
 export default {
   async fetch(request, env, ctx) {
     // The API and webhooks run in the hub, on its open database connection. (Static files never
     // reach this code; see run_worker_first in wrangler.jsonc.)
     const { pathname } = new URL(request.url);
-    if (env.HUB && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) return hub(env).fetch(request);
+    if (useHub(env) && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) {
+      const refused = await overLimit(env, request);
+      if (refused) return refused;
+      try {
+        return await hub(env).fetch(request);
+      } catch (err) {
+        // The hub can't be reached: it is restarting for a deploy, or a free daily Durable Object
+        // limit is used up (those reset at 00:00 UTC).
+        console.error("hub", err);
+        return Response.json(
+          { error: "Knotwork can't take requests right now. Try again in a few minutes." },
+          { status: 503, headers: { "retry-after": "60" } },
+        );
+      }
+    }
     return app.fetch(request, env, ctx);
   },
   async scheduled(_controller, env, ctx) {
-    if (env.HUB) {
-      ctx.waitUntil(hub(env).fetch(HUB_TICK, { method: "POST" }).then((res) => res.body?.cancel()));
+    if (useHub(env)) {
+      ctx.waitUntil(
+        hub(env)
+          .fetch(HUB_TICK, { method: "POST" })
+          .then((res) => res.body?.cancel(), (err) => console.error("hub tick", err)),
+      );
       return;
     }
     const mongo = new Mongo(env);

@@ -1,6 +1,7 @@
 import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { AppShell } from "./components/AppShell";
+import { Button } from "./components/ui";
 import "./index.css";
 import { AuthPage } from "./pages/AuthPage";
 import { EditorPage } from "./pages/EditorPage";
@@ -38,13 +39,27 @@ function Redirect({ to }: { to: string }) {
   return null;
 }
 
+/** The server couldn't say whether this browser is signed in (an outage, not a sign-out). */
+function Unavailable({ message }: { message: string }) {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-4 bg-ink px-4 text-center">
+      <p className="font-display text-2xl font-bold text-balance">Knotwork isn&apos;t answering right now</p>
+      <p className="max-w-md text-sm text-soft">{message} Your workflows and runs are safe.</p>
+      <Button onClick={() => location.reload()}>Try again</Button>
+    </main>
+  );
+}
+
 function App() {
   const path = usePath();
   const { state } = useSession();
   if (path === "/") return <LandingPage />;
   if (state.status === "loading") return <div className="min-h-screen bg-ink" aria-busy="true" />;
+  if (state.status === "unavailable") return <Unavailable message={state.message} />;
   if (path === "/login" || path === "/signup") {
-    return state.status === "signed-in" ? <Redirect to="/home" /> : <AuthPage key={path} mode={path === "/login" ? "login" : "signup"} />;
+    // Someone trying the shared demo can still reach these pages: signing in replaces the demo session.
+    const own = state.status === "signed-in" && !state.me.user.demo;
+    return own ? <Redirect to="/home" /> : <AuthPage key={path} mode={path === "/login" ? "login" : "signup"} />;
   }
   if (state.status === "signed-out") return <Redirect to={`/login?next=${encodeURIComponent(path + location.search)}`} />;
   return (
