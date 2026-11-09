@@ -44,6 +44,10 @@ const SHRINK_BACKLOG_FROM = 5;
 const HISTORY_KEPT_PER_ACCOUNT = 50;
 /** Accounts whose older history one check trims (those with the most first): one query each. */
 const HISTORY_OWNERS_PER_CHECK = 5;
+/** Older history left after a trim for the guard to leave everyone's oldest runs for the next check. */
+const HISTORY_MORE_FROM = 100;
+/** Accounts over the mark the guard counts, to know how much older history is left. */
+const HISTORY_ACCOUNTS_COUNTED = 2_000;
 /** Most runs the storage guard stops, or deletes, in one step of one check. */
 const SHRINK_PER_CHECK = 2_000;
 const TICK_CONCURRENCY = 3;
@@ -290,8 +294,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
     const why = noRoom.startsWith("Your account")
       ? "this account's runs have stored their limit this hour"
       : "Knotwork's storage for runs is busy this hour";
-    await park(retryAt, undefined, `Paused: ${why}. Tries again at ${at} UTC.`);
-    await chargeRunBytes(c, run.ownerId, pool, used, started, false);
+    await park(retryAt, undefined, `Paused: ${why}. Tries again at ${at} UTC.`); // writes no log, so nothing to charge
     return;
   }
   try {
@@ -445,32 +448,30 @@ const FINISHED: RunStatus[] = ["succeeded", "failed", "stopped"];
  * their recent ones. Returns how many runs it deleted.
  */
 async function trimHistories(c: Collections): Promise<{ deleted: number; more: boolean }> {
+  // Every account over the mark (most first), so what's left to trim afterwards is known.
   const heavy = await c.runs
     .aggregate<{
       _id: string;
       n: number;
-    }>([
-      { $match: { status: { $in: FINISHED } } },
-      { $group: { _id: "$ownerId", n: { $sum: 1 } } },
-      { $match: { n: { $gt: HISTORY_KEPT_PER_ACCOUNT } } },
-      { $sort: { n: -1 } },
-      { $limit: HISTORY_OWNERS_PER_CHECK },
-    ])
+    }>([{ $match: { status: { $in: FINISHED } } }, { $group: { _id: "$ownerId", n: { $sum: 1 } } }, { $match: { n: { $gt: HISTORY_KEPT_PER_ACCOUNT } } }, { $sort: { n: -1 } }, { $limit: HISTORY_ACCOUNTS_COUNTED }])
     .toArray();
+  const surplus = heavy.reduce((sum, h) => sum + h.n - HISTORY_KEPT_PER_ACCOUNT, 0);
   const ids: string[] = [];
-  for (const h of heavy) {
+  for (const h of heavy.slice(0, HISTORY_OWNERS_PER_CHECK)) {
     if (ids.length >= SHRINK_PER_CHECK) break;
+    // The account's oldest runs beyond its newest HISTORY_KEPT_PER_ACCOUNT.
     const extra = await c.runs
       .find({ ownerId: h._id, status: { $in: FINISHED } }, { projection: { _id: 1 } })
-      .sort({ createdAt: -1 })
-      .skip(HISTORY_KEPT_PER_ACCOUNT)
-      .limit(SHRINK_PER_CHECK - ids.length)
+      .sort({ createdAt: 1 })
+      .limit(Math.min(h.n - HISTORY_KEPT_PER_ACCOUNT, SHRINK_PER_CHECK - ids.length))
       .toArray();
     ids.push(...extra.map((r) => r._id));
   }
   if (ids.length) await c.runs.deleteMany({ _id: { $in: ids } });
-  // A full batch of accounts means others may still have older history to trim.
-  return { deleted: ids.length, more: heavy.length === HISTORY_OWNERS_PER_CHECK };
+  // More than a little older history left (one big account's, or many accounts') means the next check
+  // keeps trimming before anyone's recent runs go. A few runs over 50 each don't count, so accounts
+  // finishing a run a minute can't hold back the oldest-first step for good.
+  return { deleted: ids.length, more: surplus - ids.length >= HISTORY_MORE_FROM };
 }
 
 /** Runs waiting more than a day ahead (long delays are what filling the database with waits needs), latest first. */
@@ -571,7 +572,8 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
     // While other accounts still have history beyond their newest 50, the next check (a minute away)
     // trims that before anyone's recent runs go.
-    if (used > STORAGE_PRUNE_BYTES && !moreHistory) {
+    // Near the full mark, though, old history always goes before anyone's runs in flight.
+    if (used > STORAGE_PRUNE_BYTES && (!moreHistory || used > STORAGE_FULL_BYTES)) {
       const old = await c.runs
         .find({ status: { $in: FINISHED } }, { projection: { _id: 1 } })
         .sort({ createdAt: 1 })

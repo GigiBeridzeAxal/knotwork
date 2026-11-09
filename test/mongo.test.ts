@@ -401,10 +401,53 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({});
     const history = (owner: string, n: number) =>
       Array.from({ length: n }, (_, i) => ({ _id: `run_${owner}_${i}`, ownerId: owner, status: "succeeded", createdAt: 1_000 + i }) as never);
-    // Six accounts with 60 finished runs each (more than one check trims), and a quiet one with 10 older runs.
-    await c.runs.insertMany([...["a", "b", "c", "d", "e", "f"].flatMap((x) => history(`usr_busy_${x}`, 60)), ...history("usr_quiet", 10).map((r: any) => ({ ...r, createdAt: 0 }))]);
+    // Ten accounts with 100 finished runs each (more than one check trims), and a quiet one with 10 older runs.
+    await c.runs.insertMany([...["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"].flatMap((x) => history(`usr_busy_${x}`, 100)), ...history("usr_quiet", 10).map((r: any) => ({ ...r, createdAt: 0 }))]);
     await guardStorage(c, { stats: async () => ({ dataSize: 380 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, Date.now());
     expect(await c.runs.countDocuments({ ownerId: "usr_quiet" })).toBe(10);
+    await c.runs.deleteMany({});
+  });
+
+  it("deletes old history before stopping runs in flight near full, even while accounts keep adding history", async () => {
+    await c.runs.deleteMany({});
+    const now = Date.now();
+    const finished = (owner: string, n: number, from: number) =>
+      Array.from({ length: n }, (_, i) => ({ _id: `run_${owner}_${from + i}`, ownerId: owner, status: "succeeded", createdAt: from + i }) as never);
+    // 5 accounts just over 50 finished runs (finishing one a minute), 10 accounts at exactly 50 old
+    // ones, and an ordinary account with 3 runs waiting.
+    await c.runs.insertMany([
+      ...["a", "b", "c", "d", "e"].flatMap((x) => finished(`usr_decoy_${x}`, 51, 10_000)),
+      ...Array.from({ length: 10 }, (_, h) => finished(`usr_holder_${h}`, 50, 0)).flat(),
+      ...Array.from({ length: 3 }, (_, i) => ({ _id: `run_legit_${i}`, ownerId: "usr_legit", status: "waiting", nextRunAt: now + 600_000, createdAt: now }) as never),
+    ]);
+    // Between the pruning and full marks: the decoys' few extra runs don't hold back step 5.
+    await guardStorage(c, { stats: async () => ({ dataSize: 420 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, now);
+    expect(await c.runs.countDocuments({ ownerId: /^usr_holder/ })).toBeLessThan(500);
+    // Past the full mark: old history goes before the ordinary account's runs in flight.
+    await c.runs.deleteMany({ ownerId: /^usr_(holder|decoy)/ });
+    await c.runs.insertMany([...["a", "b", "c", "d", "e"].flatMap((x) => finished(`usr_decoy_${x}`, 200, 10_000)), ...Array.from({ length: 10 }, (_, h) => finished(`usr_holder_${h}`, 50, 0)).flat()]);
+    const sizes = [460 * 1024 * 1024, 460 * 1024 * 1024, 300 * 1024 * 1024];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 300 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, now);
+    expect(await c.runs.countDocuments({ ownerId: "usr_legit", status: "waiting" })).toBe(3);
+    expect(await c.runs.countDocuments({ ownerId: /^usr_holder/ })).toBeLessThan(500);
+    await c.runs.deleteMany({});
+  });
+
+  it("keeps trimming one very busy account's older history before anyone else's recent runs go", async () => {
+    await c.runs.deleteMany({});
+    await c.runs.insertMany([
+      ...Array.from({ length: 10 }, (_, i) => ({ _id: `run_q_${i}`, ownerId: "usr_q10", status: "succeeded", createdAt: i }) as never),
+      ...Array.from({ length: 5_000 }, (_, i) => ({ _id: `run_busy_${i}`, ownerId: "usr_busy", status: "succeeded", createdAt: 100 + i }) as never),
+    ]);
+    const stats = { stats: async () => ({ dataSize: 380 * 1024 * 1024, indexSize: 0 }) } as unknown as Db;
+    await guardStorage(c, stats, Date.now());
+    expect(await c.runs.countDocuments({ ownerId: "usr_q10" })).toBe(10);
+    // The busy account's oldest runs went first.
+    expect(await c.runs.countDocuments({ ownerId: "usr_busy" })).toBe(3_000);
+    expect(await c.runs.findOne({ _id: "run_busy_1999" })).toBeNull();
+    await guardStorage(c, stats, Date.now());
+    expect(await c.runs.countDocuments({ ownerId: "usr_q10" })).toBe(10);
+    expect(await c.runs.countDocuments({ ownerId: "usr_busy" })).toBe(1_000);
     await c.runs.deleteMany({});
   });
 
