@@ -75,6 +75,8 @@ describe("testing one step", () => {
       "W",
     );
     expect(branch).toMatchObject({ status: "ok", output: { result: true, branch: "then" } });
+    // The steps inside are not sent with a test, so it must not claim the branch is empty.
+    expect(branch.message).toMatch(/A run would take Then$/);
     const loop = { id: "each", name: "Each", type: "loop" as const, retry, config: { items: "{{ trigger.body.list }}" }, steps: [] };
     expect(await testStep(loop, { trigger: { body: { list: ["a", "b"] } }, steps: {} }, "W")).toMatchObject({
       status: "ok",

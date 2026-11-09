@@ -34,7 +34,7 @@ const LIMIT_ROWS: [string, string][] = [
   ["Blocks inside blocks", `${LIMITS.stepDepth} levels`],
   ["Items per loop", String(LIMITS.loopItems)],
   ["Steps one run can take", `${LIMITS.stepRunsPerRun} (every step in every loop pass counts, and every retry)`],
-  ["Requests to other sites per run", `${LIMITS.httpCallsPerGo} in one go (redirects count), then it carries on within a minute`],
+  ["Requests to other sites per run", `${LIMITS.httpCallsPerGo} in one go (redirects count), then it carries on, usually within a minute`],
   ["Secrets per workspace", `${LIMITS.secretsPerWorkspace}, each ${LIMITS.secretMinChars} to ${LIMITS.secretMaxChars.toLocaleString("en")} characters`],
   ["Size of a saved workflow", `${LIMITS.workflowBytes / 1000} KB`],
   ["Saved versions per workflow", `the newest ${LIMITS.versionsPerWorkflow}`],
@@ -275,7 +275,7 @@ export function DocsPage() {
               a loop, each retry, each if check and each start of a loop. So {LIMITS.loopItems} items with 3 steps inside is
               151, and with 4 steps it is 201, one too many. A run also makes at most {LIMITS.httpCallsPerGo} requests to
               other sites in one go (a redirect counts as one more): a longer loop of requests pauses, says so, and carries
-              on within a minute.
+              on, usually within a minute (longer when many runs are making requests at once).
             </p>
             <p>An example that takes a signed GitHub push, and posts each commit by someone other than a bot to a chat:</p>
             <pre>{`Trigger: Webhook, signature check: GitHub, secret GH_SIGNING
@@ -409,7 +409,7 @@ export function DocsPage() {
               <dt>A run says "Paused: … as many requests as fit"</dt>
               <dd>
                 It made {LIMITS.httpCallsPerGo} requests in one go, or many runs were making requests in the same minute.
-                Nothing is lost: it carries on from the same step within a minute.
+                Nothing is lost: it carries on from the same step, usually within a minute and a little later when many runs are busy.
               </dd>
               <dt>A run fails with "The run reached {LIMITS.stepRunsPerRun} steps"</dt>
               <dd>

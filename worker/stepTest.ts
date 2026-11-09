@@ -108,7 +108,9 @@ export async function testStep(
   try {
     if (step.type === "if") {
       // A block is tested on its own: an "if" says which way it would go, a loop what it would go through.
-      const { passed, message } = evaluateIf(step, scope);
+      // The steps inside aren't sent along with a test, so it says where a run would go, not how many it holds.
+      const { passed, description } = evaluateIf(step, scope);
+      const message = `${passed ? "True" : "False"}: ${description}. A run would take ${passed ? "Then" : "Else"}`;
       result = { kind: "ok", output: { result: passed, branch: passed ? "then" : "else" }, message };
     } else if (step.type === "loop") {
       const list = loopItems(step, scope);

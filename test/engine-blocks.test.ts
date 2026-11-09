@@ -1,5 +1,5 @@
 import { type Db, MongoClient } from "mongodb";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { LIMITS } from "../shared/limits";
 import type { Step, WorkflowInput } from "../shared/schema";
 import { newHookKey } from "../worker/auth";
@@ -757,6 +757,88 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     expect([run.status, run.error]).toEqual(["succeeded", null]);
     expect(calls.map((call) => call.url)).toEqual(list.map((i) => `https://api.example/item/${i}`));
   });
+
+  it("saves a request in a loop once per pass, the loop's move with it", async () => {
+    const list = Array.from({ length: 20 }, (_, i) => i);
+    const { runId } = await start([loop("each", "{{ trigger.body.list }}", [post("call", "https://api.example/item/{{ loop.item }}")])], { body: { list } });
+    const real = c.runs.updateOne.bind(c.runs);
+    let writes = 0;
+    c.runs.updateOne = ((...args: Parameters<typeof real>) => (writes++, real(...args))) as typeof real;
+    const calls = await withFetch(() => new Response("ok"), async () => {
+      try {
+        await advance(c, runId);
+      } finally {
+        c.runs.updateOne = real;
+      }
+    });
+    const run = await load(runId);
+    expect(run.status).toBe("succeeded");
+    expect(calls.length).toBe(20);
+    expect(run.outputs.each).toEqual({ count: 20 });
+    // One save per request, plus the claim, the loop's start and the finish. It was two per request.
+    expect(writes).toBeLessThan(20 + 8);
+  });
+
+  it("gives the same result when the Worker stops at any save and the run is picked up again", async () => {
+    const list = Array.from({ length: 12 }, (_, i) => i);
+    const steps = [
+      loop("each", "{{ trigger.body.list }}", [
+        transform("double", "{{ loop.item }}"),
+        ifStep("third", "{{ loop.index }}", "equals", "3", [http("call", "https://api.example/item/{{ loop.item }}")]),
+        log("say", "item {{ loop.item }}"),
+      ]),
+      transform("after", "{{ steps.each.count }}"),
+    ];
+    const shape = (run: RunDoc) => ({
+      status: run.status,
+      outputs: run.outputs,
+      outputBytes: run.outputBytes,
+      stepRuns: run.stepRuns,
+      stepIndex: run.stepIndex,
+      logs: run.logs.map((l) => [l.stepId, l.status, l.message]),
+    });
+    const real = c.runs.updateOne.bind(c.runs);
+    /** Runs the workflow, stopping at write number `dieAt` (before or after it lands), then picks it up again. */
+    async function go(dieAt: number, landed: boolean) {
+      const { runId } = await start(steps, { body: { list } });
+      let writes = 0;
+      c.runs.updateOne = (async (...args: Parameters<typeof real>) => {
+        writes += 1;
+        if (dieAt === 0 || writes < dieAt) return real(...args);
+        // From here on the Worker is gone: nothing it tries to write arrives, not even "this run failed".
+        if (writes === dieAt && landed) await real(...args);
+        throw new Error("the Worker stopped");
+      }) as typeof real;
+      let calls: unknown[] = [];
+      try {
+        calls = await withFetch(() => new Response("ok"), async () => {
+          const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+          await advance(c, runId);
+          errors.mockRestore();
+          c.runs.updateOne = real;
+          // The lease of the stopped invocation runs out, and the cron picks the run up.
+          await c.runs.updateOne({ _id: runId, status: "running" }, { $set: { leaseUntil: 0 } });
+          await advance(c, runId);
+        });
+      } finally {
+        c.runs.updateOne = real;
+      }
+      return { run: await load(runId), writes, calls: calls.length };
+    }
+    const clean = await go(0, false);
+    expect(clean.run.status).toBe("succeeded");
+    expect(clean.run.stepRuns).toBe(1 + 12 * 3 + 1 + 1);
+    expect(clean.calls).toBe(1);
+    for (let at = 1; at <= clean.writes; at++) {
+      for (const landed of [false, true]) {
+        const crashed = await go(at, landed);
+        expect(shape(crashed.run), `stopped at write ${at}, ${landed ? "after" : "before"} it landed`).toEqual(shape(clean.run));
+        // The request is made once; only a stop on the save right after it can repeat it, and then once.
+        expect(crashed.calls).toBeGreaterThanOrEqual(1);
+        expect(crashed.calls).toBeLessThanOrEqual(2);
+      }
+    }
+  }, 120_000);
 
   it("shares one request allowance between the runs woken together", async () => {
     const list = Array.from({ length: 25 }, (_, i) => i);

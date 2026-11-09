@@ -26,8 +26,8 @@ import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loo
 const LEASE_MS = 60_000;
 /** Stop after this long in one invocation and let the next tick carry on. */
 const TIME_BUDGET_MS = 25_000;
-const PAUSED_OWN = "Paused: this run made as many requests as fit in one go. It carries on within a minute.";
-const PAUSED_SHARED = "Paused: Knotwork made as many requests as fit in this minute. This run carries on within a minute.";
+const PAUSED_OWN = "Paused: this run made as many requests as fit in one go. It carries on at the next minute's turn.";
+const PAUSED_SHARED = "Paused: Knotwork made as many requests as fit in this minute. This run carries on when there is room, usually within a minute.";
 /** Steps that only compute are saved together: after this long, or this many log lines. */
 const SAVE_EVERY_MS = 1_000;
 const SAVE_EVERY_LINES = 25;
@@ -268,7 +268,10 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
   // Only the secrets this run's steps name are read and decrypted, and only when it names any.
   const refs = secretRefs(run.steps);
   const unreadable = new Set<string>();
-  const secrets = refs.size ? await loadSecrets(c, pepper, run.workspaceId, refs, unreadable) : {};
+  // A run that can only pause again (its next step is a request and none are left) reads none.
+  const first = ops[run.stepIndex];
+  const stuck = allowance.calls <= 0 && first?.kind === "step" && first.step.type === "http";
+  const secrets = refs.size && !stuck ? await loadSecrets(c, pepper, run.workspaceId, refs, unreadable) : {};
   /** Hides secret values. Everything this run stores or passes on goes through it. */
   const clean = redactor(secrets);
   const scope: Scope = {
@@ -507,6 +510,12 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
       }
       scope.steps[id] = withItem({ items: at.items, index: at.index + 1, count: at.count });
       setPosition(id, at.index + 1);
+      // The stored place grows by a byte when its number gains a digit (9 to 10); keep the count exact.
+      const longer = String(at.index + 1).length - String(at.index).length;
+      if (longer) {
+        outputBytes += longer;
+        sizes.set(id, sizeOf(id) + longer);
+      }
       index = op.bodyAt;
     } else {
       const done = { count: at.count };
@@ -624,7 +633,12 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
             await updateLastRun(c, run, "waiting");
             return;
           }
-          if (outside) await save({ leaseUntil: Date.now() + LEASE_MS });
+          if (outside) {
+            // A loop's move right after it touches nothing outside: save it in the same write.
+            const after = ops[index];
+            if (after?.kind === "next") moveOn(after);
+            await save({ leaseUntil: Date.now() + LEASE_MS });
+          }
           break;
         }
         case "stop": {

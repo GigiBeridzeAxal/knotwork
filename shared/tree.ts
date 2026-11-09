@@ -1,3 +1,4 @@
+import { LIMITS } from "./limits";
 import type { Step } from "./schema";
 
 /**
@@ -94,10 +95,18 @@ export function replaceStep(steps: Step[], path: Path, step: Step): Step[] {
  * Moves a step to a gap. Returns the new tree and where the step ended up, or null when the move
  * makes no sense (a block into itself) or changes nothing (the gap right before or after it).
  */
+/** How deep a place is: 1 for the top level, 2 inside a block, and so on. */
+export const levelOf = (path: Path) => (path.length + 1) / 2;
+
+/** How many levels a step takes up: 1 on its own, more for a block with blocks inside. */
+const heightOf = (step: Step): number => 1 + Math.max(0, ...branchesOf(step).flatMap((b) => b.steps.map(heightOf)));
+
 export function moveStep(steps: Step[], from: Path, slot: Path): { steps: Step[]; path: Path } | null {
   const step = getStep(steps, from);
   if (!step || !getList(steps, listOf(slot))) return null;
   if (startsWith(slot, from) && slot.length > from.length) return null;
+  // A block can't be dropped where the steps inside it would sit deeper than a workflow allows.
+  if (levelOf(slot) + heightOf(step) - 1 > LIMITS.stepDepth) return null;
   const sameList = samePath(listOf(from), listOf(slot));
   if (sameList && (indexOf(slot) === indexOf(from) || indexOf(slot) === indexOf(from) + 1)) return null;
   // Taking the step out shifts everything after it in its own list one place up, including a target

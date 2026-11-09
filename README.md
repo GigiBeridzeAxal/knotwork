@@ -143,7 +143,8 @@ stops in between they run again and give the same result. A 50-item loop of such
 database writes, not 150. A run makes at most 30 requests to other sites in one go, and the runs woken in
 the same minute at most 40 together, because Cloudflare's free plan allows 50 outgoing requests per
 invocation; every redirect followed counts as a request. A run that reaches either number says so and
-carries on within a minute, so a loop of 50 requests takes two or three minutes.
+carries on at the next minute's turn (later when many runs are making requests at once), so a loop of 50
+requests takes a minute or two longer.
 
 **Secrets.** A secret's value is encrypted with AES-256-GCM before it is stored. The key is derived
 (HKDF-SHA-256) from `AUTH_PEPPER`, which only the Worker has, with the workspace id as salt, so a copy of the
@@ -438,7 +439,7 @@ person from using up the free plans:
   blocks, which nest at most 3 levels deep).
 - 50 items per loop, and 200 steps per run. Every time a step runs counts: each pass of a loop, each retry,
   each `if` check and each start of a loop. Moving a loop to its next item doesn't.
-- 30 requests to other sites per run in one go; a run that makes more carries on within a minute.
+- 30 requests to other sites per run in one go; a run that makes more carries on usually within a minute, later when many runs make requests at once.
 - 20 secrets per workspace, each 8 to 4,000 characters.
 - JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400,
   and so does a field name containing a null character. Neither counts as a run. A step output like

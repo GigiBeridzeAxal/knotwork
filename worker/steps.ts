@@ -264,12 +264,12 @@ function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: B
 }
 
 /** Which branch an `if` takes. Its output is `{ result, branch }`, so later steps can ask `{{ steps.<id>.result }}`. */
-export function evaluateIf(step: IfStep, scope: Scope): { passed: boolean; message: string } {
+export function evaluateIf(step: IfStep, scope: Scope): { passed: boolean; message: string; description: string } {
   const { passed, description } = check(step.config, scope, newBudget());
   const branch = passed ? step.then : step.else;
   const name = passed ? "Then" : "Else";
   const runs = branch.length === 0 ? `${name} is empty` : `${name} runs (${branch.length} ${branch.length === 1 ? "step" : "steps"})`;
-  return { passed, message: `${passed ? "True" : "False"}: ${description}. ${runs}` };
+  return { passed, description, message: `${passed ? "True" : "False"}: ${description}. ${runs}` };
 }
 
 /**
