@@ -74,6 +74,7 @@ answer as they would for anyone.
 | `GET` | `/runs` | read | List runs, newest first |
 | `GET` | `/runs/:id` | read | Get one run with its log |
 | `POST` | `/runs/:id/check` | write | Move a waiting run on now, if it is due |
+| `POST` | `/runs/:id/rerun` | write | Start a finished run again with the same input |
 | `GET` | `/overview` | read | Workflows, recent runs and this hour's run count in one request |
 
 "Access" is what the key needs. For write, the key's maker must also be the workspace's owner or an
@@ -151,6 +152,15 @@ workspace. Runs are deleted 7 days after they start (or after they wake from the
 For a run that is `waiting` (in a delay or before a retry): if its time has come, moves it on now
 instead of at the next minute's tick. Returns the run as `GET /runs/:id` does.
 
+### `POST /runs/:id/rerun`
+
+Starts a new run of the same workflow with the input the old run had. The workflow runs as it is now,
+not as it was then. No body. Answers `202` with `{ "runId": "run_..." }`; the new run's `rerunOf` is the
+old run's id. It counts toward the [run limits](#rate-limits) like any manual run.
+
+Errors: `404` if the run or its workflow is gone; `409` if the run hasn't finished yet, or its input was
+removed to free space; `429` for a run limit.
+
 ### `POST /workflows/:id/hook-key`
 
 Gives the workflow a new webhook key, so its old webhook URL stops working at once. Use it when someone
@@ -189,6 +199,7 @@ The whole workflow can be at most 32,000 characters of JSON.
 | --- | --- |
 | `{ "type": "manual" }` | Only the dashboard's run button, or `POST /workflows/:id/run` |
 | `{ "type": "webhook" }` | Any request to the workflow's webhook URL, `https://knotwork.gigiberidze.com/hooks/<hookKey>` |
+| `{ "type": "webhook", "verify": { "provider": "github", "secret": "GITHUB_SECRET" } }` | Only requests signed by the sender. `provider` is `github` (`X-Hub-Signature-256`) or `stripe` (`Stripe-Signature`); `secret` is the name of a workspace secret that holds the signing secret. Anything else gets `401` and starts no run |
 | `{ "type": "schedule", "cron": "*/15 * * * *" }` | A five-field cron expression, in UTC, at most every 5 minutes |
 
 `POST /workflows/:id/run` works for every trigger type.
@@ -201,7 +212,7 @@ Every step has:
 | --- | --- | --- |
 | `id` | string | lowercase letters, digits and `_`, starting with a letter, up to 40 characters. Later steps read its output as `{{ steps.<id>... }}` |
 | `name` | string | 1 to 80 characters |
-| `type` | string | `http`, `transform`, `filter`, `delay` or `log` |
+| `type` | string | `http`, `transform`, `filter`, `delay`, `log`, or a block: `if` or `loop` |
 | `config` | object | depends on `type`, below |
 | `retry` | object | optional. `max`: extra attempts after a failure, 0 to 5, default 0. `backoffSeconds`: wait before the first retry, 1 to 3,600, default 5; each later retry waits four times longer |
 
@@ -214,6 +225,16 @@ Every step has:
 | `filter` | `left` (up to 500 characters), `op`, `right` (up to 500 characters, default `""`). `op` is one of `equals`, `not_equals`, `contains`, `gt`, `lt`, `exists`, `not_exists`. If the condition is false, the run stops there with status `stopped` |
 | `delay` | `seconds`: whole number, 1 to 604,800 (7 days) |
 | `log` | `message`: up to 2,000 characters |
+| `if` | `left`, `op`, `right` as for `filter`. The step also has two lists of steps beside `config`: `then` and `else` (either may be empty). Its output is `{ "result": true or false, "branch": "then" or "else" }` |
+| `loop` | `items`: a template that gives a list, such as `{{ trigger.body.commits }}`, up to 50 items. The step also has a list `steps` beside `config`, run once per item. Inside it, `{{ loop.item }}` is the current item, `{{ loop.index }}` its place from 0 and `{{ loop.count }}` how many there are. After the loop its output is `{ "count" }` |
+
+Blocks can sit inside blocks, 3 levels deep at most, and every step inside counts toward the 25 steps a
+workflow can have. Ids are unique across the whole workflow. A step's output inside a loop is the one from
+the current pass. A run takes at most 200 step runs: each step in each pass, each `if` check, each loop
+start and each retry counts.
+
+`{{ secrets.NAME }}` reads a workspace secret (made under Settings in the dashboard). A run's log and
+outputs show `[secret NAME]` wherever the value would appear.
 
 Any string can use templates: `{{ trigger.body.id }}`, `{{ steps.fetch.body.items.0.name }}`. A string
 that is only one template keeps the value's type. An `http` step's output is
@@ -256,11 +277,12 @@ A run summary (in `GET /runs` and `GET /overview`):
 | `id`, `workflowId`, `workflowName` | Which run, of which workflow |
 | `status` | `queued`, `running`, `waiting`, then one of `succeeded`, `failed`, `stopped` |
 | `triggerType` | `manual`, `webhook` or `schedule` |
-| `stepIndex` | Index of the step it is on (0-based) |
+| `stepIndex` | Where it is in the workflow (0-based). With blocks this counts the engine's own moves too, so read the log to see which step ran |
 | `attempt` | Retries of the current step so far (0 on its first attempt) |
 | `nextRunAt` | When a `waiting` run moves on next, or `null` |
 | `error` | Why it failed or stopped, or `null` |
 | `createdAt`, `finishedAt` | `finishedAt` is `null` until it finishes |
+| `rerunOf` | The id of the run this one repeats; only on runs started with `POST /runs/:id/rerun` or the dashboard's Run again |
 
 `GET /runs/:id` adds:
 
@@ -271,7 +293,8 @@ A run summary (in `GET /runs` and `GET /overview`):
 | `stepCount` | How many steps the run has |
 
 A log entry's `output` is the step's output, cut to a preview when it is over 1,000 bytes:
-`{ "truncated": true, "preview": "..." }`. The last 50 log entries are kept.
+`{ "truncated": true, "preview": "..." }`. The last 100 log entries are kept. Inside a block an
+entry also has `depth` (how many blocks it sits in) and, in a loop, `pass` (such as `"2 of 5"`).
 
 A run is finished when `status` is `succeeded`, `failed` or `stopped`. Poll until then. A `waiting` run
 can sit for as long as its delay or retry backoff.
@@ -328,6 +351,8 @@ A run that hits a limit gets `429` with an `error` that says which limit and, fo
 - List, make or revoke API keys.
 - Reach any workspace but its own.
 - See webhook URLs, if it is a read key or its maker is a viewer.
+- List, set or delete secrets (`/secrets` answers `403` to a key), or test a single step. Workflows a key
+  saves can still name secrets as `{{ secrets.NAME }}`.
 
 ## Examples
 
