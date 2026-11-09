@@ -1,11 +1,12 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import type { Run, RunStatus, StepType, Trigger, WorkflowSummary } from "../../shared/schema";
+import { canEdit, type Run, type RunStatus, type StepType, type Trigger, type WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { WorkflowDot } from "../components/AppShell";
-import { ArrowIcon, PlusIcon } from "../components/icons";
+import { ArrowIcon, CloseIcon, PlusIcon } from "../components/icons";
 import { cn, duration, timeAgo } from "../components/ui";
 import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
+import { useSession } from "../session";
 import { HOUR, runsSince, useWorkspace } from "../workspace";
 
 const DAY = 24 * HOUR;
@@ -413,6 +414,7 @@ function Feed({ runs, count }: { runs: Run[]; count: number }) {
 /* ---------- First visit ---------- */
 
 function Welcome() {
+  const editable = canEdit(useSession().workspace.role);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState("");
   async function useExample(i: number) {
@@ -436,9 +438,11 @@ function Welcome() {
           </span>
         </h1>
         <p className="max-w-xl text-[15px] leading-relaxed text-soft">
-          Wire a webhook, a schedule or a button to a few steps. Start from an example below and you will see your first run in under a minute.
+          {editable
+            ? "Wire a webhook, a schedule or a button to a few steps. Start from an example below and you will see your first run in under a minute."
+            : "You're a viewer here. Workflows and runs show up on this page once the owner or an editor adds them."}
         </p>
-        <div className="flex flex-wrap gap-3">
+        <div className={cn("flex flex-wrap gap-3", !editable && "hidden")}>
           <Link
             href="/workflows/new"
             className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
@@ -452,7 +456,7 @@ function Welcome() {
       <RunBoard runs={[]} empty />
 
       {error && <p className="text-fail">{error}</p>}
-      <section className="flex flex-col gap-4" aria-labelledby="examples">
+      <section className={cn("flex flex-col gap-4", !editable && "hidden")} aria-labelledby="examples">
         <h2 id="examples" className={eyebrow}>
           Start from an example
         </h2>
@@ -482,7 +486,57 @@ function Welcome() {
   );
 }
 
+const NOTICE_KEY = "knotwork.recoveryNoticeHidden";
+
+/** New accounts have no recovery codes, and there is no email reset. A quiet nudge until they make some. */
+function RecoveryNotice() {
+  const { me } = useSession();
+  const [hidden, setHidden] = useState(() => {
+    try {
+      return sessionStorage.getItem(NOTICE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  if (hidden || me.user.demo || me.recoveryCodesLeft > 0) return null;
+  return (
+    <div role="note" className="flex items-start gap-3 rounded-xl border border-line py-2 pr-2 pl-4 text-[13px] leading-5 text-soft">
+      <span className="mt-[14px] size-2 shrink-0 rounded-full bg-retry" aria-hidden="true" />
+      <p className="min-w-0 flex-1 py-2">
+        No recovery codes yet. Without one, a lost password means a lost account.{" "}
+        <Link href="/settings" className="whitespace-nowrap text-text underline decoration-edge underline-offset-4 hover:decoration-text">
+          Make them in Settings
+        </Link>
+      </p>
+      <button
+        type="button"
+        aria-label="Hide this notice"
+        className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors hover:bg-graphite hover:text-text"
+        onClick={() => {
+          setHidden(true);
+          try {
+            sessionStorage.setItem(NOTICE_KEY, "1");
+          } catch {
+            // Storage blocked: it stays hidden until the page reloads.
+          }
+        }}
+      >
+        <CloseIcon className="size-4" />
+      </button>
+    </div>
+  );
+}
+
 export function HomePage() {
+  return (
+    <div className="flex flex-col gap-6">
+      <RecoveryNotice />
+      <HomeBody />
+    </div>
+  );
+}
+
+function HomeBody() {
   const { workflows, runs, error } = useWorkspace();
 
   if (error && !workflows) return <p className="text-fail">{error}</p>;

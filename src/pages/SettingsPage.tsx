@@ -1,4 +1,4 @@
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { LIMITS } from "../../shared/limits";
 import { PASSWORD_MIN } from "../../shared/schema";
 import { api, ApiError } from "../api";
@@ -7,27 +7,10 @@ import { Button, Card, Field, inputClass, PageTitle } from "../components/ui";
 import { navigate } from "../router";
 import { useSession } from "../session";
 import { useWorkspace } from "../workspace";
-
-function Section({ title, blurb, children }: { title: string; blurb: string; children: ReactNode }) {
-  return (
-    <section className="grid gap-4 border-t border-line pt-8 lg:grid-cols-3 lg:gap-8">
-      <div className="flex flex-col gap-2">
-        <h2 className="font-display text-xl font-bold tracking-tight">{title}</h2>
-        <p className="text-sm text-muted">{blurb}</p>
-      </div>
-      <div className="lg:col-span-2">{children}</div>
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 border-t border-line px-5 py-4 first:border-0">
-      <span className="text-sm text-soft">{label}</span>
-      <span className="text-right font-mono text-sm text-text tabular-nums">{value}</span>
-    </div>
-  );
-}
+import { API_DOCS, ApiKeys } from "./settings/ApiKeys";
+import { Members } from "./settings/Members";
+import { Row, ROLE_LABEL, Section } from "./settings/parts";
+import { RecoveryCodes } from "./settings/RecoveryCodes";
 
 function WorkspaceSettings() {
   const { workspace, me, reload } = useSession();
@@ -61,6 +44,16 @@ function WorkspaceSettings() {
       setNote((err as Error).message);
       setBusy(false);
     }
+  }
+
+  if (workspace.role !== "owner") {
+    return (
+      <Card>
+        <Row label="Workspace name" value={<span className="font-sans">{workspace.name}</span>} />
+        <Row label="Your role" value={<span className="font-sans">{ROLE_LABEL[workspace.role]}</span>} />
+        <p className="border-t border-line px-5 py-4 text-[13px] text-muted">Only the owner can rename or delete this workspace.</p>
+      </Card>
+    );
   }
 
   return (
@@ -106,7 +99,7 @@ function PasswordSettings() {
       await api.changePassword(current, next);
       setCurrent("");
       setNext("");
-      setNote({ ok: true, text: "Password changed. Other devices were logged out." });
+      setNote({ ok: true, text: "Password changed. Other devices were logged out and your API keys were revoked." });
     } catch (err) {
       const issue = err instanceof ApiError ? err.issues[0]?.message : undefined;
       setNote({ ok: false, text: issue && err instanceof ApiError && err.status === 400 ? issue : (err as Error).message });
@@ -188,7 +181,7 @@ export function SettingsPage() {
     <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-2">
         <PageTitle>Settings</PageTitle>
-        <p className="text-soft">Your account, this workspace and the free plan limits.</p>
+        <p className="text-soft">Your account, this workspace, the people in it and the free plan limits.</p>
       </div>
 
       <Section title="Account" blurb={me.user.demo ? "The shared demo account. It resets every day at 03:00 UTC." : "You sign in with this email and your password."}>
@@ -213,8 +206,17 @@ export function SettingsPage() {
       </Section>
 
       {!me.user.demo && (
-        <Section title="Password" blurb="Changing it logs you out everywhere else.">
+        <Section title="Password" blurb="Changing it logs you out everywhere else and revokes your API keys.">
           <PasswordSettings />
+        </Section>
+      )}
+
+      {!me.user.demo && (
+        <Section
+          title="Recovery codes"
+          blurb="Knotwork never sends email. If you forget your password, one of these codes is the only way back in."
+        >
+          <RecoveryCodes />
         </Section>
       )}
 
@@ -222,10 +224,46 @@ export function SettingsPage() {
         <WorkspaceSettings key={workspace.id} />
       </Section>
 
+      <Section
+        title="Members"
+        blurb="The owner manages who is in a workspace. Editors change workflows and start runs. Viewers only look, but they can read every step's settings, including anything pasted into headers."
+      >
+        {me.user.demo && workspace.personal ? (
+          <Card className="p-5 sm:p-6">
+            <p className="text-sm text-soft">The shared demo account can't share workspaces. Create your own account to invite people.</p>
+          </Card>
+        ) : workspace.personal ? (
+          <Card className="p-5 sm:p-6">
+            <p className="text-sm text-soft">
+              <span className="font-medium text-text">Personal is only for you, so it can't be shared.</span> To work with other people, make a
+              new workspace from the workspace menu in the sidebar, then invite them from here.
+            </p>
+          </Card>
+        ) : (
+          <Members key={workspace.id} />
+        )}
+      </Section>
+
+      {!me.user.demo && (
+        <Section
+          title="API keys"
+          blurb={
+            <>
+              <p>Let scripts and other services read or run your workflows. Changing or recovering your password revokes every key.</p>
+              <a href={API_DOCS} target="_blank" rel="noreferrer" className="mt-2 inline-block text-soft underline decoration-edge underline-offset-4 hover:text-text hover:decoration-text">
+                Read the API docs
+              </a>
+            </>
+          }
+        >
+          <ApiKeys key={workspace.id} />
+        </Section>
+      )}
+
       <Section title="Free plan" blurb="Knotwork runs on free plans, so each account has limits that keep it fair for everyone.">
         <Card>
           <Row label={`Workflows in ${workspace.name}`} value={`${workflows?.length ?? 0} / ${LIMITS.workflowsPerWorkspace}`} />
-          <Row label="Workspaces" value={`${me.workspaces.length} / ${LIMITS.workspacesPerAccount}`} />
+          <Row label="Your workspaces" value={`${me.workspaces.filter((w) => w.role === "owner").length} / ${LIMITS.workspacesPerAccount}`} />
           <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />

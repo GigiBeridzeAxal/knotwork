@@ -1,6 +1,6 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { LIMITS } from "../../shared/limits";
-import type { WorkflowSummary } from "../../shared/schema";
+import { canEdit, type Role, type WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { Link, navigate, usePath } from "../router";
 import { initials, useSession } from "../session";
@@ -91,6 +91,15 @@ function useDismiss(open: boolean, close: () => void) {
 const menuItem = "flex h-9 w-full items-center gap-3 rounded-lg px-2.5 text-[13px] text-soft transition-colors hover:bg-raised hover:text-text";
 const menuPanel = "absolute z-40 rounded-2xl border border-line bg-graphite p-1.5 shadow-[0_24px_48px_-12px_rgb(0_0_0/0.7)]";
 
+/** A quiet label on workspaces someone else owns, so they read differently from the user's own. */
+function RoleTag({ role }: { role: Role }) {
+  return (
+    <span className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] tracking-[0.06em] text-muted uppercase ring-1 ring-line ring-inset">
+      {role === "editor" ? "Editor" : "Viewer"}
+    </span>
+  );
+}
+
 /** The current workspace's name; click it to switch workspaces or make a new one. */
 function WorkspaceSwitcher({ onNavigate }: { onNavigate?: () => void }) {
   const { me, workspace, switchWorkspace, reload } = useSession();
@@ -105,7 +114,8 @@ function WorkspaceSwitcher({ onNavigate }: { onNavigate?: () => void }) {
     setError("");
   }, []);
   const ref = useDismiss(open, close);
-  const full = me.workspaces.length >= LIMITS.workspacesPerAccount;
+  // Only the user's own workspaces count toward the limit, not the ones they joined.
+  const full = me.workspaces.filter((w) => w.role === "owner").length >= LIMITS.workspacesPerAccount;
 
   async function create(e: FormEvent) {
     e.preventDefault();
@@ -136,29 +146,37 @@ function WorkspaceSwitcher({ onNavigate }: { onNavigate?: () => void }) {
       >
         <Avatar name={workspace.name} size="sm" shape="square" />
         <span className="truncate text-sm font-medium">{workspace.name}</span>
+        {workspace.role !== "owner" && <RoleTag role={workspace.role} />}
         <ChevronIcon className={cn("ml-auto size-4 shrink-0 text-muted transition-transform", open && "rotate-180")} />
       </button>
       {open && (
         <div role="menu" aria-label="Workspaces" className={cn(menuPanel, "inset-x-0 top-11")}>
           <p className="px-2.5 pt-1.5 pb-2 font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Workspaces</p>
-          {me.workspaces.map((ws) => (
-            <button
-              key={ws.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={ws.id === workspace.id}
-              className={cn(menuItem, ws.id === workspace.id && "text-text")}
-              onClick={() => {
-                switchWorkspace(ws.id);
-                close();
-                navigate("/home");
-                onNavigate?.();
-              }}
-            >
-              <Avatar name={ws.name} size="sm" shape="square" />
-              <span className="truncate">{ws.name}</span>
-              {ws.id === workspace.id && <CheckIcon className="ml-auto size-4 shrink-0 text-spark" />}
-            </button>
+          {me.workspaces.map((ws, i) => (
+            <Fragment key={ws.id}>
+              {ws.role !== "owner" && (i === 0 || me.workspaces[i - 1].role === "owner") && (
+                <p className="px-2.5 pt-3 pb-2 font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Shared with you</p>
+              )}
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={ws.id === workspace.id}
+                className={cn(menuItem, ws.id === workspace.id && "text-text")}
+                onClick={() => {
+                  switchWorkspace(ws.id);
+                  close();
+                  navigate("/home");
+                  onNavigate?.();
+                }}
+              >
+                <Avatar name={ws.name} size="sm" shape="square" />
+                <span className="truncate">{ws.name}</span>
+                <span className="ml-auto flex shrink-0 items-center gap-2">
+                  {ws.role !== "owner" && <RoleTag role={ws.role} />}
+                  {ws.id === workspace.id && <CheckIcon className="size-4 shrink-0 text-spark" />}
+                </span>
+              </button>
+            </Fragment>
           ))}
           <div className="mx-1 my-1 h-px bg-line" />
           {adding ? (
@@ -200,6 +218,7 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
   const { workflows, runsThisHour, runsLimit } = useWorkspace();
   const { workspace } = useSession();
   const full = (workflows?.length ?? 0) >= LIMITS.workflowsPerWorkspace;
+  const editable = canEdit(workspace.role);
   return (
     <div className="flex h-full flex-col">
       <div className="mt-2 flex h-14 shrink-0 items-center px-5">
@@ -234,7 +253,7 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
         <section aria-label={`${workspace.name} workspace`} className="flex flex-col gap-1">
           <div className="relative flex items-center gap-1 pb-1">
             <WorkspaceSwitcher onNavigate={onNavigate} />
-            {full ? (
+            {!editable ? null : full ? (
               <span
                 className="grid size-9 shrink-0 cursor-not-allowed place-items-center rounded-lg border border-line text-muted/50"
                 title={`A workspace holds ${LIMITS.workflowsPerWorkspace} workflows`}
@@ -257,7 +276,8 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
               </Link>
             )}
           </div>
-          {workflows && workflows.length === 0 && path !== "/workflows/new" && (
+          {workflows && workflows.length === 0 && !editable && <p className="px-2.5 py-2 text-[13px] text-muted">No workflows yet.</p>}
+          {workflows && workflows.length === 0 && editable && path !== "/workflows/new" && (
             <Link href="/workflows/new" onClick={onNavigate} className="rounded-lg px-2.5 py-2 text-[13px] text-muted hover:bg-graphite/60 hover:text-text">
               No workflows yet. Add the first one.
             </Link>

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import type { RunDetail } from "../../shared/schema";
+import { canEdit, type RunDetail } from "../../shared/schema";
 import { api, ApiError } from "../api";
 import { Button, Card, cn, duration, Eyebrow, Json, StatusBadge, timeAgo } from "../components/ui";
 import { Link } from "../router";
-import { useFindElsewhere } from "../session";
+import { useFindElsewhere, useSession } from "../session";
 
 const DONE = new Set(["succeeded", "failed", "stopped"]);
 
@@ -13,6 +13,7 @@ export function RunPage({ id }: { id: string }) {
   const [open, setOpen] = useState<number | null>(null);
   const [nudging, setNudging] = useState(false);
   const findElsewhere = useFindElsewhere();
+  const editable = canEdit(useSession().workspace.role);
 
   useEffect(() => {
     let stopped = false;
@@ -67,18 +68,20 @@ export function RunPage({ id }: { id: string }) {
             {run.error
               ? run.error
               : `Continues around ${new Date(run.nextRunAt).toLocaleTimeString()} (${new Date(run.nextRunAt).toISOString().slice(11, 16)} UTC), on the next minute tick.`}
-            <Button
-              variant="ghost"
-              disabled={nudging}
-              onClick={async () => {
-                setNudging(true);
-                const fresh = await api.checkRun(id).catch(() => null);
-                if (fresh) setRun(fresh);
-                setNudging(false);
-              }}
-            >
-              Check now
-            </Button>
+            {editable && (
+              <Button
+                variant="ghost"
+                disabled={nudging}
+                onClick={async () => {
+                  setNudging(true);
+                  const fresh = await api.checkRun(id).catch(() => null);
+                  if (fresh) setRun(fresh);
+                  setNudging(false);
+                }}
+              >
+                Check now
+              </Button>
+            )}
           </div>
         )}
         {run.error && run.status !== "waiting" && <p className="text-fail">{run.error}</p>}

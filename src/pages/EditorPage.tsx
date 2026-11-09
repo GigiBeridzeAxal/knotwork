@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Run, Step, StepType, Trigger, Workflow, WorkflowInput } from "../../shared/schema";
+import { canEdit, type Run, type Step, type StepType, type Trigger, type Workflow, type WorkflowInput } from "../../shared/schema";
 import { validateCron } from "../../shared/cron";
 import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
 import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
 import { Link, navigate } from "../router";
-import { useFindElsewhere } from "../session";
+import { useFindElsewhere, useSession } from "../session";
 import { StepEditor } from "./StepEditor";
 
 const CRON_PRESETS = [
@@ -35,6 +35,8 @@ export function EditorPage({ id }: { id: string | null }) {
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
   const findElsewhere = useFindElsewhere();
+  /** Viewers see the workflow but can't change or run it; the server refuses those requests too. */
+  const readOnly = !canEdit(useSession().workspace.role);
 
   /** True once the user has changed the draft: a late or repeated load must not replace their edit. */
   const touched = useRef(false);
@@ -65,6 +67,7 @@ export function EditorPage({ id }: { id: string | null }) {
     [saved, draft],
   );
 
+  if (readOnly && !id) return <ViewerNote />;
   if (!draft) return message ? <p className="text-fail">{message}</p> : null;
 
   const update = (patch: Partial<WorkflowInput>) => {
@@ -154,7 +157,7 @@ export function EditorPage({ id }: { id: string | null }) {
     else if (openStep === i + dir) setOpenStep(i);
   }
 
-  const hookUrl = saved ? `${location.origin}/hooks/${saved.hookKey}` : "";
+  const hookUrl = saved?.hookKey ? `${location.origin}/hooks/${saved.hookKey}` : "";
 
   return (
     <div className="flex flex-col gap-8">
@@ -168,6 +171,7 @@ export function EditorPage({ id }: { id: string | null }) {
           </label>
           <input
             id="wf-name"
+            readOnly={readOnly}
             value={draft.name}
             onChange={(e) => update({ name: e.target.value })}
             className="w-full rounded-[10px] border border-transparent bg-transparent px-0 font-display text-3xl font-bold tracking-tight hover:border-line focus:border-wire focus:px-2 focus:outline-none sm:text-4xl"
@@ -180,14 +184,20 @@ export function EditorPage({ id }: { id: string | null }) {
               {message}
             </span>
           )}
-          <Button onClick={save} disabled={busy || !dirty}>
-            {saved ? (dirty ? "Save" : "Saved") : "Create"}
-          </Button>
-          <Button variant="primary" onClick={() => setShowRun((v) => !v)} disabled={busy} aria-expanded={showRun}>
-            Run now
-          </Button>
+          {!readOnly && (
+            <>
+              <Button onClick={save} disabled={busy || !dirty}>
+                {saved ? (dirty ? "Save" : "Saved") : "Create"}
+              </Button>
+              <Button variant="primary" onClick={() => setShowRun((v) => !v)} disabled={busy} aria-expanded={showRun}>
+                Run now
+              </Button>
+            </>
+          )}
         </div>
       </div>
+
+      {readOnly && <ViewerNote banner />}
 
       {conflict && (
         <div role="alert" className="flex flex-col gap-4 rounded-2xl border border-retry/40 bg-retry/5 p-5 sm:flex-row sm:items-center">
@@ -241,12 +251,15 @@ export function EditorPage({ id }: { id: string | null }) {
 
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
         <div className="flex flex-col">
-          <TriggerCard
-            trigger={draft.trigger}
-            onChange={(trigger) => update({ trigger })}
-            hookUrl={hookUrl}
-            cronError={cronError}
-          />
+          <fieldset disabled={readOnly} className="contents">
+            <TriggerCard
+              trigger={draft.trigger}
+              onChange={(trigger) => update({ trigger })}
+              hookUrl={hookUrl}
+              hookHidden={!!saved && !saved.hookKey}
+              cronError={cronError}
+            />
+          </fieldset>
 
           {draft.steps.map((step, i) => (
             <div key={`${version}-${i}-${step.type}`} className="flex flex-col">
@@ -258,6 +271,7 @@ export function EditorPage({ id }: { id: string | null }) {
                 refs={["trigger.body", ...draft.steps.slice(0, i).map((s) => `steps.${s.id}`), "run.id", "workflow.name"]}
                 errors={stepErrors(i)}
                 open={openStep === i}
+                readOnly={readOnly}
                 onToggle={() => setOpenStep(openStep === i ? null : i)}
                 onChange={(s) => setSteps(draft.steps.map((x, j) => (j === i ? s : x)))}
                 onMove={(dir) => move(i, dir)}
@@ -270,8 +284,8 @@ export function EditorPage({ id }: { id: string | null }) {
             </div>
           ))}
 
-          <Wire dashed />
-          <Card className="flex flex-col gap-3 border-dashed p-4">
+          {!readOnly && <Wire dashed />}
+          <Card className={cn("flex flex-col gap-3 border-dashed p-4", readOnly && "hidden")}>
             <Eyebrow>Add a step</Eyebrow>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
               {STEP_TYPES.map((t) => (
@@ -291,20 +305,22 @@ export function EditorPage({ id }: { id: string | null }) {
 
         <aside className="flex flex-col gap-6">
           <Card className="flex flex-col gap-4 p-5">
-            <Field label="Description" htmlFor="wf-desc">
-              <textarea
-                id="wf-desc"
-                rows={3}
-                className={cn(textareaClass, "font-sans")}
-                value={draft.description}
-                onChange={(e) => update({ description: e.target.value })}
-              />
-            </Field>
-            <label className="flex items-center gap-3 text-sm">
-              <input type="checkbox" className="size-4 accent-spark" checked={draft.enabled} onChange={(e) => update({ enabled: e.target.checked })} />
-              On (schedules and webhooks start runs)
-            </label>
-            {saved && (
+            <fieldset disabled={readOnly} className="contents">
+              <Field label="Description" htmlFor="wf-desc">
+                <textarea
+                  id="wf-desc"
+                  rows={3}
+                  className={cn(textareaClass, "font-sans")}
+                  value={draft.description}
+                  onChange={(e) => update({ description: e.target.value })}
+                />
+              </Field>
+              <label className="flex items-center gap-3 text-sm">
+                <input type="checkbox" className="size-4 accent-spark" checked={draft.enabled} onChange={(e) => update({ enabled: e.target.checked })} />
+                On (schedules and webhooks start runs)
+              </label>
+            </fieldset>
+            {saved && !readOnly && (
               <Button variant="danger" onClick={remove}>
                 Delete workflow
               </Button>
@@ -333,6 +349,26 @@ export function EditorPage({ id }: { id: string | null }) {
   );
 }
 
+/** For viewers: says why nothing here can be changed. */
+function ViewerNote({ banner = false }: { banner?: boolean }) {
+  return (
+    <div role="note" className={cn("flex items-center gap-3 rounded-xl border border-line px-4 py-3 text-sm text-soft", !banner && "mt-2")}>
+      <span className="size-2 shrink-0 rounded-full ring-1 ring-muted ring-inset" aria-hidden="true" />
+      <span>
+        You're a viewer here. You can look, but not change or run workflows.
+        {!banner && (
+          <>
+            {" "}
+            <Link href="/workflows" className="text-text underline decoration-edge underline-offset-4 hover:decoration-text">
+              Back to workflows
+            </Link>
+          </>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function Wire({ dashed = false }: { dashed?: boolean }) {
   return (
     <div className="flex h-8 justify-center" aria-hidden="true">
@@ -345,11 +381,13 @@ function TriggerCard({
   trigger,
   onChange,
   hookUrl,
+  hookHidden = false,
   cronError,
 }: {
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
+  hookHidden?: boolean;
   cronError: string | null;
 }) {
   const [copied, setCopied] = useState(false);
@@ -426,6 +464,8 @@ function TriggerCard({
               </Button>
             </div>
           </div>
+        ) : hookHidden ? (
+          <p className="text-[13px] text-muted">The webhook URL is hidden from viewers, since anyone with it can start a run.</p>
         ) : (
           <p className="text-[13px] text-muted">Save the workflow to get its webhook URL.</p>
         ))}

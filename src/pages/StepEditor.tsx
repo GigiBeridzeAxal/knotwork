@@ -84,6 +84,7 @@ export function StepEditor({
   onChange,
   onMove,
   onRemove,
+  readOnly = false,
 }: {
   step: Step;
   index: number;
@@ -95,6 +96,8 @@ export function StepEditor({
   onChange: (step: Step) => void;
   onMove: (dir: -1 | 1) => void;
   onRemove: () => void;
+  /** For viewers: the step can be opened and read, not changed. */
+  readOnly?: boolean;
 }) {
   const typeInfo = STEP_TYPES.find((t) => t.type === step.type)!;
   const uid = `s${index}`;
@@ -121,7 +124,7 @@ export function StepEditor({
           <span className="w-full truncate font-semibold">{step.name}</span>
           <span className="font-mono text-xs text-muted">steps.{step.id}</span>
         </button>
-        <div className="flex items-center">
+        <div className={cn("flex items-center", readOnly && "hidden")}>
           <Button variant="ghost" className="w-11 px-0" aria-label="Move step up" disabled={index === 0} onClick={() => onMove(-1)}>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 10l4-4 4 4" /></svg>
           </Button>
@@ -140,7 +143,7 @@ export function StepEditor({
       )}
 
       {open && (
-        <div className="flex flex-col gap-5 border-t border-line p-4">
+        <fieldset disabled={readOnly} className="flex min-w-0 flex-col gap-5 border-t border-line p-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Name" htmlFor={`${uid}-name`}>
               <input id={`${uid}-name`} className={inputClass} value={step.name} onChange={(e) => set({ name: e.target.value })} />
@@ -292,12 +295,14 @@ export function StepEditor({
             </div>
           </div>
 
-          <div className="flex justify-end">
-            <Button variant="danger" onClick={onRemove}>
-              Remove step
-            </Button>
-          </div>
-        </div>
+          {!readOnly && (
+            <div className="flex justify-end">
+              <Button variant="danger" onClick={onRemove}>
+                Remove step
+              </Button>
+            </div>
+          )}
+        </fieldset>
       )}
     </div>
   );

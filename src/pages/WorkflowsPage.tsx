@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { WorkflowSummary } from "../../shared/schema";
+import { canEdit, type WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { PlusIcon } from "../components/icons";
 import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
+import { useSession } from "../session";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
   if (wf.trigger.type === "schedule") return `Schedule · ${wf.trigger.cron}`;
@@ -16,6 +17,7 @@ export function WorkflowsPage() {
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState<number | null>(null);
+  const editable = canEdit(useSession().workspace.role);
 
   useEffect(() => {
     api.workflows().then(setWorkflows, (e) => setError(e.message));
@@ -39,13 +41,15 @@ export function WorkflowsPage() {
           <PageTitle>Workflows</PageTitle>
           <p className="text-soft">Wire a trigger to steps. Failed steps retry on their own, and every run is logged.</p>
         </div>
-        <Link
-          href="/workflows/new"
-          className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
-        >
-          <PlusIcon className="size-4" />
-          New workflow
-        </Link>
+        {editable && (
+          <Link
+            href="/workflows/new"
+            className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
+          >
+            <PlusIcon className="size-4" />
+            New workflow
+          </Link>
+        )}
       </div>
 
       {error && <p className="text-fail">{error}</p>}
@@ -87,27 +91,31 @@ export function WorkflowsPage() {
       {workflows && workflows.length === 0 && (
         <Card className="dots flex flex-col items-center gap-3 px-6 py-14 text-center">
           <p className="font-display text-2xl font-bold">No workflows yet</p>
-          <p className="max-w-md text-soft">Start from scratch, or pick an example below and run it straight away.</p>
+          <p className="max-w-md text-soft">
+            {editable ? "Start from scratch, or pick an example below and run it straight away." : "Workflows the owner or an editor adds show up here."}
+          </p>
         </Card>
       )}
 
-      <section className="flex flex-col gap-4" aria-labelledby="examples">
-        <h2 id="examples" className="font-display text-xl font-bold tracking-tight">
-          Start from an example
-        </h2>
-        <div className="grid gap-4 md:grid-cols-3">
-          {EXAMPLES.map((ex, i) => (
-            <Card key={ex.title} className="flex flex-col gap-3 p-5">
-              <Eyebrow>{triggerLabel(ex.workflow)}</Eyebrow>
-              <h3 className="font-semibold">{ex.title}</h3>
-              <p className="text-sm text-soft">{ex.blurb}</p>
-              <Button className="mt-auto self-start" onClick={() => useExample(i)} disabled={busy !== null}>
-                {busy === i ? "Creating…" : "Use this"}
-              </Button>
-            </Card>
-          ))}
-        </div>
-      </section>
+      {editable && (
+        <section className="flex flex-col gap-4" aria-labelledby="examples">
+          <h2 id="examples" className="font-display text-xl font-bold tracking-tight">
+            Start from an example
+          </h2>
+          <div className="grid gap-4 md:grid-cols-3">
+            {EXAMPLES.map((ex, i) => (
+              <Card key={ex.title} className="flex flex-col gap-3 p-5">
+                <Eyebrow>{triggerLabel(ex.workflow)}</Eyebrow>
+                <h3 className="font-semibold">{ex.title}</h3>
+                <p className="text-sm text-soft">{ex.blurb}</p>
+                <Button className="mt-auto self-start" onClick={() => useExample(i)} disabled={busy !== null}>
+                  {busy === i ? "Creating…" : "Use this"}
+                </Button>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

@@ -5,7 +5,9 @@ import "./index.css";
 import { AuthPage } from "./pages/AuthPage";
 import { EditorPage } from "./pages/EditorPage";
 import { HomePage } from "./pages/HomePage";
+import { JoinPage } from "./pages/JoinPage";
 import { LandingPage } from "./pages/LandingPage";
+import { RecoverPage } from "./pages/RecoverPage";
 import { RunPage } from "./pages/RunPage";
 import { RunsPage } from "./pages/RunsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -46,7 +48,11 @@ function App() {
   if (path === "/login" || path === "/signup") {
     return state.status === "signed-in" ? <Redirect to="/home" /> : <AuthPage key={path} mode={path === "/login" ? "login" : "signup"} />;
   }
+  if (path === "/recover") return state.status === "signed-in" ? <Redirect to="/home" /> : <RecoverPage />;
   if (state.status === "signed-out") return <Redirect to={`/login?next=${encodeURIComponent(path + location.search)}`} />;
+  // An invite link opens on its own page, outside the app: it's about another workspace than the current one.
+  const join = match("/join/:token", path);
+  if (join) return <JoinPage key={join.token} token={join.token} />;
   return (
     <WorkspaceProvider key={state.workspaceId} path={path}>
       <AppShell>
