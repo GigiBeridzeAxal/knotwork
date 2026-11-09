@@ -148,7 +148,7 @@ export function EditorPage({ id }: { id: string | null }) {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           {message && (
-            <span role="status" className={cn("text-sm", message === "Saved" ? "text-pass" : "text-fail")}>
+            <span role="status" className={cn("text-sm", message === "Saved" ? "text-soft" : "text-fail")}>
               {message}
             </span>
           )}

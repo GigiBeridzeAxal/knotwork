@@ -1,7 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { LIMITS } from "../../shared/limits";
 import { workspaceId, workspaceLink } from "../api";
-import { workspaceMark } from "../components/AppShell";
+import { Avatar } from "../components/AppShell";
 import { CopyIcon } from "../components/icons";
 import { Card, PageTitle } from "../components/ui";
 import { HOUR, runsSince, useWorkspace } from "../workspace";
@@ -30,7 +30,6 @@ function Row({ label, value }: { label: string; value: ReactNode }) {
 export function SettingsPage() {
   const { workflows, runs } = useWorkspace();
   const [copied, setCopied] = useState(false);
-  const mark = workspaceMark();
 
   return (
     <div className="flex flex-col gap-8">
@@ -42,7 +41,7 @@ export function SettingsPage() {
       <Section title="Workspace" blurb="There are no accounts. This browser holds a private workspace, and its id is the key to your workflows.">
         <Card className="flex flex-col gap-5 p-5 sm:p-6">
           <div className="flex items-center gap-4">
-            <span className="grid size-12 shrink-0 place-items-center rounded-xl bg-spark font-mono text-base font-medium text-ink">{mark.letters}</span>
+            <Avatar size="lg" />
             <div className="flex min-w-0 flex-col gap-1">
               <span className="font-medium">Guest workspace</span>
               <span className="truncate font-mono text-xs text-muted">{workspaceId}</span>
@@ -58,11 +57,11 @@ export function SettingsPage() {
                 readOnly
                 value={workspaceLink()}
                 onFocus={(e) => e.currentTarget.select()}
-                className="h-11 min-w-0 flex-1 rounded-lg border border-edge bg-ink px-3 font-mono text-xs text-soft focus:border-wire focus:outline-none"
+                className="h-11 min-w-0 flex-1 rounded-full border border-edge bg-ink px-4 font-mono text-xs text-soft focus:border-wire focus:outline-none"
               />
               <button
                 type="button"
-                className="inline-flex h-11 shrink-0 items-center gap-2 rounded-lg border border-edge px-4 text-sm font-medium hover:border-muted hover:bg-ink"
+                className="inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-edge px-4 text-sm font-medium transition-colors hover:border-line-hover hover:bg-graphite"
                 onClick={() =>
                   navigator.clipboard.writeText(workspaceLink()).then(() => {
                     setCopied(true);
