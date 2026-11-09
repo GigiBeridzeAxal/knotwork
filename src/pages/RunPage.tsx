@@ -49,7 +49,7 @@ export function RunPage({ id }: { id: string }) {
   }, [id, findElsewhere]);
 
   if (error) return <p className="text-fail">{error}</p>;
-  if (!run) return retrying ? <p className="text-sm text-soft">{retrying} Trying again shortly.</p> : null;
+  if (!run) return retrying ? <p className="text-sm text-soft">Couldn't load this run just now. Trying again shortly.</p> : null;
 
   const done = run.logs.filter((l) => l.status === "ok" || l.status === "waiting").length;
   const remaining = DONE.has(run.status) ? 0 : Math.max(0, run.stepCount - done);

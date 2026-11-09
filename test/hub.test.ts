@@ -127,6 +127,51 @@ describe("Hub connection", () => {
     expect(first.closed).toBe(true);
   });
 
+  it("gives up on a connected client after three minutes of nothing but connection errors", async () => {
+    const hub = new TestHub();
+    const first = connected(hub.current);
+    const tick = () => hub.fetch(new Request("https://hub.internal/__hub/tick", { method: "POST" }));
+    const clock = vi.spyOn(Date, "now");
+    try {
+      hub.tick = async () => {
+        throw networkError();
+      };
+      clock.mockReturnValue(5_000_000);
+      await tick();
+      clock.mockReturnValue(5_000_000 + 179_000);
+      await tick();
+      expect(hub.current).toBe(first);
+      // A tick that works in between starts the count again.
+      hub.tick = async () => {};
+      await tick();
+      expect(first.failingSince).toBe(0);
+      hub.tick = async () => {
+        throw networkError();
+      };
+      clock.mockReturnValue(5_000_000 + 200_000);
+      await tick();
+      clock.mockReturnValue(5_000_000 + 379_000);
+      await tick();
+      expect(hub.current).toBe(first);
+      clock.mockReturnValue(5_000_000 + 380_000);
+      await tick();
+      expect(hub.current).not.toBe(first);
+      expect(first.closed).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("counts failed requests toward the three minutes, and other errors not at all", () => {
+    const mongo = connected(new Mongo(env, { shared: true }));
+    expect(clientIsDead(mongo, new TypeError("bug"), 1_000)).toBe(false);
+    expect(mongo.failingSince).toBe(0);
+    expect(clientIsDead(mongo, networkError(), 1_000)).toBe(false);
+    expect(clientIsDead(mongo, new TypeError("bug"), 500_000)).toBe(false);
+    expect(clientIsDead(mongo, networkError(), 180_999)).toBe(false);
+    expect(clientIsDead(mongo, networkError(), 181_000)).toBe(true);
+  });
+
   it("replaces the connection at most once in 30 seconds, however often requests fail", async () => {
     const hub = new TestHub();
     const first = hub.current;

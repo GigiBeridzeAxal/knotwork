@@ -66,6 +66,16 @@ describe("step outputs", () => {
     expect(kept.value).toMatchObject({ unsaved: true });
   });
 
+  it("replaces an output the database would refuse with a note", () => {
+    const named = keepable({ ok: [{ "a\u0000b": 1 }] }).value as { unsaved: boolean; reason: string };
+    expect(named.unsaved).toBe(true);
+    expect(named.reason).toMatch(/null character/);
+    let deep: unknown = 1;
+    for (let i = 0; i < 60; i++) deep = { a: deep };
+    expect((keepable(deep).value as { reason: string }).reason).toMatch(/50 levels/);
+    expect(keepable({ text: "a\u0000b" }).value).toEqual({ text: "a\u0000b" });
+  });
+
   it("cuts very large outputs", () => {
     const kept = keepable({ text: "x".repeat(50_000) });
     expect(kept.value).toMatchObject({ truncated: true });

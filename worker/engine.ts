@@ -5,7 +5,7 @@ import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
 import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
-import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
+import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc, unstorable } from "./mongo";
 import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
 
 /**
@@ -133,7 +133,14 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
     const preview = new TextDecoder().decode(new TextEncoder().encode(text).slice(0, max)).replace(/\uFFFD$/, "");
     return { value: { truncated: true, preview }, bytes: max + 40 };
   }
-  return { value: JSON.parse(text), bytes };
+  const copy = JSON.parse(text);
+  // The database refuses very deep values and names with a null character; an http step can return either.
+  const why = unstorable(copy);
+  if (why) {
+    const note = { unsaved: true, reason: `The output couldn't be saved. ${why}` };
+    return { value: note, bytes: utf8Bytes(JSON.stringify(note)) };
+  }
+  return { value: copy, bytes };
 }
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;

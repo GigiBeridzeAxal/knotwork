@@ -52,7 +52,7 @@ import { stepTestInput, type Workflow } from "../shared/schema";
 import { getSample, getVersion, listVersions, saveVersion } from "./db";
 import { testStep } from "./stepTest";
 import { advance, createRun, tick } from "./engine";
-import { clientIsDead, databaseUnavailable, type Env, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
+import { clientIsDead, databaseUnavailable, type Env, Mongo, unstorable, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -61,37 +61,7 @@ const MAX_API_BODY = 64 * 1024;
 /** How much of a webhook call's headers and query string a run keeps (characters). */
 const MAX_HOOK_HEADER_CHARS = 8_000;
 const MAX_HOOK_QUERY_CHARS = 2_000;
-/**
- * How deeply JSON from a client may be nested. MongoDB refuses documents nested more than 100
- * levels, and a workflow's step or a run's input sits a few levels inside its document.
- */
-const MAX_JSON_DEPTH = 50;
-
-/**
- * Why a parsed JSON value can't be stored, or "" when it can: nested more than `max` levels, or an
- * object key with a null byte (the database driver refuses those). No recursion: the input may be
- * very deep.
- */
-export function unstorable(value: unknown, max = MAX_JSON_DEPTH): string {
-  let level: unknown[] = [value];
-  for (let depth = 0; level.length; depth++) {
-    const next: unknown[] = [];
-    for (const item of level) {
-      if (!item || typeof item !== "object") continue;
-      if (depth >= max) return `That JSON is nested more than ${max} levels deep`;
-      if (Array.isArray(item)) {
-        for (const child of item) next.push(child);
-      } else {
-        for (const [key, child] of Object.entries(item)) {
-          if (key.includes("\u0000")) return "A name in that JSON contains a null character";
-          next.push(child);
-        }
-      }
-    }
-    level = next;
-  }
-  return "";
-}
+export { unstorable };
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -484,7 +454,7 @@ scoped.post("/workflows/:id/run", async (c) => {
   } catch {
     return c.json({ error: "The test input isn't valid JSON" }, 400);
   }
-  const bad = unstorable(body);
+  const bad = unstorable(body?.input);
   if (bad) return c.json({ error: bad }, 400);
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
@@ -644,7 +614,8 @@ app.all(
     }
     const input = { method: c.req.method, query, headers, body };
     // Checked before a run slot is taken, so input that can't be stored costs the account nothing.
-    const bad = unstorable(input);
+    // The depth limit is the body's own; query and header names are checked beside it.
+    const bad = unstorable(body) || unstorable({ query, headers });
     if (bad) return c.json({ error: bad }, 400);
 
     const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook", runBytes(input, doc.steps));
