@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Run, Step, StepType, Trigger, Workflow, WorkflowInput } from "../../shared/schema";
 import { validateCron } from "../../shared/cron";
 import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
-import { BLANK, newStep, STEP_TYPES } from "../examples";
+import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
 import { Link, navigate } from "../router";
+import { useFindElsewhere } from "../session";
 import { StepEditor } from "./StepEditor";
 
 const CRON_PRESETS = [
@@ -24,24 +25,40 @@ export function EditorPage({ id }: { id: string | null }) {
   const [openStep, setOpenStep] = useState<number | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [message, setMessage] = useState("");
+  /** Someone saved this workflow elsewhere (another tab or device) after it was opened here. */
+  const [conflict, setConflict] = useState<Workflow | null>(null);
+  const saveRef = useRef<(() => Promise<Workflow | null>) | null>(null);
   const [busy, setBusy] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   const [showRun, setShowRun] = useState(false);
   const [runInput, setRunInput] = useState('{\n  "amount": 120,\n  "id": "order_1"\n}');
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
+  const findElsewhere = useFindElsewhere();
+
+  /** True once the user has changed the draft: a late or repeated load must not replace their edit. */
+  const touched = useRef(false);
 
   useEffect(() => {
     if (!id) return;
+    let stale = false;
     api.workflow(id).then(
       (wf) => {
+        if (stale) return;
         setSaved(wf);
-        setDraft(toInput(wf));
+        if (!touched.current) setDraft(toInput(wf));
       },
-      (e) => setMessage(e.message),
+      async (e) => {
+        if (stale) return;
+        if (e instanceof ApiError && e.status === 404 && (await findElsewhere("workflow", id))) return;
+        setMessage(e.message);
+      },
     );
-    api.runs(id).then(setRuns, () => {});
-  }, [id]);
+    api.runs(id).then((r) => !stale && setRuns(r), () => {});
+    return () => {
+      stale = true;
+    };
+  }, [id, findElsewhere]);
 
   const dirty = useMemo(
     () => !saved || JSON.stringify(toInput(saved)) !== JSON.stringify(draft),
@@ -50,7 +67,10 @@ export function EditorPage({ id }: { id: string | null }) {
 
   if (!draft) return message ? <p className="text-fail">{message}</p> : null;
 
-  const update = (patch: Partial<WorkflowInput>) => setDraft({ ...draft, ...patch });
+  const update = (patch: Partial<WorkflowInput>) => {
+    touched.current = true;
+    setDraft({ ...draft, ...patch });
+  };
   const setSteps = (steps: Step[]) => update({ steps });
 
   const stepErrors = (i: number) =>
@@ -59,20 +79,26 @@ export function EditorPage({ id }: { id: string | null }) {
   const cronError = draft.trigger.type === "schedule" ? validateCron(draft.trigger.cron) : null;
 
   async function save(): Promise<Workflow | null> {
+    if (conflict) return null;
     setBusy(true);
     setMessage("");
     setIssues([]);
     try {
-      const wf = saved ? await api.updateWorkflow(saved.id, draft!) : await api.createWorkflow(draft!);
+      const wf = saved ? await api.updateWorkflow(saved.id, draft!, saved.version) : await api.createWorkflow(draft!);
       setSaved(wf);
       setDraft(toInput(wf));
+      touched.current = false;
       setVersion((v) => v + 1);
       if (!saved) navigate(`/workflows/${wf.id}`, { replace: true });
       setMessage("Saved");
       return wf;
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && e.data.current) {
+        setConflict(e.data.current as Workflow);
+        return null;
+      }
       if (e instanceof ApiError) {
-        setIssues(e.issues);
+        setIssues(e.issues ?? []);
         const firstStep = e.issues.find((x) => x.path[0] === "steps");
         if (firstStep && typeof firstStep.path[1] === "number") setOpenStep(firstStep.path[1]);
       }
@@ -82,6 +108,8 @@ export function EditorPage({ id }: { id: string | null }) {
       setBusy(false);
     }
   }
+
+  saveRef.current = save;
 
   async function run() {
     let input: unknown = {};
@@ -160,6 +188,40 @@ export function EditorPage({ id }: { id: string | null }) {
           </Button>
         </div>
       </div>
+
+      {conflict && (
+        <div role="alert" className="flex flex-col gap-4 rounded-2xl border border-retry/40 bg-retry/5 p-5 sm:flex-row sm:items-center">
+          <p className="text-sm text-soft">
+            <span className="font-medium text-text">This workflow was saved somewhere else</span> after you opened it here
+            {conflict.updatedAt ? ` (${timeAgo(conflict.updatedAt)})` : ""}. Keep your version, or load theirs and lose your changes.
+          </p>
+          <div className="flex shrink-0 gap-2 sm:ml-auto">
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setSaved(conflict);
+                setDraft(toInput(conflict));
+                touched.current = false;
+                setVersion((v) => v + 1);
+                setConflict(null);
+                setMessage("");
+              }}
+            >
+              Load theirs
+            </Button>
+            <Button
+              onClick={() => {
+                // Save on top of the newer version: take its version number, keep this draft.
+                setSaved(conflict);
+                setConflict(null);
+                setTimeout(() => saveRef.current?.(), 0);
+              }}
+            >
+              Keep mine
+            </Button>
+          </div>
+        </div>
+      )}
 
       {showRun && (
         <Card className="flex flex-col gap-4 p-5">
@@ -257,7 +319,7 @@ export function EditorPage({ id }: { id: string | null }) {
                 {runs.slice(0, 8).map((r) => (
                   <li key={r.id}>
                     <Link href={`/runs/${r.id}`} className="flex min-h-11 items-center justify-between gap-2 rounded-[10px] px-2 hover:bg-ink">
-                      <StatusBadge status={r.status} />
+                      <StatusBadge status={r.status} error={r.error} />
                       <span className="text-sm text-muted">{timeAgo(r.createdAt)}</span>
                     </Link>
                   </li>

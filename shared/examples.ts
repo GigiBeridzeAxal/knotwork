@@ -1,4 +1,4 @@
-import type { Step, StepType, WorkflowInput } from "../shared/schema";
+import type { Step, StepType, WorkflowInput } from "./schema";
 
 export const STEP_TYPES: { type: StepType; label: string; blurb: string }[] = [
   { type: "http", label: "HTTP request", blurb: "Call any API or webhook" },

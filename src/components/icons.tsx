@@ -80,3 +80,13 @@ export const CodeIcon = (p: SVGProps<SVGSVGElement>) => (
     <path d="m7 6-4 4 4 4M13 6l4 4-4 4" />
   </Icon>
 );
+export const CheckIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Icon {...p}>
+    <path d="m4.5 10.5 3.5 3.5 7.5-8" />
+  </Icon>
+);
+export const LogoutIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Icon {...p}>
+    <path d="M8 16.5H5.5A1.5 1.5 0 0 1 4 15V5a1.5 1.5 0 0 1 1.5-1.5H8M12.5 13.5 16 10l-3.5-3.5M16 10H8" />
+  </Icon>
+);

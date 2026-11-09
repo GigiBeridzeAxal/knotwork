@@ -4,7 +4,7 @@ import { api } from "../api";
 import { WorkflowDot } from "../components/AppShell";
 import { ArrowIcon, PlusIcon } from "../components/icons";
 import { cn, duration, timeAgo } from "../components/ui";
-import { EXAMPLES } from "../examples";
+import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
 import { HOUR, runsSince, useWorkspace } from "../workspace";
 

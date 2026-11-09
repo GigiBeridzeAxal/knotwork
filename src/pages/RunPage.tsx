@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import type { RunDetail } from "../../shared/schema";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { Button, Card, cn, duration, Eyebrow, Json, StatusBadge, timeAgo } from "../components/ui";
 import { Link } from "../router";
+import { useFindElsewhere } from "../session";
 
 const DONE = new Set(["succeeded", "failed", "stopped"]);
 
@@ -11,18 +12,26 @@ export function RunPage({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [open, setOpen] = useState<number | null>(null);
   const [nudging, setNudging] = useState(false);
+  const findElsewhere = useFindElsewhere();
 
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
+    const schedule = (ms: number) => {
+      timer = setTimeout(() => (document.visibilityState === "visible" ? load() : schedule(ms)), ms);
+    };
     const load = async () => {
       try {
         const next = await api.run(id);
         if (stopped) return;
         setRun(next);
-        if (!DONE.has(next.status)) timer = setTimeout(load, 1500);
+        // Poll quickly while a run is moving, slowly while it waits for a delay or retry, and not
+        // at all while the tab is hidden.
+        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 3000);
       } catch (e) {
-        if (!stopped) setError((e as Error).message);
+        if (stopped) return;
+        if (e instanceof ApiError && e.status === 404 && (await findElsewhere("run", id))) return;
+        setError((e as Error).message);
       }
     };
     load();
@@ -30,7 +39,7 @@ export function RunPage({ id }: { id: string }) {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [id]);
+  }, [id, findElsewhere]);
 
   if (error) return <p className="text-fail">{error}</p>;
   if (!run) return null;
@@ -47,7 +56,7 @@ export function RunPage({ id }: { id: string }) {
         </Link>
         <div className="flex flex-wrap items-center gap-4">
           <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">Run</h1>
-          <StatusBadge status={run.status} />
+          <StatusBadge status={run.status} error={run.error} />
         </div>
         <p className="font-mono text-sm text-muted">
           {run.id} · {run.triggerType} · started {timeAgo(run.createdAt)}
@@ -55,14 +64,16 @@ export function RunPage({ id }: { id: string }) {
         </p>
         {run.status === "waiting" && run.nextRunAt && (
           <div className="flex flex-wrap items-center gap-3 text-sm text-retry">
-            Continues around {new Date(run.nextRunAt).toLocaleTimeString()}, on the next minute tick.
+            {run.error
+              ? run.error
+              : `Continues around ${new Date(run.nextRunAt).toLocaleTimeString()} (${new Date(run.nextRunAt).toISOString().slice(11, 16)} UTC), on the next minute tick.`}
             <Button
               variant="ghost"
               disabled={nudging}
               onClick={async () => {
                 setNudging(true);
-                await api.tick().catch(() => {});
-                setRun(await api.run(id));
+                const fresh = await api.checkRun(id).catch(() => null);
+                if (fresh) setRun(fresh);
                 setNudging(false);
               }}
             >
@@ -70,7 +81,7 @@ export function RunPage({ id }: { id: string }) {
             </Button>
           </div>
         )}
-        {run.error && <p className="text-fail">{run.error}</p>}
+        {run.error && run.status !== "waiting" && <p className="text-fail">{run.error}</p>}
       </div>
 
       <div className="grid gap-8 lg:grid-cols-[1fr_360px]">
@@ -112,7 +123,11 @@ export function RunPage({ id }: { id: string }) {
               </div>
             </li>
           ))}
-          {run.logs.length === 0 && remaining === 0 && <p className="text-muted">This workflow has no steps.</p>}
+          {run.logs.length === 0 && remaining === 0 && (
+            <p className="text-muted">
+              {run.status === "stopped" && run.error ? "The rest of this run was removed to free space." : "This workflow has no steps."}
+            </p>
+          )}
         </ol>
 
         <aside className="flex flex-col gap-3">

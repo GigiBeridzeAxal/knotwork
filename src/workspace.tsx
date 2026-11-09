@@ -1,41 +1,60 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import type { Run, WorkflowSummary } from "../shared/schema";
-import { api } from "./api";
+import { LIMITS } from "../shared/limits";
+import { api, ApiError } from "./api";
+import { useSession } from "./session";
 
 interface WorkspaceData {
   workflows: WorkflowSummary[] | null;
-  /** The newest 200 runs. That covers more than three hours at the hourly limit. */
+  /** The newest 100 runs. That covers more than an hour and a half at the hourly limit. */
   runs: Run[] | null;
+  /** Runs the whole account started this clock hour; the hourly limit counts these. */
+  runsThisHour: number;
+  /** The account's hourly run limit (lower in its first day). */
+  runsLimit: number;
   error: string;
   refresh: () => void;
 }
 
-const Ctx = createContext<WorkspaceData>({ workflows: null, runs: null, error: "", refresh: () => {} });
+const Ctx = createContext<WorkspaceData>({ workflows: null, runs: null, runsThisHour: 0, runsLimit: LIMITS.runsPerAccountPerHour, error: "", refresh: () => {} });
 
-/** Loads the workspace once for the sidebar and the home page, and refreshes it every 10 seconds. */
+/**
+ * Loads the current workspace once for the sidebar and the home page, and refreshes it every
+ * 30 seconds while the tab is visible. Mounted with the workspace id as its key, so switching
+ * workspaces starts from empty instead of showing the old one's lists.
+ */
 export function WorkspaceProvider({ path, children }: { path: string; children: ReactNode }) {
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [runs, setRuns] = useState<Run[] | null>(null);
+  const [runsThisHour, setRunsThisHour] = useState(0);
+  const [runsLimit, setRunsLimit] = useState<number>(LIMITS.runsPerAccountPerHour);
   const [error, setError] = useState("");
+  const { reload } = useSession();
 
   const refresh = useCallback(() => {
-    Promise.all([api.workflows(), api.runs(undefined, 200)]).then(
-      ([w, r]) => {
-        setWorkflows(w);
-        setRuns(r);
+    api.overview().then(
+      (o) => {
+        setWorkflows(o.workflows);
+        setRuns(o.runs);
+        setRunsThisHour(o.runsThisHour);
+        setRunsLimit(o.runsLimit);
         setError("");
       },
-      (e: Error) => setError(e.message),
+      (e: Error) => {
+        // The workspace was deleted (e.g. on another device): reload the list, which falls back to Personal.
+        if (e instanceof ApiError && e.status === 404) reload("").catch(() => setError(e.message));
+        else setError(e.message);
+      },
     );
-  }, []);
+  }, [reload]);
 
   useEffect(refresh, [refresh, path]);
   useEffect(() => {
-    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), 10_000);
+    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), 30_000);
     return () => clearInterval(timer);
   }, [refresh]);
 
-  return <Ctx.Provider value={{ workflows, runs, error, refresh }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ workflows, runs, runsThisHour, runsLimit, error, refresh }}>{children}</Ctx.Provider>;
 }
 
 export const useWorkspace = () => useContext(Ctx);

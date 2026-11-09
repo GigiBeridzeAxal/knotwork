@@ -111,6 +111,9 @@ export const workflowInput = z
     steps: z.array(stepSchema).max(MAX_STEPS),
   })
   .superRefine((wf, ctx) => {
+    if (JSON.stringify(wf).length > LIMITS.workflowBytes) {
+      ctx.addIssue({ code: "custom", path: ["steps"], message: `A workflow can be at most ${LIMITS.workflowBytes / 1000} KB. Trim long step settings.` });
+    }
     const seen = new Set<string>();
     wf.steps.forEach((step, i) => {
       if (seen.has(step.id)) {
@@ -129,16 +132,71 @@ export type FilterOp = (typeof filterOps)[number];
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "stopped";
 export type LogStatus = "ok" | "failed" | "retrying" | "stopped" | "waiting";
 
+/** Saving sends the version it was loaded at; a newer version on the server means someone else saved first. */
+export const workflowSave = z.object({ version: z.number().int().min(0) });
+
 export interface Workflow extends WorkflowInput {
   id: string;
   workspaceId: string;
   hookKey: string;
+  version: number;
   createdAt: number;
   updatedAt: number;
+  /** `error: "space"` when the storage guard stopped it. */
+  lastRun: { id: string; status: RunStatus; createdAt: number; error?: string } | null;
 }
 
-export interface WorkflowSummary extends Workflow {
-  lastRun: { id: string; status: RunStatus; createdAt: number } | null;
+/** A workflow as lists show it: each step's name and type, without its settings. */
+export type WorkflowSummary = Omit<Workflow, "steps"> & { steps: Pick<Step, "id" | "name" | "type">[] };
+
+// ---------- Accounts ----------
+
+const email = z.string().trim().toLowerCase().max(254).email("Enter an email address like name@example.com");
+export const PASSWORD_MIN = 10;
+
+const newPassword = z.string().min(PASSWORD_MIN, `Use at least ${PASSWORD_MIN} characters`).max(200);
+
+export const signupInput = z.object({
+  name: z.string().trim().min(1, "Tell us what to call you").max(60),
+  email,
+  password: newPassword,
+});
+
+export const passwordChange = z.object({
+  current: z.string().min(1, "Enter your current password").max(200),
+  next: newPassword,
+});
+
+export const accountDelete = z.object({ password: z.string().min(1, "Enter your password").max(200) });
+
+export const loginInput = z.object({
+  email,
+  password: z.string().min(1, "Enter your password").max(200),
+});
+
+export const workspaceInput = z.object({
+  name: z.string().trim().min(1, "Give it a name").max(40),
+});
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  /** The shared demo account: anyone can sign in to it, and it is reset every day. */
+  demo: boolean;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  /** Every account has one personal workspace. It can be renamed but not deleted. */
+  personal: boolean;
+  createdAt: number;
+}
+
+export interface Me {
+  user: User;
+  workspaces: Workspace[];
 }
 
 export interface Run {
@@ -147,7 +205,6 @@ export interface Run {
   workflowName?: string;
   status: RunStatus;
   triggerType: Trigger["type"];
-  input: unknown;
   stepIndex: number;
   attempt: number;
   nextRunAt: number | null;
@@ -170,6 +227,18 @@ export interface StepLog {
 }
 
 export interface RunDetail extends Run {
+  /** What started the run: the webhook request, the manual test input, or the scheduled minute. */
+  input: unknown;
   logs: StepLog[];
   stepCount: number;
+}
+
+export interface Overview {
+  workflows: WorkflowSummary[];
+  /** The workspace's newest 100 runs. */
+  runs: Run[];
+  /** Runs the whole account started this clock hour (the limit is per account). */
+  runsThisHour: number;
+  /** This account's hourly run limit right now (lower in its first 24 hours). */
+  runsLimit: number;
 }

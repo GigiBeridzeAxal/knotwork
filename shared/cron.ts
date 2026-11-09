@@ -80,3 +80,32 @@ export function minutesBetweenRuns(expr: string): number {
   for (let i = 1; i < minutes.length; i++) gap = Math.min(gap, minutes[i] - minutes[i - 1]);
   return gap;
 }
+
+const MINUTE = 60_000;
+const DAY = 86_400_000;
+
+/**
+ * The first minute after `after` (ms) that the schedule fires, or null if it never does within a
+ * year (e.g. "0 0 31 2 *"). Walks days, then hours, then minutes, so it stays cheap.
+ */
+export function nextFire(cron: Cron, after: number): number | null {
+  const start = Math.floor(after / MINUTE) * MINUTE + MINUTE;
+  const hours = [...cron.hour].sort((a, b) => a - b);
+  const minutes = [...cron.minute].sort((a, b) => a - b);
+  const firstDay = Math.floor(start / DAY) * DAY;
+  for (let day = firstDay; day < firstDay + 367 * DAY; day += DAY) {
+    const date = new Date(day);
+    if (!cron.month.has(date.getUTCMonth() + 1)) continue;
+    const domOk = cron.dom.has(date.getUTCDate());
+    const dowOk = cron.dow.has(date.getUTCDay());
+    const dayOk = !cron.domAny && !cron.dowAny ? domOk || dowOk : domOk && dowOk;
+    if (!dayOk) continue;
+    for (const h of hours) {
+      for (const m of minutes) {
+        const at = day + h * 3_600_000 + m * MINUTE;
+        if (at >= start) return at;
+      }
+    }
+  }
+  return null;
+}

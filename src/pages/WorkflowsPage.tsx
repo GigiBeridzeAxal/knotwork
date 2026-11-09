@@ -3,7 +3,7 @@ import type { WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
 import { PlusIcon } from "../components/icons";
 import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
-import { EXAMPLES } from "../examples";
+import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
@@ -70,7 +70,7 @@ export function WorkflowsPage() {
                     </span>
                     {wf.lastRun ? (
                       <span className="flex items-center gap-2">
-                        <StatusBadge status={wf.lastRun.status} />
+                        <StatusBadge status={wf.lastRun.status} error={wf.lastRun.error} />
                         {timeAgo(wf.lastRun.createdAt)}
                       </span>
                     ) : (
