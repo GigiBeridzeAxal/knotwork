@@ -352,7 +352,8 @@ A run that hits a limit gets `429` with an `error` that says which limit and, fo
 - Reach any workspace but its own.
 - See webhook URLs, if it is a read key or its maker is a viewer.
 - List, set or delete secrets (`/secrets` answers `403` to a key), or test a single step. Workflows a key
-  saves can still name secrets as `{{ secrets.NAME }}`.
+  saves can still name secrets as `{{ secrets.NAME }}`, so a write key can send a secret's value anywhere a
+  request can go: after revoking a write key, replace the secrets its workspace holds.
 
 ## Examples
 

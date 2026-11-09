@@ -292,7 +292,9 @@ export function DocsPage() {
             <p>
               Keep API keys, tokens and chat webhook URLs under <b>Settings, then Secrets</b>, not in the workflow. A step
               uses one as <code>{"{{ secrets.SLACK_URL }}"}</code>. Names are capitals, digits and <code>_</code>. A value is
-              stored encrypted and can't be shown again; to change it, save it again.
+              stored encrypted and can't be shown again; to change it, save it again. In a team, the owner and editors
+              manage secrets and viewers see only their names. Anyone who can edit a workflow can use a secret in a
+              request to any address, so after removing an editor, replace the secrets they could use.
             </p>
             <p>
               Wherever a secret's value would show up in a run (a log line, an output, an error), you see{" "}

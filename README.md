@@ -177,8 +177,8 @@ Setting one up:
 1. Save the signing secret under Settings, then Secrets (for example `GH_SIGNING`), and pick it in the
    workflow's trigger next to "Check the sender's signature".
 2. **GitHub:** in the repository, Settings, then Webhooks, then Add webhook. Payload URL: the workflow's
-   webhook URL. Content type: `application/json` (the default, form encoding, also works: Knotwork unwraps
-   its `payload` field). Secret: the same value. GitHub sends a `ping` event when the webhook is created,
+   webhook URL. Content type: `application/json` (GitHub's default, form encoding, also works while the GitHub
+   check is on: Knotwork unwraps its `payload` field). Secret: the same value. GitHub sends a `ping` event when the webhook is created,
    which starts a run; an `if` on `{{ trigger.headers.x-github-event }}` can skip it.
 3. **Stripe:** Developers, then Webhooks, add an endpoint with the workflow's webhook URL, and save its
    signing secret (`whsec_…`, the whole text).
@@ -294,6 +294,13 @@ sheet. Using one signs out every device and revokes the account's API keys; the 
 does the same and also ends the remaining codes, so a code someone copied earlier can't undo the change. Making
 new codes ends the old ones, and needs the password. Wrong codes count toward their own limit of 10 per
 email and IP per 15 minutes.
+
+**Secrets in a team.** The owner and editors add, replace and delete a workspace's secrets; viewers see
+their names only, and an API key can't list or change them at all. Nobody is shown a value again, but
+anyone who can edit a workflow (an editor, or a write key) can put `{{ secrets.NAME }}` in a request to a
+server of their own, so the right to edit is in effect the right to read every secret. After removing an
+editor or revoking a write key, replace the secrets they could use. A secret is kept under the workspace's
+owner whoever saved it, and is deleted with the workspace or the owner's account.
 
 **Webhook URLs.** A webhook URL starts runs for whoever has it, so viewers and read-only keys get workflows
 with an empty `hookKey`. Editors do see them, so after removing an editor the owner can press **New URL**
@@ -483,11 +490,11 @@ person from using up the free plans:
 
 ## Roadmap
 
-Built: teams with invite links and roles, recovery codes, and API keys (2026-11-09; live from the next deploy).
+Built: teams with invite links and roles, recovery codes, and API keys; secrets, if / else and loop steps,
+signed webhooks and run again (2026-11-09; live from the next deploy).
 
 - An "on failure" step, so a workflow can report that it broke
 - Ready-made Slack, Discord, Telegram and GitHub steps
-- Teams: invite links with roles, recovery codes, API keys
 
 ## License
 

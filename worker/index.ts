@@ -833,7 +833,7 @@ scoped.put("/secrets/:name", async (c) => {
   if (!name.success) return c.json({ error: "Check the highlighted fields", issues: [{ path: ["name"], message: name.error.issues[0].message }] }, 400);
   const parsed = secretInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
-  const res = await putSecret(db(c), c.env.AUTH_PEPPER, c.var.workspace, c.var.session.userId, name.data, parsed.data.value, Date.now());
+  const res = await putSecret(db(c), c.env.AUTH_PEPPER, c.var.workspace, c.var.ownerId, name.data, parsed.data.value, Date.now());
   if (res === "full") return c.json({ error: `A workspace can keep ${LIMITS.secretsPerWorkspace} secrets. Delete one to make room.` }, 409);
   if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
   return c.json(res);

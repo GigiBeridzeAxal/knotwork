@@ -335,6 +335,20 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       await join(alice, team, carol, "viewer");
     });
 
+    it("a secret an editor saves belongs to the workspace's owner; a viewer sees names and changes nothing", async () => {
+      const saved = await call("PUT", "/api/secrets/TEAM_TOKEN", { cookie: bob.cookie, ws: team, body: { value: "team-token-value-1" } });
+      expect(saved.status).toBe(200);
+      // Kept under the owner, like workflows and runs, so it lives and goes with the workspace, not with the editor.
+      expect((await raw.secrets.findOne({ workspaceId: team, name: "TEAM_TOKEN" }))?.ownerId).toBe(alice.id);
+      const seen = await call("GET", "/api/secrets", { cookie: carol.cookie, ws: team });
+      expect(seen.status).toBe(200);
+      expect(JSON.stringify(seen.body)).toContain("TEAM_TOKEN");
+      expect(JSON.stringify(seen.body)).not.toContain("team-token-value-1");
+      expect((await call("PUT", "/api/secrets/TEAM_TOKEN", { cookie: carol.cookie, ws: team, body: { value: "viewer-was-here-1" } })).status).toBe(403);
+      expect((await call("DELETE", "/api/secrets/TEAM_TOKEN", { cookie: carol.cookie, ws: team })).status).toBe(403);
+      expect((await call("DELETE", "/api/secrets/TEAM_TOKEN", { cookie: bob.cookie, ws: team })).status).toBe(204);
+    });
+
     it("an editor changes workflows and starts runs, charged to the owner", async () => {
       const made = await call("POST", "/api/workflows", { cookie: bob.cookie, ws: team, body: flow("Bob's") });
       expect(made.status).toBe(201);
