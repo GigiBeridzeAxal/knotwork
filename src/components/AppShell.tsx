@@ -5,7 +5,7 @@ import { api } from "../api";
 import { Link, navigate, usePath } from "../router";
 import { initials, useSession } from "../session";
 import { useWorkspace } from "../workspace";
-import { CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon } from "./icons";
+import { BookIcon, CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon } from "./icons";
 import { cn, Logo } from "./ui";
 
 const NAV = [
@@ -299,6 +299,14 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
           <Meter label={`Workflows in ${workspace.name}`} used={workflows?.length ?? 0} max={LIMITS.workflowsPerWorkspace} />
           <Meter label="Runs this hour" used={runsThisHour} max={runsLimit} />
         </div>
+        <Link
+          href="/docs"
+          onClick={onNavigate}
+          className="flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] text-muted transition-colors hover:bg-graphite/60 hover:text-text"
+        >
+          <BookIcon className="size-[18px]" />
+          Docs
+        </Link>
         <a
           href="https://github.com/GigiBeridzeAxal/knotwork"
           className="flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] text-muted transition-colors hover:bg-graphite/60 hover:text-text"

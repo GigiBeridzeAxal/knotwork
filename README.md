@@ -11,6 +11,9 @@ Knotwork wires a **trigger** (a webhook, a schedule, or a button) to a list of *
 transforms, filters, delays, log lines). When a step fails it waits and tries again with backoff, and every
 attempt is written to a run log you can open in the dashboard.
 
+**Try it:** [open the live demo](https://knotwork.gigiberidze.com/demo) (one click, no account) ·
+[user guide](https://knotwork.gigiberidze.com/docs) · [case study](https://gigiberidze.com/work/knotwork)
+
 ![The workflow editor](docs/editor.png)
 
 ## What it does
@@ -43,7 +46,7 @@ Browser ──► Cloudflare Worker ──► hub (one Durable Object) ──►
               │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
               │  /api/*       Hono JSON API for the dashboard
               │  /hooks/*     public webhook endpoints
-              │  /*           React dashboard (static assets, served without the hub)
+              │  /*           React dashboard (static assets, served without the hub), incl. /docs and /demo
               └─ cron: every minute → fire schedules, resume parked runs;
                        every 10 min check storage, hourly check indexes, daily reset the demo
 ```
@@ -282,11 +285,12 @@ person from using up the free plans:
 
 ## Roadmap
 
-- Inviting other people into a workspace
 - Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
 - Branching (if / else) and loops over arrays
-- A visual canvas editor
-- Signed webhooks (GitHub, Stripe) and replaying a past run
+- Signed webhooks (GitHub, Stripe), replaying a past run, and an "on failure" step
+- A visual canvas editor, templates, version history
+- Ready-made Slack, Discord, Telegram and GitHub steps
+- Teams: invite links with roles, recovery codes, API keys
 
 ## License
 
