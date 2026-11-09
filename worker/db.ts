@@ -48,7 +48,7 @@ const SUMMARY_FIELDS = {
 /** The run fields the lists need. Input, logs, steps and outputs stay in the database. */
 const RUN_SUMMARY = {
   _id: 1, workflowId: 1, workflowName: 1, status: 1, triggerType: 1, stepIndex: 1,
-  attempt: 1, nextRunAt: 1, error: 1, createdAt: 1, finishedAt: 1,
+  attempt: 1, nextRunAt: 1, error: 1, createdAt: 1, finishedAt: 1, rerunOf: 1,
 } as const;
 
 export function toRun(doc: Pick<RunDoc, keyof typeof RUN_SUMMARY>): Run {
@@ -64,6 +64,7 @@ export function toRun(doc: Pick<RunDoc, keyof typeof RUN_SUMMARY>): Run {
     error: doc.error,
     createdAt: doc.createdAt,
     finishedAt: doc.finishedAt,
+    ...(doc.rerunOf ? { rerunOf: doc.rerunOf } : {}),
   };
 }
 
@@ -80,6 +81,7 @@ export async function deleteWorkspace(c: Collections, id: string, ownerId: strin
   if (!ws || ws.personal) return false;
   await c.runs.deleteMany({ workspaceId: id });
   await c.workflows.deleteMany({ workspaceId: id });
+  await c.secrets.deleteMany({ workspaceId: id });
   await c.workspaces.deleteOne({ _id: id });
   await c.sessions.updateMany({ userId: ownerId }, { $pull: { workspaceIds: id } });
   return true;
@@ -311,7 +313,8 @@ export async function listRuns(c: Collections, workspaceId: string, workflowId: 
 }
 
 export async function getRun(c: Collections, id: string, workspaceId: string): Promise<RunDetail | null> {
-  const doc = await c.runs.findOne({ _id: id, workspaceId }, { projection: { ...RUN_SUMMARY, input: 1, logs: 1, "steps.id": 1 } });
+  const doc = await c.runs.findOne({ _id: id, workspaceId }, { projection: { ...RUN_SUMMARY, input: 1, logs: 1, "steps.type": 1 } });
   if (!doc) return null;
-  return { ...toRun(doc), input: doc.input, logs: doc.logs, stepCount: doc.steps.length };
+  const blocks = doc.steps.some((s) => s.type === "if" || s.type === "loop");
+  return { ...toRun(doc), input: doc.input, logs: doc.logs, stepCount: doc.steps.length, blocks };
 }

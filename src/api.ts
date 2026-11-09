@@ -1,4 +1,4 @@
-import type { Me, Overview, Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type { Me, Overview, Run, RunDetail, SecretInfo, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
 
 /**
  * The signed-in session lives in an HttpOnly cookie the browser sends by itself. The workspace being
@@ -79,4 +79,10 @@ export const api = {
   },
   run: (id: string) => request<RunDetail>(`/runs/${id}`),
   checkRun: (id: string) => request<RunDetail>(`/runs/${id}/check`, post()),
+  rerun: (id: string) => request<{ runId: string }>(`/runs/${id}/rerun`, post()),
+
+  secrets: () => request<SecretInfo[]>("/secrets"),
+  setSecret: (name: string, value: string) =>
+    request<SecretInfo>(`/secrets/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ value }) }),
+  deleteSecret: (name: string) => request<void>(`/secrets/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };

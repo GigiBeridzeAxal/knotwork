@@ -1,4 +1,5 @@
-import type { FilterOp, Step } from "../shared/schema";
+import { LIMITS } from "../shared/limits";
+import type { FilterOp, IfStep, LeafStep, LoopStep, Step } from "../shared/schema";
 import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
 
 export type StepResult =
@@ -12,6 +13,18 @@ export interface Scope {
   steps: Record<string, unknown>;
   run: { id: string; startedAt: string };
   workflow: { id: string; name: string };
+  /** The workspace secrets this run's steps mention, by name. */
+  secrets: Record<string, string>;
+  /** Inside a loop: the innermost loop's current item, its position (from 0) and the list's length. */
+  loop?: LoopFrame;
+}
+
+/** What a loop's own output holds while it runs; afterwards only `count` is left. */
+export interface LoopFrame {
+  item: unknown;
+  index: number;
+  count: number;
+  items: unknown[];
 }
 
 const HTTP_TIMEOUT_MS = 15_000;
@@ -33,7 +46,8 @@ export interface StepOptions {
 /** Cuts text that will be stored or shown (log lines, errors), so no step can make them huge. */
 export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
-export async function executeStep(step: Step, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
+/** Runs one step that isn't a block. (The engine walks `if` and `loop` itself, with the two functions below.) */
+export async function executeStep(step: LeafStep, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
   // One budget for everything this step renders (URL, headers, body, output, message).
   const budget = newBudget();
   switch (step.type) {
@@ -174,15 +188,46 @@ const OP_WORDS: Record<FilterOp, string> = {
   not_exists: "is empty",
 };
 
-function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: Budget): StepResult {
-  const { left, op, right } = step.config;
+/** Works out a condition (a filter's, or an if's) and puts it in words for the log. */
+function check(config: { left: string; op: FilterOp; right: string }, scope: Scope, budget: Budget) {
+  const { left, op, right } = config;
   const leftValue = renderString(left, scope, budget);
   const rightText = renderText(right, scope, budget);
   const passed = compare(leftValue, op, rightText);
   const shown = clip(typeof leftValue === "string" ? `"${leftValue}"` : JSON.stringify(leftValue) ?? "nothing", 300);
   const description = `${shown} ${OP_WORDS[op]}${op.endsWith("exists") ? "" : ` "${clip(rightText, 300)}"`}`;
+  return { passed, description };
+}
+
+function filter(step: Extract<Step, { type: "filter" }>, scope: Scope, budget: Budget): StepResult {
+  const { passed, description } = check(step.config, scope, budget);
   if (!passed) return { kind: "stop", message: `Stopped: ${description} is false` };
   return { kind: "ok", output: { passed: true }, message: `Passed: ${description}` };
+}
+
+/** Which branch an `if` takes. Its output is `{ result, branch }`, so later steps can ask `{{ steps.<id>.result }}`. */
+export function evaluateIf(step: IfStep, scope: Scope): { passed: boolean; message: string } {
+  const { passed, description } = check(step.config, scope, newBudget());
+  const branch = passed ? step.then : step.else;
+  const name = passed ? "Then" : "Else";
+  const runs = branch.length === 0 ? `${name} is empty` : `${name} runs (${branch.length} ${branch.length === 1 ? "step" : "steps"})`;
+  return { passed, message: `${passed ? "True" : "False"}: ${description}. ${runs}` };
+}
+
+/**
+ * The list a loop goes through, or why it can't. The template must give a list itself
+ * (`{{ trigger.body.orders }}`); text that happens to look like one is not parsed.
+ */
+export function loopItems(step: LoopStep, scope: Scope): { items: unknown[] } | { problem: string } {
+  const value = renderString(step.config.items.trim(), scope, newBudget());
+  if (!Array.isArray(value)) {
+    const got = value === undefined || value === null || value === "" ? "nothing" : typeof value === "object" ? "an object" : `${typeof value === "string" ? "text" : `a ${typeof value}`}`;
+    return { problem: `${clip(step.config.items, 200)} gave ${got}, not a list` };
+  }
+  if (value.length > LIMITS.loopItems) {
+    return { problem: `The list has ${value.length} items, and a loop can go through at most ${LIMITS.loopItems}` };
+  }
+  return { items: value };
 }
 
 export function compare(left: unknown, op: FilterOp, right: string): boolean {

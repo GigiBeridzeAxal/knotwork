@@ -6,7 +6,19 @@
 export const LIMITS = {
   workspacesPerAccount: 5,
   workflowsPerWorkspace: 10,
+  /** Counting the steps inside if and loop blocks. */
   stepsPerWorkflow: 25,
+  /** How deep steps can nest: 1 is the top level, so 3 allows a block inside a block. */
+  stepDepth: 3,
+  /** Items one loop goes through. A longer list fails the step instead of being cut short. */
+  loopItems: 50,
+  /** Steps one run may run in total, counting every pass of every loop. */
+  stepRunsPerRun: 200,
+  secretsPerWorkspace: 20,
+  secretMinChars: 8,
+  secretMaxChars: 4_000,
+  /** How far a Stripe webhook's signed time may be from now (seconds). */
+  signatureToleranceSeconds: 300,
   /** A saved workflow (its trigger and every step's settings). */
   workflowBytes: 32_000,
   /** Test input for a manual run, and a webhook's body. */

@@ -6,11 +6,14 @@ import { giveBack, underLimit } from "./auth";
 import { chargeRunBytes, runBytes, STORAGE_FULL, STORAGE_HIGH, takeRunSlot } from "./db";
 import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
-import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
+import { compile, type Op } from "./program";
+import { loadSecrets, redactor, secretRefs } from "./secrets";
+import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loopItems, type Scope, type StepResult } from "./steps";
 
 /**
  * The engine. A run moves forward one step at a time and saves its place after every step, so
- * nothing is lost if the Worker stops. When a step fails it is retried later with backoff; a delay
+ * nothing is lost if the Worker stops. Steps inside `if` and `loop` blocks are flattened into one list
+ * first (worker/program.ts), so the place is still a single number. When a step fails it is retried later with backoff; a delay
  * step parks the run. The cron trigger (every minute) wakes parked runs up again.
  *
  * One bad run must never stop the others: everything a run does after it is claimed is caught and
@@ -28,7 +31,7 @@ const MAX_OUTPUT_BYTES = 16_000;
 const MAX_RUN_OUTPUT_BYTES = 64_000;
 /** A log line keeps only a preview of the step's output; the full output is in `outputs`. */
 const LOG_PREVIEW_BYTES = 1_000;
-const MAX_LOGS = 50;
+const MAX_LOGS = 100;
 /** Longest log message and run error kept, in UTF-8 bytes. Both show up in lists, so they stay short. */
 const MAX_MESSAGE = 1_000;
 const MAX_ERROR = 1_000;
@@ -63,7 +66,14 @@ const expiry = (from: number) => new Date(from + LIMITS.runHistoryDays * DAY);
 
 type WorkflowRef = Pick<Workflow, "id" | "name" | "steps" | "workspaceId"> & { ownerId: string };
 
-export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Trigger["type"], input: unknown) {
+export async function createRun(
+  c: Collections,
+  wf: WorkflowRef,
+  triggerType: Trigger["type"],
+  input: unknown,
+  /** For "Run again": the run whose input this one reuses. */
+  rerunOf?: string,
+) {
   const now = Date.now();
   const run: RunDoc = {
     _id: newRunId(),
@@ -79,6 +89,8 @@ export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Tr
     outputBytes: 0,
     stepIndex: 0,
     attempt: 0,
+    stepRuns: 0,
+    ...(rerunOf ? { rerunOf } : {}),
     claims: 0,
     // Ready now: the cron takes due runs in the order they became ready.
     nextRunAt: now,
@@ -184,8 +196,11 @@ async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, 
   await updateLastRun(c, run, "failed");
 }
 
-/** Move a run forward as far as it can go right now. Never throws. */
-export async function advance(c: Collections, runId: string): Promise<void> {
+/**
+ * Move a run forward as far as it can go right now. Never throws. `pepper` (AUTH_PEPPER) decrypts the
+ * workspace secrets the run uses; without it, steps that name a secret fail.
+ */
+export async function advance(c: Collections, runId: string, pepper = ""): Promise<void> {
   let run: Awaited<ReturnType<typeof claim>> = null;
   try {
     const started = Date.now();
@@ -195,47 +210,93 @@ export async function advance(c: Collections, runId: string): Promise<void> {
       await failRun(c, run, "The run stopped making progress, so Knotwork gave up on it");
       return;
     }
-    await step(c, run, started);
+    await step(c, run, started, pepper);
   } catch (err) {
     console.error(`run ${runId}`, err);
     if (run) await failRun(c, run, "Knotwork hit an internal error while running this step").catch(() => {});
   }
 }
 
-async function step(c: Collections, run: RunDoc, started: number) {
-  const steps = run.steps;
+/** A loop's output while it runs, as stored: the list and where the loop is in it. */
+interface StoredFrame {
+  items: unknown[];
+  index: number;
+  count: number;
+}
+
+const isFrame = (value: unknown): value is StoredFrame =>
+  typeof value === "object" && value !== null && Array.isArray((value as StoredFrame).items) && Number.isInteger((value as StoredFrame).index);
+
+/** A loop's output as templates see it: with the current item, so `{{ loop.item }}` works. */
+const withItem = (frame: StoredFrame): LoopFrame => ({ ...frame, item: frame.items[frame.index] });
+
+async function step(c: Collections, run: RunDoc, started: number, pepper: string) {
+  const ops = compile(run.steps);
+  // Only the secrets this run's steps name are read and decrypted, and only when it names any.
+  const refs = secretRefs(run.steps);
+  const secrets = refs.size ? await loadSecrets(c, pepper, run.workspaceId, refs) : {};
+  /** Hides secret values. Everything this run stores or passes on goes through it. */
+  const clean = redactor(secrets);
   const scope: Scope = {
     trigger: run.input,
     steps: { ...run.outputs },
     run: { id: run._id, startedAt: new Date(run.createdAt).toISOString() },
     workflow: { id: run.workflowId, name: run.workflowName },
+    secrets,
   };
+  // Loops the run is in the middle of: give their outputs the current item back.
+  for (const op of ops) {
+    if (op.kind === "loop" && isFrame(scope.steps[op.step.id])) scope.steps[op.step.id] = withItem(scope.steps[op.step.id] as StoredFrame);
+  }
+  const frame = (loopId: string | undefined) => (loopId && isFrame(scope.steps[loopId]) ? (scope.steps[loopId] as LoopFrame) : undefined);
+
   let index = run.stepIndex;
   let attempt = run.attempt;
   let outputBytes = run.outputBytes;
-  // Log ids only need to be unique and increasing within a run; one invocation logs fewer than 100.
-  let logId = started * 100;
+  let stepRuns = run.stepRuns ?? 0;
+  // Log ids only need to be unique and increasing within a run; an invocation logs at most
+  // LIMITS.stepRunsPerRun lines, and the next one starts at least a millisecond later.
+  let logId = started * 1000;
 
-  const entry = (s: Step, status: StepLog["status"], at: number, message: string | null, output?: unknown): LogDoc => ({
-    id: logId++,
-    stepId: s.id,
-    stepName: s.name,
-    stepType: s.type,
-    attempt: attempt + 1,
-    status,
-    message: message === null ? null : clipBytes(message, MAX_MESSAGE),
-    output: keepable(output, LOG_PREVIEW_BYTES).value,
-    startedAt: at,
-    durationMs: Date.now() - at,
-  });
-  const pool = run.triggerType === "schedule" ? "schedule" : "demand";
+  type Place = { step: Step; loops: string[]; depth: number };
+  const entry = (at: Place, status: StepLog["status"], startedAt: number, message: string | null, output?: unknown): LogDoc => {
+    const pass = at.loops
+      .map((id) => frame(id))
+      .map((f) => (f ? `${f.index + 1} of ${f.count}` : ""))
+      .filter(Boolean)
+      .join(", ");
+    return {
+      id: logId++,
+      stepId: at.step.id,
+      stepName: at.step.name,
+      stepType: at.step.type,
+      attempt: attempt + 1,
+      status,
+      message: message === null ? null : clipBytes(clean(message), MAX_MESSAGE),
+      output: keepable(clean(output), LOG_PREVIEW_BYTES).value,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      ...(at.depth ? { depth: at.depth } : {}),
+      ...(pass ? { pass } : {}),
+    };
+  };
+  // A rerun is started by hand, so it counts with the on-demand runs even when it repeats a scheduled one.
+  const pool = run.triggerType === "schedule" && !run.rerunOf ? "schedule" : "demand";
   // What this invocation stores (outputs, logs) counts against the hourly byte budgets. The most it
   // can store is reserved up front, in one charge, and what it didn't use is given back at the end.
   let used = 0;
+  let logsCharged = 0;
   const pushLog = (log: LogDoc) => {
-    used += logBytes(log);
+    // The run keeps its last MAX_LOGS lines, so lines past that replace older ones and add nothing.
+    if (logsCharged++ < MAX_LOGS) used += logBytes(log);
     return { logs: { $each: [log], $slice: -MAX_LOGS } };
   };
+
+  // A step inside a loop writes its output again on every pass, replacing the last one. What counts
+  // toward the run's 64 KB is what is stored now, so a replaced output gives its bytes back.
+  const sizes = new Map<string, number>();
+  const sizeOf = (id: string) =>
+    sizes.get(id) ?? (Object.hasOwn(run.outputs, id) ? utf8Bytes(JSON.stringify(run.outputs[id]) ?? "null") : 0);
 
   const finish = async (status: Run["status"], error: string | null, log?: LogDoc) => {
     await c.runs.updateOne(
@@ -243,9 +304,10 @@ async function step(c: Collections, run: RunDoc, started: number) {
       {
         $set: {
           status,
-          error: error === null ? null : clipBytes(error, MAX_ERROR),
+          error: error === null ? null : clipBytes(clean(error), MAX_ERROR),
           stepIndex: index,
           attempt,
+          stepRuns,
           claims: 0,
           leaseUntil: null,
           nextRunAt: null,
@@ -268,6 +330,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
           error: note,
           stepIndex: index,
           attempt,
+          stepRuns,
           claims: 0,
           leaseUntil: null,
           nextRunAt,
@@ -280,10 +343,14 @@ async function step(c: Collections, run: RunDoc, started: number) {
   };
   const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
 
-  const stepsLeft = steps.length - index;
+  // Without loops each step writes once. With them, the most the run can still write is what is left
+  // of its step allowance.
+  const writesLeft = ops.some((op) => op.kind === "loop")
+    ? Math.max(1, LIMITS.stepRunsPerRun - stepRuns)
+    : ops.length - index;
   const reserve =
-    Math.max(0, Math.min(MAX_RUN_OUTPUT_BYTES + MAX_OUTPUT_BYTES - outputBytes, stepsLeft * (MAX_OUTPUT_BYTES + 40))) +
-    Math.min(stepsLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
+    Math.max(0, Math.min(MAX_RUN_OUTPUT_BYTES + MAX_OUTPUT_BYTES - outputBytes, writesLeft * (MAX_OUTPUT_BYTES + 40))) +
+    Math.min(writesLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
   const noRoom = await chargeRunBytes(c, run.ownerId, pool, reserve, started);
   if (noRoom) {
     // No step has run in this invocation yet, so nothing is repeated: the run waits, and says why. It
@@ -305,22 +372,76 @@ async function step(c: Collections, run: RunDoc, started: number) {
     await chargeRunBytes(c, run.ownerId, pool, used - reserve, started, false);
   }
 
+  /**
+   * What one operation came to. `next` is where the run goes after an "ok"; `logged` is what the log
+   * line shows when that isn't the stored output (a loop stores its list, the log shows the count).
+   */
+  type Outcome = StepResult & { next?: number; logged?: unknown };
+
+  async function work(op: Exclude<Op, { kind: "jump" }>): Promise<Outcome> {
+    // A step that names a secret nobody has set fails saying so, instead of sending an empty value.
+    const missing = [...secretRefs(op.step.config)].filter((name) => !Object.hasOwn(secrets, name));
+    if (missing.length) {
+      return { kind: "fail", message: `The secret ${missing.join(", ")} isn't set in this workspace. Add it under Settings, then Secrets.` };
+    }
+    switch (op.kind) {
+      case "step":
+        return executeStep(op.step, scope, options);
+      case "if": {
+        const { passed, message } = evaluateIf(op.step, scope);
+        return { kind: "ok", output: { result: passed, branch: passed ? "then" : "else" }, message, next: passed ? index + 1 : op.elseAt };
+      }
+      case "loop": {
+        const list = loopItems(op.step, scope);
+        if ("problem" in list) return { kind: "fail", message: list.problem };
+        const count = list.items.length;
+        if (count === 0) return { kind: "ok", output: { count }, message: "The list is empty, so there is nothing to go through", next: op.endAt };
+        const stored: StoredFrame = { items: list.items, index: 0, count };
+        return { kind: "ok", output: stored, logged: { count }, message: `Going through ${count} ${count === 1 ? "item" : "items"}`, next: index + 1 };
+      }
+      case "next": {
+        const at = frame(op.step.id);
+        if (!at) return { kind: "fail", message: "The loop lost its place" };
+        if (at.index + 1 < at.count) {
+          const stored: StoredFrame = { items: at.items, index: at.index + 1, count: at.count };
+          return { kind: "ok", output: stored, next: op.bodyAt };
+        }
+        return { kind: "ok", output: { count: at.count }, next: index + 1 };
+      }
+    }
+  }
+
   async function runSteps() {
     if (run.error) await c.runs.updateOne({ _id: run._id }, { $set: { error: null } }); // a pause note
     await updateLastRun(c, run, "running");
 
-    while (index < steps.length) {
+    while (index < ops.length) {
+      const op = ops[index];
+      if (op.kind === "jump") {
+        index = op.to;
+        continue;
+      }
       if (Date.now() - started > TIME_BUDGET_MS) {
         // Out of time for this invocation: hand the run to the next tick.
         await park(Date.now());
         return;
       }
 
-      const current = steps[index];
+      const current = op.step;
+      scope.loop = frame(op.loops.at(-1));
       const at = Date.now();
-      let result;
+      if (stepRuns >= LIMITS.stepRunsPerRun) {
+        await finish(
+          "failed",
+          `The run reached ${LIMITS.stepRunsPerRun} steps, the most one run can take (every pass of a loop counts)`,
+          entry(op, "failed", at, "Too many steps"),
+        );
+        return;
+      }
+
+      let result: Outcome;
       try {
-        result = await executeStep(current, scope, options);
+        result = await work(op);
       } catch (err) {
         result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
       }
@@ -328,43 +449,55 @@ async function step(c: Collections, run: RunDoc, started: number) {
       switch (result.kind) {
         case "ok":
         case "wait": {
-          const kept = keepable(result.output);
-          outputBytes += kept.bytes;
-          if (outputBytes > MAX_RUN_OUTPUT_BYTES) {
+          const kept = keepable(clean(result.output));
+          const looping = op.kind === "loop" || op.kind === "next";
+          if (looping && isFrame(result.output) && !isFrame(kept.value)) {
             await finish(
               "failed",
-              `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`,
-              entry(current, "failed", at, "Output too large"),
+              `${current.name}: the list is larger than ${MAX_OUTPUT_BYTES / 1000} KB, the most a loop can go through`,
+              entry(op, "failed", at, "List too large"),
             );
             return;
           }
-          const log = entry(current, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, kept.value);
-          used += kept.bytes;
-          scope.steps[current.id] = kept.value;
-          index += 1;
+          const grow = kept.bytes - sizeOf(current.id);
+          if (outputBytes + grow > MAX_RUN_OUTPUT_BYTES) {
+            await finish(
+              "failed",
+              `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`,
+              entry(op, "failed", at, "Output too large"),
+            );
+            return;
+          }
+          outputBytes = Math.max(0, outputBytes + grow);
+          sizes.set(current.id, kept.bytes);
+          used += Math.max(0, grow);
+          // Moving to the next item writes the loop's new place but no log line.
+          const log =
+            op.kind === "next"
+              ? null
+              : entry(op, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, result.logged ?? kept.value);
+          scope.steps[current.id] = looping && isFrame(kept.value) ? withItem(kept.value) : kept.value;
+          index = result.kind === "ok" && result.next !== undefined ? result.next : index + 1;
           attempt = 0;
-          const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };
+          stepRuns += 1;
+          const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0, stepRuns };
+          const push = log ? { $push: pushLog(log) } : {};
           if (result.kind === "wait") {
             const nextRunAt = Date.now() + result.seconds * 1000;
             await c.runs.updateOne(
               { _id: run._id },
-              {
-                $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) },
-                $push: pushLog(log),
-              },
+              { $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) }, ...push },
             );
             await updateLastRun(c, run, "waiting");
             return;
           }
-          await c.runs.updateOne(
-            { _id: run._id },
-            { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, $push: pushLog(log) },
-          );
+          await c.runs.updateOne({ _id: run._id }, { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, ...push });
           break;
         }
         case "stop": {
-          const log = entry(current, "stopped", at, result.message);
+          const log = entry(op, "stopped", at, result.message);
           index += 1;
+          stepRuns += 1;
           await finish("stopped", null, log);
           return;
         }
@@ -372,14 +505,14 @@ async function step(c: Collections, run: RunDoc, started: number) {
           if (attempt < current.retry.max) {
             const wait = current.retry.backoffSeconds * 4 ** attempt;
             const message = `${result.message}. Trying again in ${formatSeconds(wait)} (${attempt + 1} of ${current.retry.max} retries)`;
-            const log = entry(current, "retrying", at, message, result.output);
+            const log = entry(op, "retrying", at, message, result.output);
             attempt += 1;
             await park(Date.now() + wait * 1000, log);
           } else {
             await finish(
               "failed",
               `${current.name}: ${result.message}`,
-              entry(current, "failed", at, result.message, result.output),
+              entry(op, "failed", at, result.message, result.output),
             );
           }
           return;
@@ -711,7 +844,7 @@ export async function tick(
   }
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.
-  await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
+  await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id, pepper));
 
   // Once an hour, make sure every index exists (a no-op when they do).
   if (minuteOfHour === 7) {

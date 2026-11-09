@@ -6,6 +6,8 @@ export const STEP_TYPES: { type: StepType; label: string; blurb: string }[] = [
   { type: "filter", label: "Filter", blurb: "Stop the run unless a condition holds" },
   { type: "delay", label: "Delay", blurb: "Wait, then carry on" },
   { type: "log", label: "Log", blurb: "Write a line to the run log" },
+  { type: "if", label: "If / else", blurb: "Run one set of steps or another" },
+  { type: "loop", label: "Loop", blurb: "Run steps once per item of a list" },
 ];
 
 export function newStep(type: StepType, taken: string[]): Step {
@@ -30,6 +32,10 @@ export function newStep(type: StepType, taken: string[]): Step {
       return { id, name: "Delay", type, retry, config: { seconds: 60 } };
     case "log":
       return { id, name: "Log", type, retry, config: { message: "Run {{ run.id }} reached this step" } };
+    case "if":
+      return { id, name: "If", type, retry, config: { left: "{{ trigger.body.amount }}", op: "gt", right: "100" }, then: [], else: [] };
+    case "loop":
+      return { id, name: "Loop", type, retry, config: { items: "{{ trigger.body.items }}" }, steps: [] };
   }
 }
 

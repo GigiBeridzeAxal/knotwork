@@ -46,6 +46,7 @@ if (users.length !== names.length) {
 const ids = users.map((u) => u._id);
 await db.collection("runs").deleteMany({ ownerId: { $in: ids } });
 await db.collection("workflows").deleteMany({ ownerId: { $in: ids } });
+await db.collection("secrets").deleteMany({ ownerId: { $in: ids } });
 await db.collection("workspaces").deleteMany({ ownerId: { $in: ids }, personal: false });
 await db.collection("counters").deleteMany({});
 await client.close();

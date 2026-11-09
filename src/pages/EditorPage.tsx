@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { Run, Step, StepType, Trigger, Workflow, WorkflowInput } from "../../shared/schema";
+import { type Run, type SecretInfo, signatureProviders, type Step, type Trigger, walkSteps, type Workflow, type WorkflowInput } from "../../shared/schema";
 import { validateCron } from "../../shared/cron";
 import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
-import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
+import { BLANK } from "../../shared/examples";
 import { Link, navigate } from "../router";
 import { useFindElsewhere } from "../session";
-import { StepEditor } from "./StepEditor";
+import { StepList } from "./StepList";
 
 const CRON_PRESETS = [
   { label: "Every 5 minutes", cron: "*/5 * * * *" },
@@ -22,7 +22,6 @@ function toInput(wf: Workflow): WorkflowInput {
 export function EditorPage({ id }: { id: string | null }) {
   const [saved, setSaved] = useState<Workflow | null>(null);
   const [draft, setDraft] = useState<WorkflowInput | null>(id ? null : structuredClone(BLANK));
-  const [openStep, setOpenStep] = useState<number | null>(null);
   const [issues, setIssues] = useState<Issue[]>([]);
   const [message, setMessage] = useState("");
   /** Someone saved this workflow elsewhere (another tab or device) after it was opened here. */
@@ -35,6 +34,19 @@ export function EditorPage({ id }: { id: string | null }) {
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
   const findElsewhere = useFindElsewhere();
+  /** The workspace's secret names, to offer as {{ secrets.NAME }} and as webhook signing secrets. */
+  const [secrets, setSecrets] = useState<SecretInfo[]>([]);
+  useEffect(() => {
+    let stale = false;
+    const load = () => api.secrets().then((list) => !stale && setSecrets(list), () => {});
+    load();
+    // Settings opens in another tab from here; coming back picks up a secret added there.
+    window.addEventListener("focus", load);
+    return () => {
+      stale = true;
+      window.removeEventListener("focus", load);
+    };
+  }, []);
 
   /** True once the user has changed the draft: a late or repeated load must not replace their edit. */
   const touched = useRef(false);
@@ -73,8 +85,6 @@ export function EditorPage({ id }: { id: string | null }) {
   };
   const setSteps = (steps: Step[]) => update({ steps });
 
-  const stepErrors = (i: number) =>
-    issues.filter((x) => x.path[0] === "steps" && x.path[1] === i).map((x) => `${x.path.slice(2).join(".") || "step"}: ${x.message}`);
   const fieldError = (name: string) => issues.find((x) => x.path[0] === name)?.message;
   const cronError = draft.trigger.type === "schedule" ? validateCron(draft.trigger.cron) : null;
 
@@ -97,11 +107,7 @@ export function EditorPage({ id }: { id: string | null }) {
         setConflict(e.data.current as Workflow);
         return null;
       }
-      if (e instanceof ApiError) {
-        setIssues(e.issues ?? []);
-        const firstStep = e.issues.find((x) => x.path[0] === "steps");
-        if (firstStep && typeof firstStep.path[1] === "number") setOpenStep(firstStep.path[1]);
-      }
+      if (e instanceof ApiError) setIssues(e.issues ?? []);
       setMessage((e as Error).message);
       return null;
     } finally {
@@ -139,20 +145,10 @@ export function EditorPage({ id }: { id: string | null }) {
     navigate("/workflows");
   }
 
-  function addStep(type: StepType) {
-    const step = newStep(type, draft!.steps.map((s) => s.id));
-    setSteps([...draft!.steps, step]);
-    setOpenStep(draft!.steps.length);
-  }
-
-  function move(i: number, dir: -1 | 1) {
-    const steps = [...draft!.steps];
-    [steps[i], steps[i + dir]] = [steps[i + dir], steps[i]];
-    setSteps(steps);
-    setVersion((v) => v + 1);
-    if (openStep === i) setOpenStep(i + dir);
-    else if (openStep === i + dir) setOpenStep(i);
-  }
+  const takenIds: string[] = [];
+  walkSteps(draft.steps, (step) => takenIds.push(step.id));
+  // Problems with the step list as a whole (too many steps), not with one step in it.
+  const listError = issues.find((x) => x.path[0] === "steps" && x.path.length === 1)?.message;
 
   const hookUrl = saved ? `${location.origin}/hooks/${saved.hookKey}` : "";
 
@@ -240,53 +236,26 @@ export function EditorPage({ id }: { id: string | null }) {
       )}
 
       <div className="grid gap-8 lg:grid-cols-[1fr_320px]">
-        <div className="flex flex-col">
+        {/* min-w-0: a grid column is otherwise as wide as its longest unbroken line (the webhook URL). */}
+        <div className="flex min-w-0 flex-col">
           <TriggerCard
             trigger={draft.trigger}
             onChange={(trigger) => update({ trigger })}
             hookUrl={hookUrl}
             cronError={cronError}
+            secrets={secrets}
           />
 
-          {draft.steps.map((step, i) => (
-            <div key={`${version}-${i}-${step.type}`} className="flex flex-col">
-              <Wire />
-              <StepEditor
-                step={step}
-                index={i}
-                total={draft.steps.length}
-                refs={["trigger.body", ...draft.steps.slice(0, i).map((s) => `steps.${s.id}`), "run.id", "workflow.name"]}
-                errors={stepErrors(i)}
-                open={openStep === i}
-                onToggle={() => setOpenStep(openStep === i ? null : i)}
-                onChange={(s) => setSteps(draft.steps.map((x, j) => (j === i ? s : x)))}
-                onMove={(dir) => move(i, dir)}
-                onRemove={() => {
-                  setSteps(draft.steps.filter((_, j) => j !== i));
-                  setVersion((v) => v + 1);
-                  setOpenStep(null);
-                }}
-              />
-            </div>
-          ))}
-
-          <Wire dashed />
-          <Card className="flex flex-col gap-3 border-dashed p-4">
-            <Eyebrow>Add a step</Eyebrow>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-              {STEP_TYPES.map((t) => (
-                <button
-                  key={t.type}
-                  type="button"
-                  onClick={() => addStep(t.type)}
-                  className="flex min-h-11 flex-col items-start gap-1 rounded-[10px] border border-line bg-ink p-3 text-left hover:border-edge"
-                >
-                  <span className="text-sm font-medium">{t.label}</span>
-                  <span className="text-xs text-muted">{t.blurb}</span>
-                </button>
-              ))}
-            </div>
-          </Card>
+          <StepList
+            steps={draft.steps}
+            onChange={setSteps}
+            issues={issues}
+            refs={["trigger.body"]}
+            tailRefs={["run.id", "workflow.name", ...secrets.map((x) => `secrets.${x.name}`)]}
+            takenIds={takenIds}
+            rev={version}
+          />
+          {listError && <p className="mt-3 text-[13px] text-fail">{listError}</p>}
         </div>
 
         <aside className="flex flex-col gap-6">
@@ -333,24 +302,18 @@ export function EditorPage({ id }: { id: string | null }) {
   );
 }
 
-function Wire({ dashed = false }: { dashed?: boolean }) {
-  return (
-    <div className="flex h-8 justify-center" aria-hidden="true">
-      <div className={cn("w-0.5", dashed ? "border-l-2 border-dashed border-edge" : "bg-wire")} />
-    </div>
-  );
-}
-
 function TriggerCard({
   trigger,
   onChange,
   hookUrl,
   cronError,
+  secrets,
 }: {
   trigger: Trigger;
   onChange: (t: Trigger) => void;
   hookUrl: string;
   cronError: string | null;
+  secrets: SecretInfo[];
 }) {
   const [copied, setCopied] = useState(false);
   const types: { type: Trigger["type"]; label: string; blurb: string }[] = [
@@ -429,6 +392,77 @@ function TriggerCard({
         ) : (
           <p className="text-[13px] text-muted">Save the workflow to get its webhook URL.</p>
         ))}
+
+      {trigger.type === "webhook" && <SignatureCheck trigger={trigger} onChange={onChange} secrets={secrets} />}
     </Card>
+  );
+}
+
+const PROVIDER = {
+  github: { label: "GitHub", where: "the Secret field of the webhook in the repository's settings" },
+  stripe: { label: "Stripe", where: "the signing secret (whsec_…) of the endpoint in Stripe's dashboard" },
+} as const;
+
+/** Lets a webhook refuse calls that weren't signed by GitHub or Stripe with a secret kept in the workspace. */
+function SignatureCheck({
+  trigger,
+  onChange,
+  secrets,
+}: {
+  trigger: Extract<Trigger, { type: "webhook" }>;
+  onChange: (t: Trigger) => void;
+  secrets: SecretInfo[];
+}) {
+  const verify = trigger.verify;
+  // A secret the workflow names that has since been deleted still shows, so it isn't silently swapped.
+  const names = [...new Set([...secrets.map((x) => x.name), ...(verify ? [verify.secret] : [])])];
+  const missing = verify && !secrets.some((x) => x.name === verify.secret);
+  return (
+    <div className="flex flex-col gap-3 border-t border-line pt-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field label="Check the sender's signature" htmlFor="verify-provider">
+          <select
+            id="verify-provider"
+            className={inputClass}
+            value={verify?.provider ?? ""}
+            onChange={(e) => {
+              const provider = signatureProviders.find((p) => p === e.target.value);
+              onChange(provider ? { type: "webhook", verify: { provider, secret: verify?.secret ?? names[0] ?? "" } } : { type: "webhook" });
+            }}
+          >
+            <option value="">Off: anyone with the URL</option>
+            {signatureProviders.map((p) => (
+              <option key={p} value={p}>
+                {PROVIDER[p].label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {verify && (
+          <Field label="Signing secret" htmlFor="verify-secret" error={!missing ? undefined : verify.secret ? `${verify.secret} isn't in this workspace's secrets` : "Add the signing secret in Settings first"}>
+            <select
+              id="verify-secret"
+              className={cn(inputClass, "font-mono")}
+              value={verify.secret}
+              onChange={(e) => onChange({ type: "webhook", verify: { ...verify, secret: e.target.value } })}
+            >
+              {names.length === 0 && <option value="">No secrets yet</option>}
+              {names.map((n) => (
+                <option key={n}>{n}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+      </div>
+      {verify && (
+        <p className="text-[13px] text-muted">
+          Calls without a valid {PROVIDER[verify.provider].label} signature are refused and start no run. Save {PROVIDER[verify.provider].where} as a secret in{" "}
+          <a href="/settings" target="_blank" rel="noreferrer" className="text-soft underline underline-offset-2 hover:text-text">
+            Settings
+          </a>{" "}
+          (opens in a new tab, so nothing here is lost), then pick it here.
+        </p>
+      )}
+    </div>
   );
 }
