@@ -18,6 +18,14 @@ attempt is written to a run log you can open in the dashboard.
 - **Three triggers.** A private webhook URL per workflow, a cron schedule (UTC), or a manual run with test input.
 - **Five step types.** `http` calls any API, `transform` reshapes data, `filter` stops a run unless a
   condition holds, `delay` parks the run and picks it up later, and `log` writes a line.
+- **Ready-made steps for Slack, Discord, Telegram and GitHub.** Forms instead of raw HTTP: post to a Slack or
+  Discord channel webhook, send a message as a Telegram bot, or open a GitHub issue, comment on an issue or pull
+  request, or read a repository. Credentials go in a workspace secret (`{{ secrets.DISCORD_WEBHOOK }}`), are
+  sent only to that service (`hooks.slack.com`, `discord.com/api/webhooks/`, `api.telegram.org`,
+  `api.github.com`, no redirects followed) and never appear in step messages. Discord mentions of
+  `@everyone` and roles are switched off, so text from a webhook can't mass-ping a server. Each service is one
+  file in `shared/connectors/` (settings) and one in `worker/connectors/` (sending). The example
+  **New GitHub star to Discord** sets up the whole flow: add its webhook URL to a repo with the Stars event.
 - **Templates between steps.** Any string can use `{{ trigger.body.id }}` or `{{ steps.fetch.body.items.0.name }}`.
   A string that is only one template keeps the value's type, so arrays and numbers pass through intact.
   Templates are plain lookups: nothing is evaluated, so a workflow can't run arbitrary code.
@@ -254,7 +262,7 @@ person from using up the free plans:
 ## Roadmap
 
 - Inviting other people into a workspace
-- Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
+- Secrets per workspace, usable in templates (`{{ secrets.SLACK_WEBHOOK }}`)
 - Branching (if / else) and loops over arrays
 - A visual canvas editor
 - Signed webhooks (GitHub, Stripe) and replaying a past run

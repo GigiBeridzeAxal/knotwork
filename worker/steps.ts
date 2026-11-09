@@ -1,5 +1,9 @@
 import type { FilterOp, Step } from "../shared/schema";
 import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
+import { discord } from "./connectors/discord";
+import { github } from "./connectors/github";
+import { slack } from "./connectors/slack";
+import { telegram } from "./connectors/telegram";
 
 export type StepResult =
   | { kind: "ok"; output: unknown; message?: string }
@@ -54,6 +58,14 @@ export async function executeStep(step: Step, scope: Scope, options: StepOptions
       const message = renderText(step.config.message, scope, budget);
       return { kind: "ok", output: { message }, message: clip(message, 2_000) };
     }
+    case "slack":
+      return slack(step, scope, options, budget);
+    case "discord":
+      return discord(step, scope, options, budget);
+    case "telegram":
+      return telegram(step, scope, options, budget);
+    case "github":
+      return github(step, scope, options, budget);
   }
 }
 
@@ -95,18 +107,59 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     }
   }
 
+  const sent = await send({ method: config.method, url: parsed, headers, body }, options);
+  if (sent.kind === "fail") return sent;
+  const { res, body: responseBody } = sent;
+  const output = {
+    status: res.status,
+    ok: res.ok,
+    headers: { "content-type": res.headers.get("content-type") ?? "" },
+    body: responseBody,
+  };
+  const message = `${config.method} ${parsed.host}${clip(parsed.pathname, 200)} → ${res.status}`;
+  if (!res.ok && config.failOnError) return { kind: "fail", message, output };
+  return { kind: "ok", output, message };
+}
+
+/** A request a step has already rendered. Nothing in it is a template any more. */
+export interface Outbound {
+  method: string;
+  url: URL;
+  headers: Headers;
+  body?: string;
+  /** Redirects to follow. Ready-made steps pass 0: their URLs carry credentials and never redirect. */
+  maxRedirects?: number;
+}
+
+export type Sent = { kind: "fail"; message: string } | { kind: "sent"; res: Response; body: unknown };
+
+/**
+ * Sends a rendered request with every guard the http step has: no private addresses, the demo's host
+ * list, a timeout, redirects checked hop by hop, and a size cap on the answer. Messages name only the
+ * host, never the path or query, because ready-made steps keep tokens there.
+ */
+export async function send(req: Outbound, options: StepOptions): Promise<Sent> {
+  const { url: parsed, headers } = req;
+  if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
+  if (privateHost(parsed.hostname)) return { kind: "fail", message: `${parsed.hostname} is a private address, which steps can't call` };
+  const blocked = notAllowed(parsed.hostname, options);
+  if (blocked) return { kind: "fail", message: blocked };
+  const maxRedirects = req.maxRedirects ?? MAX_REDIRECTS;
   // Redirects are followed by hand, so every hop is checked against private addresses too.
   let res: Response;
   const signal = AbortSignal.timeout(HTTP_TIMEOUT_MS);
   try {
     let target = parsed;
-    let method: string = config.method;
-    let sendBody = body;
+    let method = req.method;
+    let sendBody = req.body;
     for (let hop = 0; ; hop++) {
       res = await fetch(target.toString(), { method, headers, body: sendBody, redirect: "manual", signal });
       const location = res.headers.get("location");
       if (res.status < 300 || res.status > 399 || !location) break;
-      if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${parsed.host} redirected more than ${MAX_REDIRECTS} times` };
+      await res.body?.cancel();
+      if (hop >= maxRedirects) {
+        return { kind: "fail", message: maxRedirects === 0 ? `${parsed.host} answered with a redirect, which this step doesn't follow` : `${parsed.host} redirected more than ${maxRedirects} times` };
+      }
       const next = new URL(location, target);
       if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
         return { kind: "fail", message: `${target.host} redirected to ${next.host}, which steps can't call` };
@@ -117,32 +170,23 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
         method = "GET";
         sendBody = undefined;
       }
-      await res.body?.cancel();
       target = next;
     }
   } catch (err) {
     const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
-    return { kind: "fail", message: `${config.method} ${parsed.host} failed: ${reason}` };
+    return { kind: "fail", message: `${req.method} ${parsed.host} failed: ${reason}` };
   }
 
   const text = await readLimited(res, MAX_RESPONSE_BYTES);
-  let responseBody: unknown = text;
+  let body: unknown = text;
   if (text && (res.headers.get("content-type") ?? "").includes("json")) {
     try {
-      responseBody = JSON.parse(text);
+      body = JSON.parse(text);
     } catch {
       // Not valid JSON after all; keep the text.
     }
   }
-  const output = {
-    status: res.status,
-    ok: res.ok,
-    headers: { "content-type": res.headers.get("content-type") ?? "" },
-    body: responseBody,
-  };
-  const message = `${config.method} ${parsed.host}${clip(parsed.pathname, 200)} → ${res.status}`;
-  if (!res.ok && config.failOnError) return { kind: "fail", message, output };
-  return { kind: "ok", output, message };
+  return { kind: "sent", res, body };
 }
 
 async function readLimited(res: Response, limit: number): Promise<string> {

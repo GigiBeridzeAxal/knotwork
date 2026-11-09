@@ -1,4 +1,7 @@
-import { EXAMPLES } from "../shared/examples";
+import { EXAMPLES as ALL_EXAMPLES } from "../shared/examples";
+
+// Examples the demo can run. Ready-made steps need secrets and hosts the demo doesn't allow.
+const EXAMPLES = ALL_EXAMPLES.filter((example) => example.demo !== false);
 import { newHookKey } from "./auth";
 import type { Collections } from "./mongo";
 

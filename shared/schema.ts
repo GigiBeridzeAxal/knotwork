@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { minutesBetweenRuns, validateCron } from "./cron";
 import { LIMITS } from "./limits";
+import { discordConfig } from "./connectors/discord";
+import { githubConfig } from "./connectors/github";
+import { slackConfig } from "./connectors/slack";
+import { telegramConfig } from "./connectors/telegram";
 
 /** A step id is how later steps refer to this step's output: `{{ steps.<id>.body }}`. */
 const stepId = z
@@ -73,12 +77,22 @@ export const logStep = z.object({
   }),
 });
 
+// Ready-made steps: one file each in shared/connectors (settings) and worker/connectors (sending).
+export const slackStep = z.object({ ...base, type: z.literal("slack"), config: slackConfig });
+export const discordStep = z.object({ ...base, type: z.literal("discord"), config: discordConfig });
+export const telegramStep = z.object({ ...base, type: z.literal("telegram"), config: telegramConfig });
+export const githubStep = z.object({ ...base, type: z.literal("github"), config: githubConfig });
+
 export const stepSchema = z.discriminatedUnion("type", [
   httpStep,
   transformStep,
   filterStep,
   delayStep,
   logStep,
+  slackStep,
+  discordStep,
+  telegramStep,
+  githubStep,
 ]);
 
 export const triggerSchema = z.discriminatedUnion("type", [

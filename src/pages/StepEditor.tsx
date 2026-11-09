@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { filterOps, type FilterOp, type Step } from "../../shared/schema";
 import { Button, cn, Eyebrow, Field, inputClass, textareaClass } from "../components/ui";
-import { STEP_TYPES } from "../../shared/examples";
+import { CONNECTOR_TYPES, STEP_TYPES } from "../../shared/examples";
+import { ConnectorFields } from "./ConnectorFields";
 
 const OP_LABELS: Record<FilterOp, string> = {
   equals: "equals",
@@ -20,7 +21,14 @@ const TYPE_COLOR: Record<Step["type"], string> = {
   filter: "text-muted",
   delay: "text-muted",
   log: "text-muted",
+  slack: "text-muted",
+  discord: "text-muted",
+  telegram: "text-muted",
+  github: "text-muted",
 };
+
+const isConnector = (step: Step): step is Extract<Step, { type: (typeof CONNECTOR_TYPES)[number] }> =>
+  (CONNECTOR_TYPES as readonly string[]).includes(step.type);
 
 /** JSON when it parses, the raw text when it doesn't (a plain string is a valid body or output). */
 function parseLoose(text: string): unknown {
@@ -39,7 +47,7 @@ function show(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function JsonArea({
+export function JsonArea({
   id,
   value,
   onChange,
@@ -248,7 +256,9 @@ export function StepEditor({
             </Field>
           )}
 
-          {step.type === "http" && (
+          {isConnector(step) && <ConnectorFields step={step} uid={uid} setConfig={setConfig} />}
+
+          {(step.type === "http" || isConnector(step)) && (
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Retries if it fails" htmlFor={`${uid}-retries`}>
                 <select
