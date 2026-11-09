@@ -19,10 +19,21 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_REDIRECTS = 5;
 const USER_AGENT = "Knotwork/0.1 (+https://github.com/GigiBeridzeAxal/knotwork)";
 
-export async function executeStep(step: Step, scope: Scope): Promise<StepResult> {
+/**
+ * Hosts the shared demo account's http steps may call. Anyone can open the demo without an account,
+ * so it must not be a free, anonymous way to send requests anywhere.
+ */
+export const DEMO_HOSTS = ["api.github.com", "httpbin.org", "jsonplaceholder.typicode.com", "postman-echo.com", "example.com"];
+
+export interface StepOptions {
+  /** When set, http steps may only call these hosts. */
+  allowHosts?: readonly string[];
+}
+
+export async function executeStep(step: Step, scope: Scope, options: StepOptions = {}): Promise<StepResult> {
   switch (step.type) {
     case "http":
-      return http(step, scope);
+      return http(step, scope, options);
     case "transform":
       return { kind: "ok", output: render(step.config.output, scope) };
     case "filter":
@@ -41,7 +52,10 @@ export async function executeStep(step: Step, scope: Scope): Promise<StepResult>
   }
 }
 
-async function http(step: Extract<Step, { type: "http" }>, scope: Scope): Promise<StepResult> {
+/** Headers that carry credentials. They're dropped when a redirect leads to another host. */
+const CREDENTIAL_HEADERS = ["authorization", "proxy-authorization", "cookie", "x-api-key"];
+
+async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options: StepOptions): Promise<StepResult> {
   const { config } = step;
   const url = renderText(config.url, scope).trim();
   let parsed: URL;
@@ -54,6 +68,8 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope): Promis
     return { kind: "fail", message: "Only http and https URLs can be called" };
   }
   if (privateHost(parsed.hostname)) return { kind: "fail", message: `${parsed.hostname} is a private address, which steps can't call` };
+  const blocked = notAllowed(parsed.hostname, options);
+  if (blocked) return { kind: "fail", message: blocked };
 
   const headers = new Headers({ "user-agent": USER_AGENT });
   for (const [name, value] of Object.entries(config.headers)) {
@@ -84,9 +100,11 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope): Promis
       if (res.status < 300 || res.status > 399 || !location) break;
       if (hop === MAX_REDIRECTS) return { kind: "fail", message: `${parsed.host} redirected more than ${MAX_REDIRECTS} times` };
       const next = new URL(location, target);
-      if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname)) {
+      if ((next.protocol !== "https:" && next.protocol !== "http:") || privateHost(next.hostname) || notAllowed(next.hostname, options)) {
         return { kind: "fail", message: `${target.host} redirected to ${next.host}, which steps can't call` };
       }
+      // Credentials set for one host must not be handed to another one.
+      if (next.host !== target.host) for (const name of CREDENTIAL_HEADERS) headers.delete(name);
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST")) {
         method = "GET";
         sendBody = undefined;
@@ -197,6 +215,13 @@ export function formatSeconds(seconds: number): string {
 }
 
 
+function notAllowed(hostname: string, options: StepOptions): string | null {
+  if (!options.allowHosts) return null;
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (options.allowHosts.includes(host)) return null;
+  return `The demo account can only call ${options.allowHosts.join(", ")}. Create a free account to call ${host}.`;
+}
+
 /**
  * Hosts a step must not call: localhost, and literal IPs in private, loopback, link-local, CGNAT and
  * unique-local ranges. A Worker can't reach these in production anyway; this keeps it that way in
@@ -215,8 +240,12 @@ export function privateHost(hostname: string): boolean {
   }
   if (host.includes(":")) {
     if (host === "::" || host === "::1") return true;
-    if (host.startsWith("::ffff:")) return true;
-    return /^(fc|fd|fe8|fe9|fea|feb)/.test(host);
+    // IPv4-mapped and IPv4-compatible (::/96), NAT64 (64:ff9b::/96) and 6to4 (2002::/16) addresses
+    // all lead to an IPv4 address, which may be a private one.
+    if (/^::(ffff:)?[0-9a-f.:]+$/.test(host)) return true;
+    if (host.startsWith("64:ff9b:") || host.startsWith("2002:")) return true;
+    // Unique-local (fc00::/7), link-local (fe80::/10) and the old site-local (fec0::/10).
+    return /^(fc|fd|fe[89a-f])/.test(host);
   }
   return false;
 }

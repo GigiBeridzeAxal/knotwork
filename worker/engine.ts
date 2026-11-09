@@ -1,10 +1,12 @@
 import type { Run, Step, StepLog, Trigger, Workflow } from "../shared/schema";
 import { cronMatches, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
-import { runBlocked } from "./db";
-import { resetDemo } from "./demo";
-import { type Collections, type LogDoc, newRunId, type RunDoc } from "./mongo";
-import { executeStep, formatSeconds, type Scope } from "./steps";
+import type { Db } from "mongodb";
+import { giveBack, underLimit } from "./auth";
+import { STORAGE_FULL, takeRunSlot } from "./db";
+import { DEMO_USER_ID, resetDemo } from "./demo";
+import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc } from "./mongo";
+import { DEMO_HOSTS, executeStep, formatSeconds, type Scope } from "./steps";
 
 /**
  * The engine. A run moves forward one step at a time and saves its place after every step, so
@@ -23,9 +25,20 @@ const TIME_BUDGET_MS = 25_000;
 const MAX_CLAIMS = 3;
 /** Biggest single step output kept, and biggest total of all outputs in one run. */
 const MAX_OUTPUT_BYTES = 16_000;
-const MAX_RUN_OUTPUT_BYTES = 256_000;
+const MAX_RUN_OUTPUT_BYTES = 64_000;
+/** A log line keeps only a preview of the step's output; the full output is in `outputs`. */
+const LOG_PREVIEW_BYTES = 1_000;
 const MAX_LOGS = 100;
+/** Due runs one tick moves forward, and how many at once. */
+const DUE_PER_TICK = 25;
+const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
+const MB = 1024 * 1024;
+/** The free cluster holds 512 MB. Past the first mark old runs are pruned; past the second, new runs and sign-ups pause. */
+const STORAGE_PRUNE_BYTES = 350 * MB;
+const STORAGE_FULL_BYTES = 450 * MB;
+
+const expiry = (from: number) => new Date(from + LIMITS.runHistoryDays * DAY);
 
 type WorkflowRef = Pick<Workflow, "id" | "name" | "steps" | "workspaceId"> & { ownerId: string };
 
@@ -52,7 +65,7 @@ export async function createRun(c: Collections, wf: WorkflowRef, triggerType: Tr
     logs: [],
     createdAt: now,
     finishedAt: null,
-    expiresAt: new Date(now + LIMITS.runHistoryDays * DAY),
+    expiresAt: expiry(now),
   };
   await c.runs.insertOne(run);
   await c.workflows.updateOne({ _id: wf.id }, { $set: { lastRun: { id: run._id, status: "queued", createdAt: now } } });
@@ -78,7 +91,7 @@ async function claim(c: Collections, runId: string, now: number) {
  * A copy of a step's output that is safe to keep: plain JSON, at most MAX_OUTPUT_BYTES. Anything that
  * can't be turned into JSON (a value that contains itself, a BigInt) becomes a short note instead.
  */
-export function keepable(value: unknown): { value: unknown; bytes: number } {
+export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unknown; bytes: number } {
   if (value === undefined) return { value: null, bytes: 4 };
   let text: string;
   try {
@@ -87,9 +100,9 @@ export function keepable(value: unknown): { value: unknown; bytes: number } {
     const note = { unsaved: true, reason: `The output couldn't be saved: ${(err as Error).message}` };
     return { value: note, bytes: JSON.stringify(note).length };
   }
-  if (text.length > MAX_OUTPUT_BYTES) {
-    const cut = { truncated: true, preview: text.slice(0, MAX_OUTPUT_BYTES) };
-    return { value: cut, bytes: MAX_OUTPUT_BYTES + 40 };
+  if (text.length > max) {
+    const cut = { truncated: true, preview: text.slice(0, max) };
+    return { value: cut, bytes: max + 40 };
   }
   return { value: JSON.parse(text), bytes: text.length };
 }
@@ -146,7 +159,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
     attempt: attempt + 1,
     status,
     message,
-    output: keepable(output).value,
+    output: keepable(output, LOG_PREVIEW_BYTES).value,
     startedAt: at,
     durationMs: Date.now() - at,
   });
@@ -163,14 +176,19 @@ async function step(c: Collections, run: RunDoc, started: number) {
     await updateLastRun(c, run, status);
   };
 
-  const park = (nextRunAt: number, log?: LogDoc) =>
-    c.runs.updateOne(
+  // A waiting run is kept for the full history period after it wakes up, so a week-long delay
+  // can't outlive its own run.
+  const park = async (nextRunAt: number, log?: LogDoc) => {
+    await c.runs.updateOne(
       { _id: run._id },
       {
-        $set: { status: "waiting", stepIndex: index, attempt, claims: 0, leaseUntil: null, nextRunAt },
+        $set: { status: "waiting", stepIndex: index, attempt, claims: 0, leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) },
         ...(log ? { $push: pushLog(log) } : {}),
       },
     );
+    await updateLastRun(c, run, "waiting");
+  };
+  const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
 
   await updateLastRun(c, run, "running");
 
@@ -185,7 +203,7 @@ async function step(c: Collections, run: RunDoc, started: number) {
     const at = Date.now();
     let result;
     try {
-      result = await executeStep(current, scope);
+      result = await executeStep(current, scope, options);
     } catch (err) {
       result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
     }
@@ -205,10 +223,12 @@ async function step(c: Collections, run: RunDoc, started: number) {
         attempt = 0;
         const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };
         if (result.kind === "wait") {
+          const nextRunAt = Date.now() + result.seconds * 1000;
           await c.runs.updateOne(
             { _id: run._id },
-            { $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt: Date.now() + result.seconds * 1000 }, $push: pushLog(log) },
+            { $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) }, $push: pushLog(log) },
           );
+          await updateLastRun(c, run, "waiting");
           return;
         }
         await c.runs.updateOne({ _id: run._id }, { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, $push: pushLog(log) });
@@ -238,11 +258,53 @@ async function step(c: Collections, run: RunDoc, started: number) {
   await finish("succeeded", null);
 }
 
-/** Runs every minute: fire schedules, resume parked runs, and reset the demo account once a day. */
-export async function tick(c: Collections, now = Date.now()): Promise<{ scheduled: number; resumed: number }> {
+/** Runs `work` over `items`, at most `limit` at a time. */
+async function inBatches<T>(items: T[], limit: number, work: (item: T) => Promise<unknown>) {
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) await work(items[next++]).catch(() => {});
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+}
+
+/**
+ * Keeps the database inside the free cluster's 512 MB. Past STORAGE_PRUNE_BYTES the oldest finished
+ * runs go first; past STORAGE_FULL_BYTES new runs and sign-ups pause until the next check.
+ */
+export async function guardStorage(c: Collections, db: Db, now: number) {
+  const stats = (await db.stats()) as { dataSize?: number; storageSize?: number; indexSize?: number };
+  const used = Math.max(stats.dataSize ?? 0, stats.storageSize ?? 0) + (stats.indexSize ?? 0);
+  if (used > STORAGE_PRUNE_BYTES) {
+    const old = await c.runs
+      .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
+      .sort({ createdAt: 1 })
+      .limit(2_000)
+      .toArray();
+    if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
+  }
+  if (used > STORAGE_FULL_BYTES) {
+    // Lasts until a little after the next check, which renews it while the database stays full.
+    await c.counters.updateOne(
+      { _id: STORAGE_FULL },
+      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
+      { upsert: true },
+    );
+  } else {
+    await c.counters.deleteOne({ _id: STORAGE_FULL });
+  }
+  return used;
+}
+
+/**
+ * Runs every minute: fire schedules, resume parked runs, and once in a while look after the
+ * database (storage, indexes) and reset the demo account.
+ */
+export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{ scheduled: number; resumed: number }> {
   const minute = Math.floor(now / 60_000) * 60_000;
+  const minuteOfHour = new Date(minute).getUTCMinutes();
   let scheduled = 0;
 
+  // Only schedules this minute could fire: never marked, or marked before this minute.
   const schedules = await c.workflows
     .find(
       {
@@ -258,13 +320,13 @@ export async function tick(c: Collections, now = Date.now()): Promise<{ schedule
     try {
       const trigger = wf.trigger as Extract<Trigger, { type: "schedule" }>;
       if (!cronMatches(parseCron(trigger.cron), new Date(minute))) continue;
-      if (await runBlocked(c, wf.ownerId, now)) continue;
       // Mark the minute first, so two ticks can never fire the same schedule twice.
       const marked = await c.workflows.updateOne(
         { _id: wf._id, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
         { $set: { lastScheduledAt: minute } },
       );
       if (marked.modifiedCount === 0) continue;
+      if (await takeRunSlot(c, wf.ownerId, now)) continue;
       await createRun(c, { ...wf, id: wf._id }, "schedule", { scheduledFor: new Date(minute).toISOString() });
       scheduled += 1;
     } catch (err) {
@@ -284,14 +346,30 @@ export async function tick(c: Collections, now = Date.now()): Promise<{ schedule
       { projection: { _id: 1 } },
     )
     .sort({ createdAt: 1 })
-    .limit(25)
+    .limit(DUE_PER_TICK)
     .toArray();
 
-  await Promise.allSettled(due.map((run) => advance(c, run._id)));
+  // A few at a time: they share one database connection, and the Worker one CPU budget.
+  await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
 
-  // 03:00 UTC every day: put the shared demo account back the way it started.
-  if (new Date(minute).getUTCHours() === 3 && new Date(minute).getUTCMinutes() === 0) {
-    await resetDemo(c, now).catch((err) => console.error("demo reset", err));
+  // Every 10 minutes, check how much of the free cluster is in use.
+  if (db && minuteOfHour % 10 === 0) {
+    await guardStorage(c, db, now).catch((err) => console.error("storage check", err));
+  }
+
+  // Once an hour, make sure every index exists (a no-op when they do).
+  if (minuteOfHour === 7) {
+    const failed = await ensureIndexes(c).catch((err) => [String(err)]);
+    if (failed.length) console.error("indexes", failed);
+  }
+
+  // Once a day, on the first tick from 03:00 UTC, put the shared demo account back the way it
+  // started. The counter makes it once even if a tick is skipped or two overlap.
+  if (new Date(minute).getUTCHours() >= 3 && (await underLimit(c, "demo-reset", DAY, 1, now))) {
+    await resetDemo(c, now).catch(async (err) => {
+      console.error("demo reset", err);
+      await giveBack(c, "demo-reset", DAY, now);
+    });
   }
 
   return { scheduled, resumed: due.length };

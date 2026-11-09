@@ -1,5 +1,5 @@
 import { EXAMPLES } from "../shared/examples";
-import { type Collections, newHookKey, newWorkflowId, type WorkflowDoc } from "./mongo";
+import { type Collections, newHookKey } from "./mongo";
 
 /**
  * The demo account: one shared account anyone can enter from the sign-in page with one click. It has
@@ -22,20 +22,32 @@ export async function ensureDemo(c: Collections, now: number) {
   if ((await c.workflows.countDocuments({ workspaceId: DEMO_WORKSPACE_ID })) === 0) await seed(c, now);
 }
 
+/**
+ * Puts the examples in. Each has a fixed id and is upserted, so two people opening the empty demo at
+ * the same moment still end up with one copy of each.
+ */
 async function seed(c: Collections, now: number) {
-  const docs: WorkflowDoc[] = EXAMPLES.map((example, i) => ({
-    _id: newWorkflowId(),
-    workspaceId: DEMO_WORKSPACE_ID,
-    ownerId: DEMO_USER_ID,
-    ...example.workflow,
-    hookKey: newHookKey(),
-    version: 1,
-    lastScheduledAt: null,
-    lastRun: null,
-    createdAt: now - i,
-    updatedAt: now - i,
-  }));
-  await c.workflows.insertMany(docs);
+  await Promise.all(
+    EXAMPLES.map((example, i) =>
+      c.workflows.updateOne(
+        { _id: `wf_demo_${i + 1}` },
+        {
+          $setOnInsert: {
+            workspaceId: DEMO_WORKSPACE_ID,
+            ownerId: DEMO_USER_ID,
+            ...example.workflow,
+            hookKey: newHookKey(),
+            version: 1,
+            lastScheduledAt: null,
+            lastRun: null,
+            createdAt: now - i,
+            updatedAt: now - i,
+          },
+        },
+        { upsert: true },
+      ),
+    ),
+  );
 }
 
 /** Puts the demo account back to its starting state: one Personal workspace with the examples. */

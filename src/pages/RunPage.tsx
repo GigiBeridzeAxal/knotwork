@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import type { RunDetail } from "../../shared/schema";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import { Button, Card, cn, duration, Eyebrow, Json, StatusBadge, timeAgo } from "../components/ui";
 import { Link } from "../router";
+import { useFindElsewhere } from "../session";
 
 const DONE = new Set(["succeeded", "failed", "stopped"]);
 
@@ -11,6 +12,7 @@ export function RunPage({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [open, setOpen] = useState<number | null>(null);
   const [nudging, setNudging] = useState(false);
+  const findElsewhere = useFindElsewhere();
 
   useEffect(() => {
     let stopped = false;
@@ -27,7 +29,9 @@ export function RunPage({ id }: { id: string }) {
         // at all while the tab is hidden.
         if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 1500);
       } catch (e) {
-        if (!stopped) setError((e as Error).message);
+        if (stopped) return;
+        if (e instanceof ApiError && e.status === 404 && (await findElsewhere("run", id))) return;
+        setError((e as Error).message);
       }
     };
     load();
@@ -35,7 +39,7 @@ export function RunPage({ id }: { id: string }) {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [id]);
+  }, [id, findElsewhere]);
 
   if (error) return <p className="text-fail">{error}</p>;
   if (!run) return null;

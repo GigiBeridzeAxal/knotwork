@@ -78,7 +78,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setState({ status: "signed-out" });
       },
       switchWorkspace: (id) => {
-        if (state.status === "signed-in") signedIn(state.me, id);
+        if (state.status !== "signed-in") return;
+        // A workspace made on another device isn't in this list yet: fetch the list again.
+        if (state.me.workspaces.some((w) => w.id === id)) signedIn(state.me, id);
+        else api.me().then((fresh) => signedIn(fresh, id), () => {});
       },
       reload: async (selectId) => {
         const fresh = await api.me();
@@ -94,6 +97,29 @@ export function useSession() {
   const ctx = useContext(Ctx);
   if (!ctx) throw new Error("useSession outside SessionProvider");
   return ctx;
+}
+
+/**
+ * For a page whose workflow or run isn't in the current workspace (a link from another workspace, or
+ * from before a switch): finds the user's workspace that has it and switches there. Resolves to
+ * false when none of their workspaces has it.
+ */
+export function useFindElsewhere() {
+  const { state, switchWorkspace } = useSession();
+  const current = state.status === "signed-in" ? state.workspaceId : "";
+  return useCallback(
+    async (kind: "workflow" | "run", id: string) => {
+      try {
+        const { workspaceId } = await api.locate(kind, id);
+        if (workspaceId === current) return false;
+        switchWorkspace(workspaceId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [current, switchWorkspace],
+  );
 }
 
 /** Two letters for an avatar: initials of a name. */

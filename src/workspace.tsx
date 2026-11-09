@@ -1,12 +1,13 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import type { Run, WorkflowSummary } from "../shared/schema";
-import { api } from "./api";
+import { api, ApiError } from "./api";
+import { useSession } from "./session";
 
 interface WorkspaceData {
   workflows: WorkflowSummary[] | null;
-  /** The newest 200 runs. That covers more than three hours at the hourly limit. */
+  /** The newest 100 runs. That covers more than an hour and a half at the hourly limit. */
   runs: Run[] | null;
-  /** Runs the whole account started in the last hour; the hourly limit counts these. */
+  /** Runs the whole account started this clock hour; the hourly limit counts these. */
   runsThisHour: number;
   error: string;
   refresh: () => void;
@@ -16,7 +17,7 @@ const Ctx = createContext<WorkspaceData>({ workflows: null, runs: null, runsThis
 
 /**
  * Loads the current workspace once for the sidebar and the home page, and refreshes it every
- * 15 seconds while the tab is visible. Mounted with the workspace id as its key, so switching
+ * 30 seconds while the tab is visible. Mounted with the workspace id as its key, so switching
  * workspaces starts from empty instead of showing the old one's lists.
  */
 export function WorkspaceProvider({ path, children }: { path: string; children: ReactNode }) {
@@ -24,6 +25,7 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [runsThisHour, setRunsThisHour] = useState(0);
   const [error, setError] = useState("");
+  const { reload } = useSession();
 
   const refresh = useCallback(() => {
     api.overview().then(
@@ -33,13 +35,17 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
         setRunsThisHour(o.runsThisHour);
         setError("");
       },
-      (e: Error) => setError(e.message),
+      (e: Error) => {
+        // The workspace was deleted (e.g. on another device): reload the list, which falls back to Personal.
+        if (e instanceof ApiError && e.status === 404) reload("").catch(() => setError(e.message));
+        else setError(e.message);
+      },
     );
-  }, []);
+  }, [reload]);
 
   useEffect(refresh, [refresh, path]);
   useEffect(() => {
-    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), 15_000);
+    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), 30_000);
     return () => clearInterval(timer);
   }, [refresh]);
 

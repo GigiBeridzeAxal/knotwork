@@ -111,6 +111,9 @@ export const workflowInput = z
     steps: z.array(stepSchema).max(MAX_STEPS),
   })
   .superRefine((wf, ctx) => {
+    if (JSON.stringify(wf).length > LIMITS.workflowBytes) {
+      ctx.addIssue({ code: "custom", path: ["steps"], message: `A workflow can be at most ${LIMITS.workflowBytes / 1000} KB. Trim long step settings.` });
+    }
     const seen = new Set<string>();
     wf.steps.forEach((step, i) => {
       if (seen.has(step.id)) {
@@ -142,18 +145,28 @@ export interface Workflow extends WorkflowInput {
   lastRun: { id: string; status: RunStatus; createdAt: number } | null;
 }
 
-export type WorkflowSummary = Workflow;
+/** A workflow as lists show it: each step's name and type, without its settings. */
+export type WorkflowSummary = Omit<Workflow, "steps"> & { steps: Pick<Step, "id" | "name" | "type">[] };
 
 // ---------- Accounts ----------
 
 const email = z.string().trim().toLowerCase().max(254).email("Enter an email address like name@example.com");
 export const PASSWORD_MIN = 10;
 
+const newPassword = z.string().min(PASSWORD_MIN, `Use at least ${PASSWORD_MIN} characters`).max(200);
+
 export const signupInput = z.object({
   name: z.string().trim().min(1, "Tell us what to call you").max(60),
   email,
-  password: z.string().min(PASSWORD_MIN, `Use at least ${PASSWORD_MIN} characters`).max(200),
+  password: newPassword,
 });
+
+export const passwordChange = z.object({
+  current: z.string().min(1, "Enter your current password").max(200),
+  next: newPassword,
+});
+
+export const accountDelete = z.object({ password: z.string().min(1, "Enter your password").max(200) });
 
 export const loginInput = z.object({
   email,
@@ -191,7 +204,6 @@ export interface Run {
   workflowName?: string;
   status: RunStatus;
   triggerType: Trigger["type"];
-  input: unknown;
   stepIndex: number;
   attempt: number;
   nextRunAt: number | null;
@@ -214,14 +226,16 @@ export interface StepLog {
 }
 
 export interface RunDetail extends Run {
+  /** What started the run: the webhook request, the manual test input, or the scheduled minute. */
+  input: unknown;
   logs: StepLog[];
   stepCount: number;
 }
 
 export interface Overview {
   workflows: WorkflowSummary[];
-  /** The workspace's newest 200 runs. */
+  /** The workspace's newest 100 runs. */
   runs: Run[];
-  /** Runs the whole account started in the last hour (the limit is per account). */
+  /** Runs the whole account started this clock hour (the limit is per account). */
   runsThisHour: number;
 }

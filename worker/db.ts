@@ -1,5 +1,7 @@
-import type { Run, RunDetail, Workflow, WorkflowInput, Workspace } from "../shared/schema";
+import type { Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
 import { LIMITS } from "../shared/limits";
+import { giveBack, underLimit } from "./auth";
+import { DEMO_USER_ID } from "./demo";
 import {
   type Collections,
   newHookKey,
@@ -33,9 +35,20 @@ export function toWorkflow(doc: WorkflowDoc): Workflow {
   };
 }
 
-/** The run fields the lists need. Logs, steps and outputs stay in the database. */
+/** A workflow as lists show it: steps without their settings, which only the editor needs. */
+export function toSummary(doc: WorkflowDoc): WorkflowSummary {
+  const { steps, ...rest } = toWorkflow(doc);
+  return { ...rest, steps: steps.map((s) => ({ id: s.id, name: s.name, type: s.type })) };
+}
+
+const SUMMARY_FIELDS = {
+  _id: 1, workspaceId: 1, name: 1, description: 1, enabled: 1, trigger: 1, hookKey: 1, version: 1,
+  lastRun: 1, createdAt: 1, updatedAt: 1, "steps.id": 1, "steps.name": 1, "steps.type": 1,
+} as const;
+
+/** The run fields the lists need. Input, logs, steps and outputs stay in the database. */
 const RUN_SUMMARY = {
-  _id: 1, workflowId: 1, workflowName: 1, status: 1, triggerType: 1, input: 1, stepIndex: 1,
+  _id: 1, workflowId: 1, workflowName: 1, status: 1, triggerType: 1, stepIndex: 1,
   attempt: 1, nextRunAt: 1, error: 1, createdAt: 1, finishedAt: 1,
 } as const;
 
@@ -46,7 +59,6 @@ export function toRun(doc: Pick<RunDoc, keyof typeof RUN_SUMMARY>): Run {
     workflowName: doc.workflowName,
     status: doc.status,
     triggerType: doc.triggerType,
-    input: doc.input,
     stepIndex: doc.stepIndex,
     attempt: doc.attempt,
     nextRunAt: doc.nextRunAt,
@@ -76,9 +88,13 @@ export async function deleteWorkspace(c: Collections, id: string, ownerId: strin
 
 // ---------- Workflows ----------
 
-export async function listWorkflows(c: Collections, workspaceId: string): Promise<Workflow[]> {
-  const docs = await c.workflows.find({ workspaceId }).sort({ updatedAt: -1 }).limit(LIMITS.workflowsPerWorkspace * 2).toArray();
-  return docs.map(toWorkflow);
+export async function listWorkflows(c: Collections, workspaceId: string): Promise<WorkflowSummary[]> {
+  const docs = await c.workflows
+    .find({ workspaceId }, { projection: SUMMARY_FIELDS })
+    .sort({ updatedAt: -1 })
+    .limit(LIMITS.workflowsPerWorkspace)
+    .toArray();
+  return docs.map(toSummary);
 }
 
 export async function getWorkflow(c: Collections, id: string, workspaceId: string): Promise<Workflow | null> {
@@ -86,15 +102,18 @@ export async function getWorkflow(c: Collections, id: string, workspaceId: strin
   return doc ? toWorkflow(doc) : null;
 }
 
-export const countWorkflows = (c: Collections, workspaceId: string) => c.workflows.countDocuments({ workspaceId });
-
+/**
+ * Adds a workflow if the workspace has room. Two saves at once could both pass a count taken first,
+ * so the workflow is inserted, then counted, and taken out again if it went over the limit or the
+ * workspace was deleted in the meantime.
+ */
 export async function insertWorkflow(
   c: Collections,
   workspaceId: string,
   ownerId: string,
   input: WorkflowInput,
   now: number,
-): Promise<Workflow> {
+): Promise<Workflow | "full" | "gone"> {
   const doc: WorkflowDoc = {
     _id: newWorkflowId(),
     workspaceId,
@@ -108,6 +127,14 @@ export async function insertWorkflow(
     updatedAt: now,
   };
   await c.workflows.insertOne(doc);
+  const [count, workspace] = await Promise.all([
+    c.workflows.countDocuments({ workspaceId }),
+    c.workspaces.findOne({ _id: workspaceId }, { projection: { _id: 1 } }),
+  ]);
+  if (count > LIMITS.workflowsPerWorkspace || !workspace) {
+    await c.workflows.deleteOne({ _id: doc._id });
+    return workspace ? "full" : "gone";
+  }
   return toWorkflow(doc);
 }
 
@@ -152,18 +179,32 @@ export async function deleteWorkflow(c: Collections, id: string, workspaceId: st
 // ---------- Runs ----------
 
 const HOUR = 3_600_000;
+/** Set by the cron tick while the database is close to the free cluster's 512 MB. */
+export const STORAGE_FULL = "storage:full";
+export const runCounter = (ownerId: string) => `runs:${ownerId}`;
 
-/** Why a new run may not start right now, or null when it may. */
-export async function runBlocked(c: Collections, ownerId: string, now: number): Promise<string | null> {
-  const since = { $gt: now - HOUR };
-  const [mine, everyone] = await Promise.all([
-    c.runs.countDocuments({ ownerId, createdAt: since }),
-    c.runs.countDocuments({ createdAt: since }),
+export const storageFull = async (c: Collections) => (await c.counters.findOne({ _id: STORAGE_FULL })) !== null;
+
+/**
+ * Takes one run from the account's and everyone's budget for this clock hour. Returns why the run
+ * may not start, or null when it may. The counters are atomic, so parallel requests can't overshoot.
+ */
+export async function takeRunSlot(c: Collections, ownerId: string, now: number): Promise<string | null> {
+  const [full, mine] = await Promise.all([
+    storageFull(c),
+    underLimit(c, runCounter(ownerId), HOUR, LIMITS.runsPerAccountPerHour, now),
   ]);
-  if (mine >= LIMITS.runsPerAccountPerHour) {
-    return `Your account has started ${LIMITS.runsPerAccountPerHour} runs in the last hour, which is the limit. Try again later.`;
+  if (full) return "Knotwork's free database is nearly full, so new runs are paused for a few minutes.";
+  if (!mine) {
+    if (ownerId === DEMO_USER_ID) {
+      return `The demo account is shared by everyone trying Knotwork and has used its ${LIMITS.runsPerAccountPerHour} runs this hour. Create a free account to get your own.`;
+    }
+    return `Your account has started ${LIMITS.runsPerAccountPerHour} runs this hour, which is the limit. Try again after the hour turns.`;
   }
-  if (everyone >= LIMITS.runsPerHourOverall) return "Knotwork is busy right now. Try again in a few minutes.";
+  if (!(await underLimit(c, "runs:all", HOUR, LIMITS.runsPerHourOverall, now))) {
+    await giveBack(c, runCounter(ownerId), HOUR, now);
+    return "Knotwork is busy right now. Try again in a few minutes.";
+  }
   return null;
 }
 
@@ -174,7 +215,7 @@ export async function listRuns(c: Collections, workspaceId: string, workflowId: 
 }
 
 export async function getRun(c: Collections, id: string, workspaceId: string): Promise<RunDetail | null> {
-  const doc = await c.runs.findOne({ _id: id, workspaceId }, { projection: { ...RUN_SUMMARY, logs: 1, steps: 1 } });
+  const doc = await c.runs.findOne({ _id: id, workspaceId }, { projection: { ...RUN_SUMMARY, input: 1, logs: 1, "steps.id": 1 } });
   if (!doc) return null;
-  return { ...toRun(doc), logs: doc.logs, stepCount: doc.steps.length };
+  return { ...toRun(doc), input: doc.input, logs: doc.logs, stepCount: doc.steps.length };
 }

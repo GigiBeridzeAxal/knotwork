@@ -1,22 +1,33 @@
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { LIMITS } from "../shared/limits";
-import { loginInput, signupInput, workflowInput, workflowSave, workspaceInput, type Me } from "../shared/schema";
+import {
+  accountDelete,
+  loginInput,
+  type Me,
+  passwordChange,
+  signupInput,
+  workflowInput,
+  workflowSave,
+  workspaceInput,
+} from "../shared/schema";
 import {
   clearedCookie,
+  cookieName,
   counterValue,
   createSession,
-  decoyPassword,
+  DECOY_PASSWORD,
   findSession,
+  giveBack,
   hashPassword,
+  ipKey,
   readCookie,
-  SESSION_COOKIE,
   sessionCookie,
   sha256,
   underLimit,
   verifyPassword,
 } from "./auth";
 import {
-  countWorkflows,
   deleteWorkflow,
   deleteWorkspace,
   getRun,
@@ -25,7 +36,9 @@ import {
   listRuns,
   listWorkflows,
   listWorkspaces,
-  runBlocked,
+  runCounter,
+  storageFull,
+  takeRunSlot,
   toWorkspace,
   updateWorkflow,
 } from "./db";
@@ -33,9 +46,12 @@ import { DEMO_USER_ID, ensureDemo } from "./demo";
 import { advance, createRun, tick } from "./engine";
 import { type Env, Mongo, newUserId, newWorkspaceId, type SessionDoc, type UserDoc, type WorkspaceDoc } from "./mongo";
 
-const MAX_WEBHOOK_BYTES = 256 * 1024;
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+/** Biggest request body the API accepts. A workflow is at most LIMITS.workflowBytes of JSON. */
+const MAX_API_BODY = 64 * 1024;
+/** Webhook keys are 18 random bytes in base64url. Anything else is refused before the database. */
+const HOOK_KEY = /^[A-Za-z0-9_-]{24}$/;
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -45,6 +61,23 @@ const app = new Hono<{ Bindings: Env; Variables: Vars }>();
 app.onError((err, c) => {
   console.error(err);
   return c.json({ error: "Something went wrong on our side" }, 500);
+});
+
+const ip = (c: C) => ipKey(c.req.header("cf-connecting-ip") ?? "local");
+const secure = (c: C) => new URL(c.req.url).protocol === "https:";
+const issues = (error: { issues: unknown[] }) => ({ error: "Check the highlighted fields", issues: error.issues });
+const tooLarge = (c: C) => c.json({ error: `The request is larger than ${MAX_API_BODY / 1024} KB` }, 413);
+
+// A per-IP request budget, checked by Cloudflare before any database work. Skipped for loopback
+// addresses, which only local development sends (every test browser there shares one address).
+const LOOPBACK = new Set(["127.0.0.1", "::1", "local"]);
+app.use("*", async (c, next) => {
+  const from = c.req.header("cf-connecting-ip") ?? "local";
+  if (c.env.IP_LIMITER && !LOOPBACK.has(from)) {
+    const { success } = await c.env.IP_LIMITER.limit({ key: ipKey(from) });
+    if (!success) return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
+  }
+  return next();
 });
 
 // One database connection per request, opened on first use and closed once the response and any
@@ -62,13 +95,12 @@ app.use("*", async (c, next) => {
 });
 
 const db = (c: C) => c.var.mongo.c;
-const ip = (c: C) => c.req.header("cf-connecting-ip") ?? "local";
-const secure = (c: C) => new URL(c.req.url).protocol === "https:";
-const issues = (error: { issues: unknown[] }) => ({ error: "Check the highlighted fields", issues: error.issues });
 
 // ---------- API (used by the dashboard) ----------
 
 const api = new Hono<{ Bindings: Env; Variables: Vars }>();
+
+api.use("*", bodyLimit({ maxSize: MAX_API_BODY, onError: tooLarge }));
 
 // The session cookie is SameSite=Lax; on top of that, writes must come from this site.
 api.use("*", async (c, next) => {
@@ -91,10 +123,13 @@ async function me(c: C, userId: string): Promise<Me | null> {
 }
 
 async function signIn(c: C, user: Pick<UserDoc, "_id" | "demo">) {
-  const token = await createSession(db(c), user, Date.now());
-  c.header("set-cookie", sessionCookie(token, secure(c)));
+  const { token, maxAge } = await createSession(db(c), user, Date.now());
+  c.header("set-cookie", sessionCookie(token, secure(c), maxAge));
   return c.json(await me(c, user._id));
 }
+
+const loginKey = async (c: C, email: string) => `login:${ip(c)}:${await sha256(email)}`;
+const WRONG_PASSWORDS = "Too many wrong passwords. Wait 15 minutes and try again.";
 
 api.post("/auth/signup", async (c) => {
   const parsed = signupInput.safeParse(await c.req.json().catch(() => null));
@@ -104,10 +139,20 @@ api.post("/auth/signup", async (c) => {
   if (!(await underLimit(db(c), `signup:ip:${ip(c)}`, HOUR, LIMITS.signupsPerIpPerHour, now))) {
     return c.json({ error: "Too many new accounts from your network. Try again in an hour." }, 429);
   }
-  if (!(await underLimit(db(c), "signup:all", 24 * HOUR, LIMITS.signupsPerDay, now))) {
+  // Only accounts that were really created count toward the daily total (added below), so failed
+  // attempts can't use it up for everyone.
+  const [today, full] = await Promise.all([counterValue(db(c), "signup:all", 24 * HOUR, now), storageFull(db(c))]);
+  if (today >= LIMITS.signupsPerDay || full) {
     return c.json({ error: "Knotwork has had all the sign-ups it can take today. Try the demo account, or come back tomorrow." }, 429);
   }
-  const user: UserDoc = { _id: newUserId(), name, email, password: await hashPassword(password), demo: false, createdAt: now };
+  const user: UserDoc = {
+    _id: newUserId(),
+    name,
+    email,
+    password: await hashPassword(password, c.env.AUTH_PEPPER),
+    demo: false,
+    createdAt: now,
+  };
   try {
     await db(c).users.insertOne(user);
   } catch (err) {
@@ -117,7 +162,7 @@ api.post("/auth/signup", async (c) => {
     throw err;
   }
   const personal: WorkspaceDoc = { _id: newWorkspaceId(), ownerId: user._id, name: "Personal", personal: true, createdAt: now };
-  await db(c).workspaces.insertOne(personal);
+  await Promise.all([db(c).workspaces.insertOne(personal), underLimit(db(c), "signup:all", 24 * HOUR, Number.MAX_SAFE_INTEGER, now)]);
   return signIn(c, user);
 });
 
@@ -125,22 +170,20 @@ api.post("/auth/login", async (c) => {
   const parsed = loginInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const { email, password } = parsed.data;
-  const key = `login:${ip(c)}:${await sha256(email)}`;
-  if ((await counterValue(db(c), key, 15 * MINUTE)) >= LIMITS.failedLoginsPer15Min) {
-    return c.json({ error: "Too many wrong passwords. Wait 15 minutes and try again." }, 429);
-  }
+  // Every attempt takes a slot first, so parallel guesses can't all get through; a right password
+  // gives its slot back.
+  const key = await loginKey(c, email);
+  if (!(await underLimit(db(c), key, 15 * MINUTE, LIMITS.loginAttemptsPer15Min))) return c.json({ error: WRONG_PASSWORDS }, 429);
   const user = await db(c).users.findOne({ email });
   // Check a decoy hash for unknown emails, so a wrong email and a wrong password take the same time.
-  const ok = await verifyPassword(password, user?.password ?? (await decoyPassword()));
-  if (!user || !user.password || !ok) {
-    await underLimit(db(c), key, 15 * MINUTE, LIMITS.failedLoginsPer15Min);
-    return c.json({ error: "That email and password don't match an account." }, 401);
-  }
+  const ok = await verifyPassword(password, user?.password ?? DECOY_PASSWORD, c.env.AUTH_PEPPER);
+  if (!user || !user.password || !ok) return c.json({ error: "That email and password don't match an account." }, 401);
+  await giveBack(db(c), key, 15 * MINUTE);
   return signIn(c, user);
 });
 
 api.post("/auth/demo", async (c) => {
-  if (!(await underLimit(db(c), `demo:ip:${ip(c)}`, HOUR, 30))) {
+  if (!(await underLimit(db(c), `demo:ip:${ip(c)}`, HOUR, LIMITS.demoLoginsPerIpPerHour))) {
     return c.json({ error: "Too many demo sign-ins from your network. Try again in an hour." }, 429);
   }
   await ensureDemo(db(c), Date.now());
@@ -148,7 +191,7 @@ api.post("/auth/demo", async (c) => {
 });
 
 api.post("/auth/logout", async (c) => {
-  const token = readCookie(c.req.header("cookie"), SESSION_COOKIE);
+  const token = readCookie(c.req.header("cookie"), cookieName(secure(c)));
   if (token) await db(c).sessions.deleteOne({ _id: await sha256(token) });
   c.header("set-cookie", clearedCookie(secure(c)));
   return c.body(null, 204);
@@ -156,7 +199,7 @@ api.post("/auth/logout", async (c) => {
 
 // Everything below needs a signed-in user.
 api.use("*", async (c, next) => {
-  const session = await findSession(db(c), readCookie(c.req.header("cookie"), SESSION_COOKIE));
+  const session = await findSession(db(c), readCookie(c.req.header("cookie"), cookieName(secure(c))));
   if (!session) return c.json({ error: "Log in to continue" }, 401);
   c.set("session", session);
   return next();
@@ -167,6 +210,47 @@ api.get("/me", async (c) => {
   return data ? c.json(data) : c.json({ error: "Log in to continue" }, 401);
 });
 
+/** Checks the signed-in user's password for a sensitive change, under the same limit as logging in. */
+async function confirmPassword(c: C, password: string): Promise<Response | UserDoc> {
+  if (c.var.session.demo) return c.json({ error: "The demo account is shared, so its settings can't be changed." }, 403);
+  const user = await db(c).users.findOne({ _id: c.var.session.userId });
+  if (!user) return c.json({ error: "Log in to continue" }, 401);
+  const key = await loginKey(c, user.email);
+  if (!(await underLimit(db(c), key, 15 * MINUTE, LIMITS.loginAttemptsPer15Min))) return c.json({ error: WRONG_PASSWORDS }, 429);
+  if (!(await verifyPassword(password, user.password, c.env.AUTH_PEPPER))) {
+    return c.json({ error: "That isn't your current password.", issues: [{ path: ["current"], message: "Wrong password" }] }, 403);
+  }
+  await giveBack(db(c), key, 15 * MINUTE);
+  return user;
+}
+
+/** Changes the password and signs out every other device. */
+api.post("/auth/password", async (c) => {
+  const parsed = passwordChange.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json(issues(parsed.error), 400);
+  const user = await confirmPassword(c, parsed.data.current);
+  if (user instanceof Response) return user;
+  await db(c).users.updateOne({ _id: user._id }, { $set: { password: await hashPassword(parsed.data.next, c.env.AUTH_PEPPER) } });
+  await db(c).sessions.deleteMany({ userId: user._id, _id: { $ne: c.var.session._id } });
+  return c.body(null, 204);
+});
+
+/** Deletes the account with everything in it: workspaces, workflows, runs and sessions. */
+api.post("/auth/delete-account", async (c) => {
+  const parsed = accountDelete.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json(issues(parsed.error), 400);
+  const user = await confirmPassword(c, parsed.data.password);
+  if (user instanceof Response) return user;
+  const ownerId = user._id;
+  await db(c).runs.deleteMany({ ownerId });
+  await db(c).workflows.deleteMany({ ownerId });
+  await db(c).workspaces.deleteMany({ ownerId });
+  await db(c).sessions.deleteMany({ userId: ownerId });
+  await db(c).users.deleteOne({ _id: ownerId });
+  c.header("set-cookie", clearedCookie(secure(c)));
+  return c.body(null, 204);
+});
+
 // ---------- Workspaces ----------
 
 api.get("/workspaces", async (c) => c.json(await listWorkspaces(db(c), c.var.session.userId)));
@@ -175,11 +259,13 @@ api.post("/workspaces", async (c) => {
   const parsed = workspaceInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const ownerId = c.var.session.userId;
-  if ((await db(c).workspaces.countDocuments({ ownerId })) >= LIMITS.workspacesPerAccount) {
+  const ws: WorkspaceDoc = { _id: newWorkspaceId(), ownerId, name: parsed.data.name, personal: false, createdAt: Date.now() };
+  // Insert, then count: two requests at once can't both squeeze under the limit.
+  await db(c).workspaces.insertOne(ws);
+  if ((await db(c).workspaces.countDocuments({ ownerId })) > LIMITS.workspacesPerAccount) {
+    await db(c).workspaces.deleteOne({ _id: ws._id });
     return c.json({ error: `An account can have ${LIMITS.workspacesPerAccount} workspaces. Delete one to make room.` }, 409);
   }
-  const ws: WorkspaceDoc = { _id: newWorkspaceId(), ownerId, name: parsed.data.name, personal: false, createdAt: Date.now() };
-  await db(c).workspaces.insertOne(ws);
   await db(c).sessions.updateMany({ userId: ownerId }, { $addToSet: { workspaceIds: ws._id } });
   return c.json(toWorkspace(ws), 201);
 });
@@ -200,16 +286,34 @@ api.delete("/workspaces/:id", async (c) => {
   return removed ? c.body(null, 204) : c.json({ error: "No workspace with that id, or it's your personal one" }, 404);
 });
 
+/**
+ * Which of the user's workspaces a workflow or run is in, so a link opened while another workspace is
+ * selected can switch to the right one instead of saying it doesn't exist.
+ */
+api.get("/locate/:kind/:id", async (c) => {
+  const { kind, id } = c.req.param();
+  const filter = { _id: id, workspaceId: { $in: c.var.session.workspaceIds } };
+  const options = { projection: { workspaceId: 1 } };
+  const doc =
+    kind === "workflow" ? await db(c).workflows.findOne(filter, options) : kind === "run" ? await db(c).runs.findOne(filter, options) : null;
+  return doc ? c.json({ workspaceId: doc.workspaceId }) : c.json({ error: "Not found in any of your workspaces" }, 404);
+});
+
 // ---------- Workflows and runs (inside one workspace) ----------
 //
 // The dashboard says which workspace it is looking at with the x-knotwork-workspace header. The
-// session lists the workspaces this user owns, so checking it needs no extra query.
+// session lists the workspaces this user owns, so checking it usually needs no extra query.
 
 const scoped = new Hono<{ Bindings: Env; Variables: Vars }>();
 
 scoped.use("*", async (c, next) => {
   const workspace = c.req.header("x-knotwork-workspace") ?? "";
-  if (!c.var.session.workspaceIds.includes(workspace)) return c.json({ error: "No workspace with that id" }, 404);
+  if (!c.var.session.workspaceIds.includes(workspace)) {
+    // A workspace made after this session started (e.g. on another device) isn't in its list yet.
+    const owned = workspace && (await db(c).workspaces.findOne({ _id: workspace, ownerId: c.var.session.userId }, { projection: { _id: 1 } }));
+    if (!owned) return c.json({ error: "No workspace with that id" }, 404);
+    await db(c).sessions.updateOne({ _id: c.var.session._id }, { $addToSet: { workspaceIds: workspace } });
+  }
   c.set("workspace", workspace);
   return next();
 });
@@ -220,8 +324,8 @@ scoped.get("/workflows", async (c) => c.json(await listWorkflows(db(c), c.var.wo
 scoped.get("/overview", async (c) => {
   const [workflows, runs, runsThisHour] = await Promise.all([
     listWorkflows(db(c), c.var.workspace),
-    listRuns(db(c), c.var.workspace, undefined, 200),
-    db(c).runs.countDocuments({ ownerId: c.var.session.userId, createdAt: { $gt: Date.now() - HOUR } }),
+    listRuns(db(c), c.var.workspace, undefined, 100),
+    counterValue(db(c), runCounter(c.var.session.userId), HOUR),
   ]);
   return c.json({ workflows, runs, runsThisHour });
 });
@@ -229,10 +333,10 @@ scoped.get("/overview", async (c) => {
 scoped.post("/workflows", async (c) => {
   const parsed = workflowInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
-  if ((await countWorkflows(db(c), c.var.workspace)) >= LIMITS.workflowsPerWorkspace) {
-    return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
-  }
-  return c.json(await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now()), 201);
+  const res = await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now());
+  if (res === "full") return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
+  if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
+  return c.json(res, 201);
 });
 
 scoped.get("/workflows/:id", async (c) => {
@@ -260,13 +364,20 @@ scoped.delete("/workflows/:id", async (c) => {
 });
 
 scoped.post("/workflows/:id/run", async (c) => {
+  const text = await c.req.text();
+  if (text.length > LIMITS.runInputBytes) return c.json({ error: `Test input can be at most ${LIMITS.runInputBytes / 1000} KB` }, 413);
+  let body: { input?: unknown } = {};
+  try {
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    return c.json({ error: "The test input isn't valid JSON" }, 400);
+  }
   const doc = await db(c).workflows.findOne({ _id: c.req.param("id"), workspaceId: c.var.workspace });
   if (!doc) return c.json({ error: "No workflow with that id" }, 404);
-  const blocked = await runBlocked(db(c), doc.ownerId, Date.now());
+  const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now());
   if (blocked) return c.json({ error: blocked }, 429);
-  const body = await c.req.json().catch(() => ({}));
   // A manual run's input sits under `body`, like a webhook's, so `{{ trigger.body.x }}` works for both.
-  const runId = await createRun(db(c), { ...doc, id: doc._id }, "manual", { body: (body as { input?: unknown }).input ?? {} });
+  const runId = await createRun(db(c), { ...doc, id: doc._id }, "manual", { body: body?.input ?? {} });
   c.var.later.push(advance(db(c), runId));
   return c.json({ runId }, 202);
 });
@@ -294,42 +405,49 @@ app.route("/api", api);
 
 // ---------- Webhooks (public; the key in the URL is the secret) ----------
 
-app.all("/hooks/:key", async (c) => {
-  const doc = await db(c).workflows.findOne({ hookKey: c.req.param("key") });
-  if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
-  if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);
-  const blocked = await runBlocked(db(c), doc.ownerId, Date.now());
-  if (blocked) return c.json({ error: blocked }, 429);
+app.all(
+  "/hooks/:key",
+  bodyLimit({ maxSize: LIMITS.runInputBytes, onError: (c) => c.json({ error: `Payload is larger than ${LIMITS.runInputBytes / 1000} KB` }, 413) }),
+  async (c) => {
+    const key = c.req.param("key");
+    if (!HOOK_KEY.test(key)) return c.json({ error: "Unknown webhook" }, 404);
+    const doc = await db(c).workflows.findOne({ hookKey: key });
+    if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
+    if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);
 
-  const text = await c.req.text();
-  if (text.length > MAX_WEBHOOK_BYTES) return c.json({ error: "Payload is larger than 256 KB" }, 413);
-  const type = c.req.header("content-type") ?? "";
-  let body: unknown = text;
-  if (type.includes("json") && text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      return c.json({ error: "The body isn't valid JSON" }, 400);
+    const text = await c.req.text();
+    if (text.length > LIMITS.runInputBytes) return c.json({ error: `Payload is larger than ${LIMITS.runInputBytes / 1000} KB` }, 413);
+    const type = c.req.header("content-type") ?? "";
+    let body: unknown = text;
+    if (type.includes("json") && text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return c.json({ error: "The body isn't valid JSON" }, 400);
+      }
+    } else if (type.includes("application/x-www-form-urlencoded")) {
+      body = Object.fromEntries(new URLSearchParams(text));
     }
-  } else if (type.includes("application/x-www-form-urlencoded")) {
-    body = Object.fromEntries(new URLSearchParams(text));
-  }
 
-  const headers: Record<string, string> = {};
-  c.req.raw.headers.forEach((value, name) => {
-    if (name === "cookie" || name === "authorization" || name.startsWith("cf-") || name.startsWith("x-forwarded")) return;
-    headers[name] = value;
-  });
+    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now());
+    if (blocked) return c.json({ error: blocked }, 429);
 
-  const runId = await createRun(db(c), { ...doc, id: doc._id }, "webhook", { method: c.req.method, query: c.req.query(), headers, body });
-  c.var.later.push(advance(db(c), runId));
-  return c.json({ runId }, 202);
-});
+    const headers: Record<string, string> = {};
+    c.req.raw.headers.forEach((value, name) => {
+      if (name === "cookie" || name === "authorization" || name.startsWith("cf-") || name.startsWith("x-forwarded")) return;
+      headers[name] = value;
+    });
+
+    const runId = await createRun(db(c), { ...doc, id: doc._id }, "webhook", { method: c.req.method, query: c.req.query(), headers, body });
+    c.var.later.push(advance(db(c), runId));
+    return c.json({ runId }, 202);
+  },
+);
 
 export default {
   fetch: app.fetch,
   async scheduled(_controller, env, ctx) {
     const mongo = new Mongo(env);
-    ctx.waitUntil(tick(mongo.c).finally(() => mongo.close()));
+    ctx.waitUntil(tick(mongo.c, Date.now(), mongo.db).finally(() => mongo.close()));
   },
 } satisfies ExportedHandler<Env>;

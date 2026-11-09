@@ -24,11 +24,13 @@ attempt is written to a run log you can open in the dashboard.
 - **Durable runs.** A run saves its place in the database after every step. Retries use exponential backoff
   (`5s → 20s → 80s`), delays can last up to a week, and a run that was cut off is picked up again by the
   next minute tick.
-- **Run history.** Every attempt, its output, and how long it took. History is kept for 14 days.
+- **Run history.** Every attempt, a preview of its output, and how long it took. History is kept for 7 days,
+  counted from the run's last wait, so a long delay can't outlive its own run.
 - **Accounts and workspaces.** Sign up with a name, email and password (no email to confirm), or open the
   shared **demo account** with one click. Every account starts with a **Personal** workspace and can add more;
   the sidebar switches between them, and its **+** adds a workflow to the one you're in. A workspace only ever
-  sees its own workflows and runs.
+  sees its own workflows and runs, and a link to a workflow or run in another of your workspaces switches there.
+  Settings can change your password (which logs out your other devices) or delete the account with everything in it.
 - **Safe concurrent edits.** Every save carries the version it was loaded at. If someone saved in between
   (another tab, another device), you're asked to keep your version or load theirs, so nothing is lost silently.
 
@@ -38,22 +40,25 @@ attempt is written to a run log you can open in the dashboard.
 
 ```
 Browser ──► Cloudflare Worker ──► MongoDB Atlas (free M0 cluster)
-              │  /api/auth/*  sign up, log in, demo, log out (session cookie)
+              │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
               │  /api/*       Hono JSON API for the dashboard
               │  /hooks/*     public webhook endpoints
               │  /*           React dashboard (static assets)
-              └─ cron: every minute → fire schedules, resume parked runs, reset the demo daily
+              └─ cron: every minute → fire schedules, resume parked runs;
+                       every 10 min check storage, hourly check indexes, daily reset the demo
 ```
 
 | Part | Where |
 | --- | --- |
-| Engine: claims a run, runs steps, retries, parks | [`worker/engine.ts`](worker/engine.ts) |
-| Step types | [`worker/steps.ts`](worker/steps.ts) |
+| Engine: claims a run, runs steps, retries, parks; the cron tick | [`worker/engine.ts`](worker/engine.ts) |
+| Step types, private-address and demo host checks | [`worker/steps.ts`](worker/steps.ts) |
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
-| Accounts: password hashing, sessions, rate limits | [`worker/auth.ts`](worker/auth.ts) |
+| Accounts: password hashing, sessions, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
+| Queries, and the limits that need the database | [`worker/db.ts`](worker/db.ts) |
 | Collections, indexes and the per-request connection | [`worker/mongo.ts`](worker/mongo.ts) |
 | Demo account | [`worker/demo.ts`](worker/demo.ts) |
 | Workflow schema (shared by API and dashboard) | [`shared/schema.ts`](shared/schema.ts) |
+| Limits | [`shared/limits.ts`](shared/limits.ts) |
 | Templates and cron parser | [`shared/template.ts`](shared/template.ts), [`shared/cron.ts`](shared/cron.ts) |
 | Dashboard | [`src/`](src) |
 
@@ -63,52 +68,82 @@ cron tick can never run the same step twice at the same time. Each step's output
 position are written in one update to the run's document, and one broken run can't stop the others: it fails
 on its own, and a run that keeps getting stuck is given up on after three tries.
 
+Limits that two requests could race past are enforced atomically: run budgets and login attempts are
+`$inc` counters with a time window, and a new workspace or workflow is inserted first, then counted, and
+taken out again if it went over.
+
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
-TTL indexes delete runs after 14 days and sessions after 30, so nothing has to scan for old data.
+TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
+data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB it deletes
+the oldest finished runs, past 450 MB it pauses new runs and sign-ups until there's room again.
+
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
-needs it and closes it when it's done; Smart Placement runs the Worker next to the cluster to keep that short.
+needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
+of streaming, so a request stays within the Worker's six open sockets, and Smart Placement runs the Worker
+next to the cluster to keep the handshake short. That handshake is most of a request's CPU time, close to the
+free plan's 10 ms; if requests start hitting the limit, the next step is a Durable Object that keeps one
+connection open.
 
-**Accounts.** Passwords are hashed with PBKDF2-SHA-256 (100,000 iterations, a random salt each). The session is
-a random token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie; the database stores only its SHA-256.
-Writes from other sites are refused. Sign-ups are limited per IP and per day, and wrong passwords are limited
-per email and IP. Steps can't call `localhost` or private IP addresses, and redirects are checked too.
+**Accounts.** Passwords are hashed with PBKDF2-SHA-256 over an HMAC of the password keyed with `AUTH_PEPPER`,
+a secret that is never stored in the database. The free plan's CPU budget allows only 10,000 iterations; the
+pepper is what keeps a copy of the database alone from being used to guess passwords. The session is a random
+token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefix; the database stores only its
+SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
+limiter turns away more than 120 requests a minute from one IP before any database work. Sign-ups are
+limited per IP (IPv6 per /64) and per day, and login attempts per email and IP.
 
-Everything fits free plans: Cloudflare Workers, static assets and cron triggers, and a MongoDB Atlas M0 cluster.
-It doesn't call any paid AI API.
+**Steps.** HTTP steps can't call `localhost` or private IP addresses (including IPv4 hidden in IPv6 forms),
+every redirect is checked too, and a redirect to another host drops credential headers. The shared demo
+account's HTTP steps can only call a few public test APIs (`DEMO_HOSTS` in `worker/steps.ts`).
+
+**Before MongoDB.** Until accounts were added, Knotwork kept its data in Cloudflare D1, with workflows tied to
+a browser rather than an account. That database is left as it was and no longer used: its workflows had no
+owner to move them to.
+
+Everything fits free plans: Cloudflare Workers, static assets, cron triggers and the rate limiter, and a
+MongoDB Atlas M0 cluster. It doesn't call any paid AI API.
 
 ## Run it locally
 
-You need a MongoDB to talk to: a free Atlas cluster, or one on your machine
+You need Node.js 22.6 or newer and a MongoDB to talk to: a free Atlas cluster, or one on your machine
 (`docker run -d -p 27017:27017 mongo:8`).
 
 ```sh
 npm install
-echo "MONGODB_URI=mongodb://127.0.0.1:27017" > .dev.vars   # gitignored; use your Atlas string if you like
+# .dev.vars is gitignored. Use your Atlas string instead if you like.
+printf 'MONGODB_URI=mongodb://127.0.0.1:27017\nAUTH_PEPPER=%s\n' "$(openssl rand -base64 32)" > .dev.vars
 MONGODB_URI=mongodb://127.0.0.1:27017 npm run db:setup     # creates the indexes, once
 npm run dev                                                # http://localhost:5173
 ```
 
-The cron doesn't fire on its own in local development. Click **Check now** on a waiting run.
+The database is called `knotwork` (`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable).
+The cron doesn't fire on its own in local development: click **Check now** on a waiting run, or run one tick
+(schedules and waiting runs) with `curl http://localhost:5173/cdn-cgi/handler/scheduled`.
 
 ```sh
 npm test                                              # unit tests: templates, cron, filters, auth helpers
-MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test   # also the engine and data tests, in a throwaway database
+MONGODB_TEST_URI=mongodb://127.0.0.1:27017 npm test   # also the engine and data tests, in a throwaway
+                                                      # database that is dropped afterwards
 npm run build                                         # type-check and build
 ```
 
 ## Deploy to Cloudflare
 
-1. Create a free **M0** cluster on [MongoDB Atlas](https://cloud.mongodb.com), a database user with
-   read and write access, and an IP access list entry `0.0.0.0/0` (Workers have no fixed IP addresses;
-   the user's password is what protects the data).
+1. Create a free **M0** cluster on [MongoDB Atlas](https://cloud.mongodb.com) and a database user with only
+   the `readWrite` role on the `knotwork` database and a long random password. Add the IP access list entry
+   `0.0.0.0/0`: Workers have no fixed IP addresses, so that password is what protects the data.
 2. Then:
 
 ```sh
 npx wrangler login
 MONGODB_URI="mongodb+srv://..." npm run db:setup   # indexes, once per database
 npx wrangler secret put MONGODB_URI                # paste the same connection string
+npx wrangler secret put AUTH_PEPPER                # paste a long random string, e.g. from `openssl rand -base64 32`
 npm run deploy
 ```
+
+Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
+password stop working.
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
 own domain, or remove it to use the `*.workers.dev` address.
@@ -121,13 +156,15 @@ Because anyone can sign up, there are limits ([`shared/limits.ts`](shared/limits
 person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
-- 60 runs per account per hour (webhooks, schedules and manual runs together), and 1,500 per hour overall.
-- 5 new accounts per IP address per hour and 300 per day; 10 wrong passwords per email and IP per 15 minutes.
+- 60 runs per account per clock hour (webhooks, schedules and manual runs together), and 600 per hour overall.
+- 120 requests a minute per IP address; 5 new accounts per IP address per hour and 300 a day; 10 login
+  attempts per email and IP per 15 minutes; 30 demo sign-ins per IP per hour.
 - Schedules run at most every 5 minutes, in UTC.
-- 15s per HTTP call, 256 KB per webhook payload or response, up to 5 retries per step, 256 KB of step
-  outputs per run.
-- Runs are deleted after 14 days. Workflows stay until you delete them.
-- The demo account is shared by everyone who opens it and is reset every day at 03:00 UTC.
+- 32 KB per workflow and 64 KB per webhook payload or test input. HTTP calls get 15s and 256 KB of response;
+  up to 5 retries per step; 16 KB of output is kept per step and 64 KB per run.
+- Runs are deleted 7 days after they start or last waited. Workflows stay until you delete them.
+- The demo account is shared by everyone who opens it, so its 60 runs an hour are shared too. Its HTTP steps
+  can only call a few public test APIs, and it is reset every day at 03:00 UTC.
 
 ## Roadmap
 

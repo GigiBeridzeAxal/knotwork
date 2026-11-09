@@ -1,8 +1,9 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import { LIMITS } from "../../shared/limits";
-import { api } from "../api";
+import { PASSWORD_MIN } from "../../shared/schema";
+import { api, ApiError } from "../api";
 import { Avatar } from "../components/AppShell";
-import { Button, Card, inputClass, PageTitle } from "../components/ui";
+import { Button, Card, Field, inputClass, PageTitle } from "../components/ui";
 import { navigate } from "../router";
 import { useSession } from "../session";
 import { useWorkspace } from "../workspace";
@@ -90,6 +91,95 @@ function WorkspaceSettings() {
   );
 }
 
+/** Changing the password needs the current one, and signs out every other device. */
+function PasswordSettings() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setNote(null);
+    try {
+      await api.changePassword(current, next);
+      setCurrent("");
+      setNext("");
+      setNote({ ok: true, text: "Password changed. Other devices were logged out." });
+    } catch (err) {
+      const issue = err instanceof ApiError ? err.issues[0]?.message : undefined;
+      setNote({ ok: false, text: issue && err instanceof ApiError && err.status === 400 ? issue : (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="p-5 sm:p-6">
+      <form onSubmit={save} className="flex flex-col gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Current password" htmlFor="pw-current">
+            <input id="pw-current" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} className={inputClass} />
+          </Field>
+          <Field label="New password" htmlFor="pw-next" hint={`At least ${PASSWORD_MIN} characters`}>
+            <input id="pw-next" type="password" autoComplete="new-password" minLength={PASSWORD_MIN} value={next} onChange={(e) => setNext(e.target.value)} className={inputClass} />
+          </Field>
+        </div>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+          {note && <p className={note.ok ? "text-[13px] text-soft" : "text-[13px] text-fail"} role="status">{note.text}</p>}
+          <Button type="submit" className="shrink-0 sm:ml-auto" disabled={busy || !current || next.length < PASSWORD_MIN}>
+            Change password
+          </Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
+/** Deleting the account removes everything in it. The password confirms it's really the owner. */
+function DeleteAccount() {
+  const { logout } = useSession();
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+
+  async function remove(e: FormEvent) {
+    e.preventDefault();
+    if (!confirm("Delete your account with every workspace, workflow and run? This can't be undone.")) return;
+    setBusy(true);
+    setNote("");
+    try {
+      await api.deleteAccount(password);
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) {
+      setNote((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card className="p-5 sm:p-6">
+      <form onSubmit={remove} className="flex flex-col gap-4">
+        <p className="text-[13px] text-muted">
+          Deletes your account, every workspace, workflow, webhook and run. Your email can be used to sign up again afterwards.
+        </p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <Field label="Your password" htmlFor="delete-password" error={note || undefined}>
+              <input id="delete-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} className={inputClass} />
+            </Field>
+          </div>
+          <Button type="submit" variant="danger" className="shrink-0" disabled={busy || !password}>
+            Delete account
+          </Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const { workflows, runsThisHour } = useWorkspace();
   const { me, workspace, logout } = useSession();
@@ -122,6 +212,12 @@ export function SettingsPage() {
         </Card>
       </Section>
 
+      {!me.user.demo && (
+        <Section title="Password" blurb="Changing it logs you out everywhere else.">
+          <PasswordSettings />
+        </Section>
+      )}
+
       <Section title="Workspace" blurb="Workspaces keep groups of workflows apart. Switch between them from the sidebar.">
         <WorkspaceSettings key={workspace.id} />
       </Section>
@@ -130,7 +226,7 @@ export function SettingsPage() {
         <Card>
           <Row label={`Workflows in ${workspace.name}`} value={`${workflows?.length ?? 0} / ${LIMITS.workflowsPerWorkspace}`} />
           <Row label="Workspaces" value={`${me.workspaces.length} / ${LIMITS.workspacesPerAccount}`} />
-          <Row label="Runs in the last hour (whole account)" value={`${runsThisHour} / ${LIMITS.runsPerAccountPerHour}`} />
+          <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${LIMITS.runsPerAccountPerHour}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>
@@ -142,6 +238,12 @@ export function SettingsPage() {
           <Row label="Workflows" value="until you delete them" />
         </Card>
       </Section>
+
+      {!me.user.demo && (
+        <Section title="Delete account" blurb="Removes the account and everything in it, right away.">
+          <DeleteAccount />
+        </Section>
+      )}
     </div>
   );
 }

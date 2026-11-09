@@ -1,7 +1,9 @@
 import { type Db, MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { WorkflowInput } from "../shared/schema";
-import { deleteWorkspace, getRun, insertWorkflow, runBlocked, updateWorkflow } from "../worker/db";
+import type { Workflow } from "../shared/schema";
+import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
+import { ensureDemo } from "../worker/demo";
 import { advance, createRun, tick } from "../worker/engine";
 import { type Collections, collections } from "../worker/mongo";
 
@@ -16,11 +18,13 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   let client: MongoClient;
   let db: Db;
   let c: Collections;
+  let ferret = false;
 
   beforeAll(async () => {
     client = await MongoClient.connect(uri!);
     db = client.db(`knotwork_test_${Date.now()}`);
     c = collections(db);
+    ferret = "ferretdbVersion" in (await db.admin().command({ buildInfo: 1 }));
   });
 
   afterAll(async () => {
@@ -31,8 +35,19 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   const wfInput = (steps: WorkflowInput["steps"]): WorkflowInput => ({ name: "Test", description: "", enabled: true, trigger: { type: "manual" }, steps });
   const transform = (id: string, output: unknown) => ({ id, name: id, type: "transform" as const, retry: { max: 0, backoffSeconds: 5 }, config: { output } });
 
+  async function workspace(id: string, ownerId: string) {
+    await c.workspaces.updateOne({ _id: id }, { $setOnInsert: { ownerId, name: id, personal: false, createdAt: 1 } }, { upsert: true });
+  }
+
+  async function addWorkflow(ws: string, owner: string, input: WorkflowInput): Promise<Workflow> {
+    await workspace(ws, owner);
+    const wf = await insertWorkflow(c, ws, owner, input, Date.now());
+    if (typeof wf === "string") throw new Error(`insert refused: ${wf}`);
+    return wf;
+  }
+
   async function start(steps: WorkflowInput["steps"], owner = "usr_a", ws = "ws_a") {
-    const wf = await insertWorkflow(c, ws, owner, wfInput(steps), Date.now());
+    const wf = await addWorkflow(ws, owner, wfInput(steps));
     const runId = await createRun(c, { ...wf, ownerId: owner }, "manual", { body: { n: 1 } });
     return { wf, runId };
   }
@@ -43,7 +58,26 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     const run = await getRun(c, runId, "ws_a");
     expect(run?.status).toBe("succeeded");
     expect(run?.logs.map((l) => l.output)).toEqual([{ n: 1 }, 1]);
+    expect(run?.input).toEqual({ body: { n: 1 } });
     expect((await c.workflows.findOne({ _id: wf.id }))?.lastRun?.status).toBe("succeeded");
+  });
+
+  it("shows a parked run as waiting on its workflow and keeps it until after it wakes", async () => {
+    const delay = { id: "d", name: "Wait", type: "delay" as const, retry: { max: 0, backoffSeconds: 5 }, config: { seconds: 6 * 86_400 } };
+    const { wf, runId } = await start([delay, transform("a", 1)]);
+    await advance(c, runId);
+    const run = await c.runs.findOne({ _id: runId });
+    expect(run?.status).toBe("waiting");
+    expect(run!.expiresAt.getTime()).toBeGreaterThan(run!.nextRunAt! + 6 * 86_400_000);
+    expect((await c.workflows.findOne({ _id: wf.id }))?.lastRun?.status).toBe("waiting");
+  });
+
+  it("keeps only a short preview of each output in the log", async () => {
+    const { runId } = await start([transform("a", "x".repeat(5_000))]);
+    await advance(c, runId);
+    const run = await c.runs.findOne({ _id: runId });
+    expect(run?.outputs.a).toHaveLength(5_000);
+    expect(run?.logs[0].output).toMatchObject({ truncated: true });
   });
 
   it("survives a step whose output contains the run's own context", async () => {
@@ -72,7 +106,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   });
 
   it("refuses a save made from an old version", async () => {
-    const wf = await insertWorkflow(c, "ws_a", "usr_a", wfInput([]), Date.now());
+    const wf = await addWorkflow("ws_a", "usr_a", wfInput([]));
     const first = await updateWorkflow(c, wf.id, "ws_a", { ...wfInput([]), name: "Tab one" }, 1, Date.now());
     expect(first.ok).toBe(true);
     const second = await updateWorkflow(c, wf.id, "ws_a", { ...wfInput([]), name: "Tab two" }, 1, Date.now());
@@ -82,11 +116,32 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
 
   it("counts runs per account for the hourly limit", async () => {
     const now = Date.now();
-    await c.runs.insertMany(
-      Array.from({ length: 60 }, (_, i) => ({ _id: `run_limit_${i}`, ownerId: "usr_busy", createdAt: now - 1000 }) as never),
-    );
-    expect(await runBlocked(c, "usr_busy", now)).toMatch(/60 runs/);
-    expect(await runBlocked(c, "usr_quiet", now)).toBeNull();
+    const results = [];
+    for (let i = 0; i < 61; i++) results.push(await takeRunSlot(c, "usr_busy", now));
+    expect(results.filter((r) => r === null)).toHaveLength(60);
+    expect(results[60]).toMatch(/60 runs/);
+    expect(await takeRunSlot(c, "usr_quiet", now)).toBeNull();
+  });
+
+  it("doesn't let runs started at the same moment get past the limit", async (ctx) => {
+    // FerretDB (a stand-in for local testing) doesn't apply parallel $inc atomically; MongoDB does.
+    if (ferret) ctx.skip();
+    const now = Date.now();
+    const results = await Promise.all(Array.from({ length: 70 }, () => takeRunSlot(c, "usr_rush", now)));
+    expect(results.filter((r) => r === null)).toHaveLength(60);
+  });
+
+  it("never lets parallel saves put more workflows in a workspace than the limit", async () => {
+    await workspace("ws_full", "usr_f");
+    const results = await Promise.all(Array.from({ length: 14 }, () => insertWorkflow(c, "ws_full", "usr_f", wfInput([]), Date.now())));
+    expect(results.filter((r) => typeof r !== "string").length).toBeLessThanOrEqual(10);
+    expect(await c.workflows.countDocuments({ workspaceId: "ws_full" })).toBeLessThanOrEqual(10);
+    expect(await insertWorkflow(c, "ws_missing", "usr_f", wfInput([]), Date.now())).toBe("gone");
+  });
+
+  it("seeds the demo account once, even when many people open it at the same moment", async () => {
+    await Promise.all(Array.from({ length: 5 }, () => ensureDemo(c, Date.now())));
+    expect(await c.workflows.countDocuments({ ownerId: "usr_demo" })).toBe(3);
   });
 
   it("deletes a workspace with its workflows and runs, but never the personal one", async () => {

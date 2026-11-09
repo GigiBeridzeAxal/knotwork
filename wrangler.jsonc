@@ -9,12 +9,16 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*", "/hooks/*"]
   },
-  // Data lives in MongoDB Atlas (free M0 cluster). The connection string is the MONGODB_URI secret:
-  // `npx wrangler secret put MONGODB_URI`. Locally it comes from .dev.vars (see README).
+  // Data lives in MongoDB Atlas (free M0 cluster). Two secrets, set once with `npx wrangler secret put`:
+  // MONGODB_URI (the connection string) and AUTH_PEPPER (a long random string mixed into password
+  // hashes). Locally both come from .dev.vars (see README).
   "vars": { "MONGODB_DB": "knotwork" },
   // Run the Worker near the database instead of near the visitor: each request opens a database
   // connection, and the handshake is several round trips.
   "placement": { "mode": "smart" },
+  // Cloudflare's free rate limiter: 120 requests a minute per IP (or IPv6 /64) to /api and /hooks,
+  // turned away before the Worker opens a database connection. Matches LIMITS.requestsPerIpPerMinute.
+  "ratelimits": [{ "name": "IP_LIMITER", "namespace_id": "1001", "simple": { "limit": 120, "period": 60 } }],
   // Every minute: start scheduled workflows and resume runs that are waiting on a retry or a delay.
   "triggers": { "crons": ["* * * * *"] },
   // Served at knotwork.gigiberidze.com. Cloudflare creates the DNS record and certificate on deploy.

@@ -4,8 +4,12 @@ import type { LogStatus, RunStatus, Step, Trigger, WorkflowInput } from "../shar
 export interface Env {
   /** mongodb+srv://… for the Atlas cluster. A Wrangler secret in production, `.dev.vars` locally. */
   MONGODB_URI: string;
-  /** Database name inside the cluster. */
+  /** Database name inside the cluster. Set in wrangler.jsonc; `npm run db:setup` reads the same name. */
   MONGODB_DB?: string;
+  /** A long random secret mixed into every password hash. A Wrangler secret; `.dev.vars` locally. */
+  AUTH_PEPPER: string;
+  /** Cloudflare's rate-limiting binding: a per-IP request budget checked before any database work. */
+  IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   ASSETS: Fetcher;
 }
 
@@ -15,7 +19,7 @@ export interface UserDoc {
   _id: string;
   name: string;
   email: string;
-  /** PBKDF2-SHA-256. Null for the demo account, which can only be entered with the demo button. */
+  /** PBKDF2-SHA-256 of the peppered password. Null for the demo account, which only the demo button opens. */
   password: { hash: string; salt: string; iterations: number } | null;
   demo: boolean;
   createdAt: number;
@@ -53,6 +57,7 @@ export interface WorkflowDoc extends WorkflowInput {
   updatedAt: number;
 }
 
+/** A run log line. It keeps a short preview of the step's output; the full output is in `outputs`. */
 export interface LogDoc {
   id: number;
   stepId: string;
@@ -128,6 +133,7 @@ export function collections(db: Db): Collections {
 export class Mongo {
   private client: MongoClient | null = null;
   private cols: Collections | null = null;
+  private database: Db | null = null;
 
   private env: Env;
 
@@ -139,20 +145,32 @@ export class Mongo {
     if (!this.cols) {
       if (!this.env.MONGODB_URI) throw new Error("MONGODB_URI is not set");
       this.client = new MongoClient(this.env.MONGODB_URI, {
-        maxPoolSize: 4,
+        // One pooled connection per request: each extra one costs a TLS and SCRAM handshake, and a
+        // Worker may only hold six sockets open at once (the replica set's monitors take three).
+        maxPoolSize: 1,
+        // "stream" would add a second socket per server after 10 s; polling keeps one.
+        serverMonitoringMode: "poll",
         serverSelectionTimeoutMS: 8_000,
         connectTimeoutMS: 8_000,
         appName: "knotwork",
       });
-      this.cols = collections(this.client.db(this.env.MONGODB_DB || "knotwork"));
+      this.database = this.client.db(this.env.MONGODB_DB || "knotwork");
+      this.cols = collections(this.database);
     }
     return this.cols;
+  }
+
+  /** The database itself, for commands such as `dbStats`. */
+  get db(): Db {
+    void this.c;
+    return this.database!;
   }
 
   async close() {
     const client = this.client;
     this.client = null;
     this.cols = null;
+    this.database = null;
     await client?.close().catch(() => {});
   }
 }
@@ -166,14 +184,13 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.users.createIndex({ email: 1 }, { unique: true }),
     c.sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.sessions.createIndex({ userId: 1 }),
-    c.workspaces.createIndex({ ownerId: 1, createdAt: 1 }),
+    c.workspaces.createIndex({ ownerId: 1, personal: -1, createdAt: 1 }),
     c.workflows.createIndex({ workspaceId: 1, updatedAt: -1 }),
     c.workflows.createIndex({ hookKey: 1 }, { unique: true }),
     c.workflows.createIndex({ "trigger.type": 1, enabled: 1 }),
     c.runs.createIndex({ workspaceId: 1, createdAt: -1 }),
     c.runs.createIndex({ workflowId: 1, createdAt: -1 }),
-    c.runs.createIndex({ ownerId: 1, createdAt: -1 }),
-    c.runs.createIndex({ createdAt: -1 }),
+    c.runs.createIndex({ status: 1, createdAt: 1 }),
     c.runs.createIndex({ status: 1, nextRunAt: 1 }),
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),

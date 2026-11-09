@@ -5,6 +5,7 @@ import { api, ApiError, type Issue } from "../api";
 import { Button, Card, cn, Eyebrow, Field, inputClass, StatusBadge, textareaClass, timeAgo } from "../components/ui";
 import { BLANK, newStep, STEP_TYPES } from "../../shared/examples";
 import { Link, navigate } from "../router";
+import { useFindElsewhere } from "../session";
 import { StepEditor } from "./StepEditor";
 
 const CRON_PRESETS = [
@@ -33,6 +34,7 @@ export function EditorPage({ id }: { id: string | null }) {
   const [runInput, setRunInput] = useState('{\n  "amount": 120,\n  "id": "order_1"\n}');
   // Remounts the step editors after a save, so their local text matches what the server stored.
   const [version, setVersion] = useState(0);
+  const findElsewhere = useFindElsewhere();
 
   useEffect(() => {
     if (!id) return;
@@ -41,10 +43,13 @@ export function EditorPage({ id }: { id: string | null }) {
         setSaved(wf);
         setDraft(toInput(wf));
       },
-      (e) => setMessage(e.message),
+      async (e) => {
+        if (e instanceof ApiError && e.status === 404 && (await findElsewhere("workflow", id))) return;
+        setMessage(e.message);
+      },
     );
     api.runs(id).then(setRuns, () => {});
-  }, [id]);
+  }, [id, findElsewhere]);
 
   const dirty = useMemo(
     () => !saved || JSON.stringify(toInput(saved)) !== JSON.stringify(draft),

@@ -51,6 +51,11 @@ export const api = {
   login: (input: { email: string; password: string }) => request<Me>("/auth/login", post(input)),
   demo: () => request<Me>("/auth/demo", post()),
   logout: () => request<void>("/auth/logout", post()),
+  changePassword: (current: string, next: string) => request<void>("/auth/password", post({ current, next })),
+  deleteAccount: (password: string) => request<void>("/auth/delete-account", post({ password })),
+  /** Which of the user's workspaces holds a workflow or run. */
+  locate: (kind: "workflow" | "run", id: string) =>
+    request<{ workspaceId: string }>(`/locate/${kind}/${encodeURIComponent(id)}`),
 
   createWorkspace: (name: string) => request<Workspace>("/workspaces", post({ name })),
   renameWorkspace: (id: string, name: string) =>
