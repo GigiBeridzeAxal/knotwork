@@ -451,6 +451,25 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await c.runs.deleteMany({});
   });
 
+  it("leaves an account's few runs in flight alone while older history is still being trimmed", async () => {
+    await c.runs.deleteMany({});
+    const now = Date.now();
+    await c.runs.insertMany([
+      ...Array.from({ length: 5 }, (_, i) => ({ _id: `run_fly_${i}`, ownerId: "usr_fly", status: "waiting", nextRunAt: now + 600_000, createdAt: now }) as never),
+      ...Array.from({ length: 5_000 }, (_, i) => ({ _id: `run_hist_${i}`, ownerId: "usr_hist", status: "succeeded", createdAt: i }) as never),
+    ]);
+    const stats = { stats: async () => ({ dataSize: 380 * 1024 * 1024, indexSize: 0 }) } as unknown as Db;
+    await guardStorage(c, stats, now);
+    await guardStorage(c, stats, now);
+    expect(await c.runs.countDocuments({ ownerId: "usr_fly", status: "waiting" })).toBe(5);
+    expect(await c.runs.countDocuments({ ownerId: "usr_hist" })).toBe(1_000);
+    // With the older history gone, the next check stops them (which here frees enough).
+    const sizes = [380 * 1024 * 1024, 380 * 1024 * 1024, 300 * 1024 * 1024];
+    await guardStorage(c, { stats: async () => ({ dataSize: sizes.shift() ?? 300 * 1024 * 1024, indexSize: 0 }) } as unknown as Db, now);
+    expect(await c.runs.countDocuments({ ownerId: "usr_fly", status: "stopped" })).toBe(5);
+    await c.runs.deleteMany({});
+  });
+
   it("clears the full flag in the same check that frees the space", async () => {
     await c.runs.deleteMany({});
     await c.counters.deleteMany({ _id: { $in: ["storage:high", "storage:full"] } });

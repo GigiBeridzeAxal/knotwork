@@ -557,8 +557,9 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
     //   1. shrink runs waiting more than a day ahead (long waits are what filling the space needs);
     //   2. shrink the pending runs of accounts holding far more than usual, biggest backlogs first;
     //   3. delete finished runs beyond each account's newest 50, the longest histories first;
-    //   4. shrink the pending runs of accounts holding several;
-    //   5. delete everyone's oldest finished runs, once no account has history beyond 50 left to trim;
+    //   4. shrink the pending runs of accounts holding several, and
+    //   5. delete everyone's oldest finished runs, both once less than 100 runs beyond anyone's newest 50
+    //      are left to trim (or right away near the full mark);
     //   6. near the full mark, shrink any pending runs, the biggest backlogs first.
     // So many mid-sized backlogs can cost other accounts their older history, but not their recent runs.
     if (await shrinkLongWaits(c, now)) used = await measure();
@@ -569,11 +570,14 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
       moreHistory = trimmed.more;
       if (trimmed.deleted) used = await measure();
     }
-    if (used > STORAGE_PRUNE_BYTES && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) used = await measure();
-    // While other accounts still have history beyond their newest 50, the next check (a minute away)
-    // trims that before anyone's recent runs go.
-    // Near the full mark, though, old history always goes before anyone's runs in flight.
-    if (used > STORAGE_PRUNE_BYTES && (!moreHistory || used > STORAGE_FULL_BYTES)) {
+    // While accounts still have history beyond their newest 50, the next check (a minute away) trims
+    // that before anyone's runs in flight are stopped or anyone's recent runs go. Near the full mark
+    // steps 4 and 5 run anyway, before step 6 stops every account's runs in flight.
+    const historyDone = !moreHistory || used > STORAGE_FULL_BYTES;
+    if (used > STORAGE_PRUNE_BYTES && historyDone && (await shrinkBacklogs(c, now, SHRINK_BACKLOG_FROM))) {
+      used = await measure();
+    }
+    if (used > STORAGE_PRUNE_BYTES && historyDone) {
       const old = await c.runs
         .find({ status: { $in: FINISHED } }, { projection: { _id: 1 } })
         .sort({ createdAt: 1 })

@@ -77,10 +77,10 @@ TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so 
 data. Every 10 minutes (every minute once past 250 MB) the cron checks how much of the cluster's 512 MB is in
 use. Past 350 MB, in order and only as far as needed: runs waiting more than a day ahead are stopped, then
 the pending runs of accounts holding more than 20 (biggest backlogs first), then each account's finished
-runs beyond its newest 50 are deleted (longest histories first), then the pending runs of accounts holding
-5 or more are stopped, then everyone's oldest finished runs are deleted (once fewer than 100 runs beyond anyone's newest 50
-are left to trim, or right away near 450 MB), and near 450 MB any pending runs. A stopped run keeps only the reason. Past 450 MB it
-pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
+runs beyond its newest 50 are deleted (longest histories first, 5 accounts a check, oldest runs first).
+Once fewer than 100 such runs are left (or right away near 450 MB), the pending runs of accounts holding 5
+or more are stopped, then everyone's oldest finished runs are deleted; near 450 MB, any pending runs. A
+stopped run keeps only the reason. Past 450 MB it pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
 in all; see Limits), so even a burst can't fill the space between two checks.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
