@@ -276,6 +276,14 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect((await accept(other.token, goneAgain)).status).toBe(404);
       expect((await call("POST", "/api/workflows", { cookie: goneAgain.cookie, ws, body: flow("Back") })).status).toBe(404);
       expect(await raw.members.countDocuments({ workspaceId: ws })).toBe(0);
+      // A member who opened a second link while already in loses that one too when removed.
+      const [first, second] = [await invite(alice, ws, "viewer"), await invite(alice, ws, "editor")];
+      const two = await person("Two");
+      expect((await accept(first.token, two)).status).toBe(200);
+      expect((await accept(second.token, two)).status).toBe(200);
+      expect((await raw.members.findOne({ workspaceId: ws, userId: two.id }))?.role).toBe("viewer");
+      expect((await call("DELETE", `/api/workspaces/${ws}/members/${two.id}`, { cookie: alice.cookie })).status).toBe(204);
+      expect((await accept(second.token, two)).status).toBe(404);
       // A link nobody who left has used stays open, and a fresh link lets Ed back in.
       const fresh = await invite(alice, ws, "viewer");
       expect((await accept(fresh.token, late)).status).toBe(200);

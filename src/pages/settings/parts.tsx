@@ -19,8 +19,8 @@ export function Section({ title, blurb, children }: { title: string; blurb: Reac
 export function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-4 border-t border-line px-5 py-4 first:border-0">
-      <span className="text-sm text-soft">{label}</span>
-      <span className="text-right font-mono text-sm text-text tabular-nums">{value}</span>
+      <span className="min-w-0 text-sm [overflow-wrap:anywhere] text-soft">{label}</span>
+      <span className="shrink-0 text-right font-mono text-sm text-text tabular-nums">{value}</span>
     </div>
   );
 }

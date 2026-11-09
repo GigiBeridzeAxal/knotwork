@@ -80,7 +80,7 @@ export function Members() {
     <>
       <Card>
         <div className="flex items-center justify-between gap-4 px-5 pt-4 pb-3 sm:px-6">
-          <span className="text-[13px] text-soft">People in {workspace.name}</span>
+          <span className="min-w-0 text-[13px] [overflow-wrap:anywhere] text-soft">People in {workspace.name}</span>
           <Count used={others} max={LIMITS.membersPerWorkspace} noun="members" />
         </div>
         <ul aria-label="Members">

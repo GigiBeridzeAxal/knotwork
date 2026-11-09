@@ -84,7 +84,7 @@ export function ApiKeys() {
       ) : (
         <Card className="p-5 sm:p-6">
           <form onSubmit={create} className="flex flex-col gap-4">
-            <p className="text-[13px] text-muted">
+            <p className="text-[13px] [overflow-wrap:anywhere] text-muted">
               A new key works in <span className="text-soft">{workspace.name}</span> only. To use another workspace, switch to it first.
             </p>
             <div className="grid gap-4 sm:grid-cols-[1fr_200px]">
@@ -94,7 +94,7 @@ export function ApiKeys() {
               <Field
                 label="Access"
                 htmlFor="key-access"
-                hint={writable ? (access === "write" ? "Can also change and run workflows." : "Can list workflows and runs.") : "Viewers can only make read keys."}
+                hint={writable ? (access === "write" ? "Can also change and run workflows." : "Can read workflows and runs, including every step's settings.") : "Viewers can only make read keys."}
               >
                 <select id="key-access" className={inputClass} value={writable ? access : "read"} onChange={(e) => setAccess(e.target.value as ApiKeyAccess)}>
                   <option value="read">Read only</option>

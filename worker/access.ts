@@ -166,7 +166,13 @@ export async function acceptInvite(c: Collections, token: string, userId: string
   const { invite, workspace } = found;
   const id = memberId(workspace._id, userId);
   const isMember = async () => (await c.members.findOne({ _id: id }, { projection: { _id: 1 } })) !== null;
-  if (workspace.ownerId === userId || (await isMember())) return { ok: true, workspaceId: workspace._id, already: true };
+  if (workspace.ownerId === userId) return { ok: true, workspaceId: workspace._id, already: true };
+  if (await isMember()) {
+    // A member who opens another link holds it too: it's noted (without taking a place), so it ends
+    // with the others if they are removed or made a viewer.
+    await c.invites.updateOne({ _id: invite._id }, { $addToSet: { joined: userId } });
+    return { ok: true, workspaceId: workspace._id, already: true };
+  }
   if (invite.joined.includes(userId)) return { ok: false, reason: "spent" };
   if ((await c.members.countDocuments({ userId }, { limit: LIMITS.joinedWorkspacesPerAccount })) >= LIMITS.joinedWorkspacesPerAccount) {
     return { ok: false, reason: "too-many" };

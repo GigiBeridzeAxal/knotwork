@@ -92,7 +92,7 @@ export function JoinPage({ token }: { token: string }) {
           <>
             <div className="flex min-w-0 flex-col gap-3">
               <p className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Invite</p>
-              <h1 className="font-display text-[32px] leading-[1.1] font-bold tracking-tight text-balance break-words sm:text-[40px]">
+              <h1 className="font-display text-[32px] leading-[1.1] font-bold tracking-tight text-balance [overflow-wrap:anywhere] sm:text-[40px]">
                 {state.invite.already ? (
                   <>You're already in {state.invite.workspaceName}</>
                 ) : (
@@ -115,7 +115,7 @@ export function JoinPage({ token }: { token: string }) {
                   <span className="truncate font-medium">{state.invite.workspaceName}</span>
                   <span className="shrink-0 rounded-full bg-raised px-2 py-0.5 font-mono text-[11px] text-soft">{ROLE_LABEL[state.invite.role]}</span>
                 </span>
-                <span className="text-[13px] break-words text-muted">
+                <span className="text-[13px] [overflow-wrap:anywhere] text-muted">
                   {state.invite.ownerName}'s workspace. {ROLE_CAN[state.invite.role]}
                 </span>
               </div>
