@@ -121,6 +121,25 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect((await call("POST", "/api/workspaces", { cookie: alice.cookie, raw: JSON.stringify({ name: "x".repeat(70_000) }) })).status).toBe(413);
   });
 
+  it("answers 400, not 500, for JSON nested too deeply to store", async () => {
+    const deep = (levels: number) => '{"a":'.repeat(levels) + "1" + "}".repeat(levels);
+    const transform = (output: string) => ({
+      ...flow("Deep"),
+      steps: [{ id: "t_1", name: "T", type: "transform", retry: { max: 0, backoffSeconds: 5 }, config: { output: JSON.parse(output) } }],
+    });
+    const created = await call("POST", "/api/workflows", { ...alice, body: transform(deep(600)) });
+    expect(created.status).toBe(400);
+    const ok = await call("POST", "/api/workflows", { ...alice, body: flow("Deep hook", { type: "webhook" }) });
+    expect(ok.status).toBe(201);
+    const saved = await call("PUT", `/api/workflows/${ok.body.id}`, { ...alice, body: { ...transform(deep(600)), version: ok.body.version } });
+    expect(saved.status).toBe(400);
+    const run = await call("POST", `/api/workflows/${ok.body.id}/run`, { ...alice, raw: `{"input":${deep(600)}}` });
+    expect(run.status).toBe(400);
+    const hook = await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(600) });
+    expect(hook.status).toBe(400);
+    expect((await call("POST", `/hooks/${ok.body.hookKey}`, { raw: deep(40) })).status).toBe(202);
+  });
+
   it("changing the password keeps this session and ends the others", async () => {
     const other = await call("POST", "/api/auth/login", { body: { email: "bob@example.com", password: "bob-password-12" } });
     const wrong = await call("POST", "/api/auth/password", { cookie: bob.cookie, body: { current: "not-it-at-all", next: "bob-password-new" } });

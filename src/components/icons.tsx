@@ -98,3 +98,9 @@ export const TemplatesIcon = (p: SVGProps<SVGSVGElement>) => (
     <path d="M14 11.500v5M11.500 14h5" />
   </Icon>
 );
+export const BookIcon = (p: SVGProps<SVGSVGElement>) => (
+  <Icon {...p}>
+    <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H16v12.5H5.5A1.5 1.5 0 0 0 4 17z" />
+    <path d="M4 17a1.5 1.5 0 0 1 1.5-1.5H16V17" />
+  </Icon>
+);

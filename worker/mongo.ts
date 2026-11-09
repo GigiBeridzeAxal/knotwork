@@ -18,9 +18,11 @@ export interface Env {
   ASSETS: Fetcher;
   /**
    * The Durable Object that runs the API and the cron tick on one long-lived database connection
-   * (worker/hub.ts). Without it (tests, plain `vite dev`), each request opens its own connection.
+   * (worker/hub.ts). Without it (the tests), each request opens its own connection.
    */
   HUB?: DurableObjectNamespace;
+  /** Set to any value to run without the hub (`wrangler deploy --var HUB_OFF:1`): the way back if the hub is the problem. */
+  HUB_OFF?: string;
   /** Set only inside the hub: the connection it keeps open across requests. */
   SHARED_MONGO?: Mongo;
 }
@@ -177,6 +179,10 @@ export class Mongo {
 
   /** A shared connection (the hub's) serves requests that overlap, so it may use two sockets. */
   private shared: boolean;
+  /** Set by close(). A closed Mongo never reconnects, so nothing can open a client that nobody closes. */
+  closed = false;
+  /** Set when a request failed with a connection error; the hub then replaces this connection. */
+  broken = false;
 
   constructor(env: Env, { shared = false } = {}) {
     this.env = env;
@@ -184,6 +190,7 @@ export class Mongo {
   }
 
   get c(): Collections {
+    if (this.closed) throw new Error("This database connection is closed");
     if (!this.cols) {
       if (!this.env.MONGODB_URI) throw new Error("MONGODB_URI is not set");
       this.client = new MongoClient(this.env.MONGODB_URI, {
@@ -194,6 +201,10 @@ export class Mongo {
         serverMonitoringMode: "poll",
         serverSelectionTimeoutMS: 8_000,
         connectTimeoutMS: 8_000,
+        // A socket that hangs, or a queue behind two busy sockets, becomes an error instead of a
+        // request that waits for ever. No query here should take anywhere near this long.
+        socketTimeoutMS: 20_000,
+        waitQueueTimeoutMS: 10_000,
         appName: "knotwork",
       });
       this.started = Date.now();
@@ -211,12 +222,30 @@ export class Mongo {
   }
 
   async close() {
+    this.closed = true;
     const client = this.client;
     this.client = null;
     this.cols = null;
     this.database = null;
     await client?.close().catch(() => {});
   }
+}
+
+const CONNECTION_ERRORS = new Set([
+  "MongoNetworkError",
+  "MongoNetworkTimeoutError",
+  "MongoServerSelectionError",
+  "MongoNotConnectedError",
+  "MongoTopologyClosedError",
+  "MongoPoolClearedError",
+]);
+
+/** True for errors that mean the connection itself failed, as opposed to a bug or a refused write. */
+export function isConnectionError(err: unknown): boolean {
+  for (let e = err as { name?: string; cause?: unknown } | undefined, depth = 0; e && depth < 4; e = e.cause as typeof e, depth++) {
+    if (e.name && CONNECTION_ERRORS.has(e.name)) return true;
+  }
+  return false;
 }
 
 /**

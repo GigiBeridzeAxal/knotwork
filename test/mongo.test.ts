@@ -197,11 +197,17 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   it("gives a reservation back in the hour it was made, even when the run ends in the next", async () => {
     await account("usr_edge");
     const { runId } = await start([transform("a", 1), transform("b", 2), transform("c", 3)], "usr_edge", "ws_edge");
-    // The clock runs on as usual, but starts 5 ms before the hour turns.
+    // The run starts 5 ms before the hour turns, and everything after that first reading of the
+    // clock happens in the next hour, however fast the database answers.
     const realNow = Date.now.bind(Date);
     const nextHour = (Math.floor(realNow() / 3_600_000) + 1) * 3_600_000;
-    const offset = nextHour - 5 - realNow();
-    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    const begun = realNow();
+    let first = true;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => {
+      if (!first) return nextHour + 5 + (realNow() - begun);
+      first = false;
+      return nextHour - 5;
+    });
     try {
       await advance(c, runId);
       expect(Date.now()).toBeGreaterThan(nextHour);
