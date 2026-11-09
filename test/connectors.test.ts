@@ -72,6 +72,25 @@ describe("slack", () => {
     expect(result).toMatchObject({ kind: "fail", message: "Slack answered 403: invalid_token" });
   });
 
+  it("turns @channel, @here and group pings from trigger data into plain text, unless allowed", async () => {
+    const calls = mockFetch(() => new Response("ok"));
+    const evil = { ...scope, trigger: { body: { title: "<!channel> hi <!here|here> <!subteam^S1|@team>" } } };
+    await executeStep(parse({ id: "s", name: "S", type: "slack", config: { webhookUrl: SLACK, text: "New: {{ trigger.body.title }}" } }), evil);
+    expect(sentBody(calls[0]).text).toBe("New: @channel hi @here @group");
+    await executeStep(parse({ id: "s", name: "S", type: "slack", config: { webhookUrl: SLACK, text: "{{ trigger.body.title }}", mentions: true } }), evil);
+    expect(sentBody(calls[1]).text).toContain("<!channel>");
+  });
+
+  it("names the secret to check when a credential renders empty", async () => {
+    const calls = mockFetch(() => new Response("ok"));
+    const noSecrets = { ...scope, secrets: {} };
+    const result = await executeStep(parse({ id: "s", name: "S", type: "slack", config: { webhookUrl: "{{ secrets.SLACK_HOOK }}", text: "hi" } }), noSecrets);
+    expect(result).toMatchObject({ kind: "fail", message: "The Slack webhook URL is empty. Check that the secret SLACK_HOOK exists in this workspace" });
+    const tg = await executeStep(parse({ id: "t", name: "T", type: "telegram", config: { botToken: "{{ secrets.TG }}", chatId: "1", text: "hi" } }), noSecrets);
+    expect(tg).toMatchObject({ kind: "fail", message: "The Telegram bot token is empty. Check that the secret TG exists in this workspace" });
+    expect(calls).toHaveLength(0);
+  });
+
   it("is blocked for the demo account", async () => {
     const calls = mockFetch(() => new Response("ok"));
     const step = parse({ id: "s", name: "S", type: "slack", config: { webhookUrl: SLACK, text: "hi" } });
@@ -190,11 +209,18 @@ describe("github", () => {
 
   it("rejects repo names that would change the API path", async () => {
     const calls = mockFetch(() => json({}));
-    for (const repo of ["o/r/../../user", "o", "o/r?x=1", "../r", "o/.."]) {
+    for (const repo of ["o/r/../../user", "o", "o/r?x=1", "../r", "o/..", "o/."]) {
       const result = await executeStep(parse({ id: "g", name: "G", type: "github", config: { action: "get_repo", repo } }), scope);
       expect(result.kind).toBe("fail");
     }
     expect(calls).toHaveLength(0);
+  });
+
+  it("accepts repository names that start with a dot", async () => {
+    const calls = mockFetch(() => json({ full_name: "o/.github", stargazers_count: 1 }));
+    const result = await executeStep(parse({ id: "g", name: "G", type: "github", config: { action: "get_repo", repo: "o/.github" } }), scope);
+    expect(result.kind).toBe("ok");
+    expect(calls[0].url).toBe("https://api.github.com/repos/o/.github");
   });
 
   it("needs a token to write, and hides it in errors", async () => {

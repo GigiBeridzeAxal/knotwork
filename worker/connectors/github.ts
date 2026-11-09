@@ -2,9 +2,11 @@ import { GITHUB_HOST } from "../../shared/connectors/github";
 import type { Step } from "../../shared/schema";
 import { type Budget, renderText } from "../../shared/template";
 import { clip, type Scope, type StepOptions, type StepResult } from "../steps";
-import { callService, field } from "./common";
+import { callService, field, missingCredential } from "./common";
 
 const REPO = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+/** Visible ASCII only: anything else can't go in a header, and would be quoted back in the error. */
+const TOKEN = /^[\x21-\x7e]+$/;
 const NUMBER = /^[1-9]\d{0,9}$/;
 const MAX_TITLE = 256;
 const MAX_BODY = 65_536;
@@ -13,12 +15,15 @@ const MAX_LABELS = 20;
 export async function github(step: Extract<Step, { type: "github" }>, scope: Scope, options: StepOptions, budget: Budget): Promise<StepResult> {
   const { config } = step;
   const repo = renderText(config.repo, scope, budget).trim();
-  if (!REPO.test(repo) || repo.includes("/.") || repo.endsWith(".")) {
+  const name = repo.slice(repo.indexOf("/") + 1);
+  if (!REPO.test(repo) || name === "." || name === "..") {
     return { kind: "fail", message: `"${clip(repo, 120)}" isn't a repository name like owner/name` };
   }
   const token = renderText(config.token, scope, budget).trim();
-  if (!token && config.action !== "get_repo") return { kind: "fail", message: "GitHub needs a token to write. Add one in the Token field, ideally from a secret" };
-  if (/[\s\r\n]/.test(token)) return { kind: "fail", message: "The GitHub token has spaces or line breaks in it" };
+  if (!token && config.action !== "get_repo") {
+    return { kind: "fail", message: missingCredential("GitHub", "token", config.token, token) ?? "GitHub needs a token to write" };
+  }
+  if (token && !TOKEN.test(token)) return { kind: "fail", message: "The GitHub token has spaces, line breaks or other characters a token can't have" };
 
   const headers: Record<string, string> = { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
   if (token) headers.authorization = `Bearer ${token}`;
@@ -46,7 +51,7 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
       return {
         kind: "ok",
         output: { number: number ?? null, id: field(answer.body, "id") ?? null, url: field(answer.body, "html_url") ?? null },
-        message: `Opened issue #${number} in ${repo}`,
+        message: number === undefined ? `Opened an issue in ${repo}` : `Opened issue #${number} in ${repo}`,
       };
     }
     case "add_comment": {
@@ -80,7 +85,7 @@ export async function github(step: Extract<Step, { type: "github" }>, scope: Sco
           defaultBranch: field(b, "default_branch") ?? null,
           url: field(b, "html_url") ?? null,
         },
-        message: `Read ${repo}: ${stars} stars`,
+        message: typeof stars === "number" ? `Read ${repo}: ${stars} stars` : `Read ${repo}`,
       };
     }
   }

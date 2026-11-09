@@ -2,7 +2,7 @@ import { TELEGRAM_HOST, TELEGRAM_MAX_TEXT } from "../../shared/connectors/telegr
 import type { Step } from "../../shared/schema";
 import { type Budget, renderText } from "../../shared/template";
 import type { Scope, StepOptions, StepResult } from "../steps";
-import { callService, field, tooLong } from "./common";
+import { callService, field, missingCredential, tooLong } from "./common";
 
 const BOT_TOKEN = /^\d{3,20}:[A-Za-z0-9_-]{20,100}$/;
 const CHAT_ID = /^(-?\d{1,20}|@[A-Za-z0-9_]{4,64})$/;
@@ -10,6 +10,8 @@ const CHAT_ID = /^(-?\d{1,20}|@[A-Za-z0-9_]{4,64})$/;
 export async function telegram(step: Extract<Step, { type: "telegram" }>, scope: Scope, options: StepOptions, budget: Budget): Promise<StepResult> {
   const { config } = step;
   const token = renderText(config.botToken, scope, budget).trim();
+  const missing = missingCredential("Telegram", "bot token", config.botToken, token);
+  if (missing) return { kind: "fail", message: missing };
   // Never echo the token, not even part of it.
   if (!BOT_TOKEN.test(token)) return { kind: "fail", message: "The Telegram bot token doesn't look like one from @BotFather (digits, a colon, then letters)" };
   const chatId = renderText(config.chatId, scope, budget).trim();

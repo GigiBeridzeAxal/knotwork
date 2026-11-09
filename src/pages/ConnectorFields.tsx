@@ -67,6 +67,10 @@ export function ConnectorFields({ step, uid, setConfig }: { step: Connector; uid
           <Field label="Blocks (optional)" htmlFor={`${uid}-blocks`} hint="Block Kit JSON for a richer layout. The message above is still shown in notifications.">
             <JsonArea id={`${uid}-blocks`} rows={4} value={step.config.blocks} onChange={(blocks) => setConfig({ blocks })} placeholder='[{ "type": "section", "text": { "type": "mrkdwn", "text": "*Hello*" } }]' />
           </Field>
+          <label className="flex items-center gap-3 text-sm text-soft">
+            <input type="checkbox" className="size-4 accent-spark" checked={step.config.mentions} onChange={(e) => setConfig({ mentions: e.target.checked })} />
+            Allow @channel, @here and group mentions (off, text from a trigger can't ping everyone)
+          </label>
         </>
       );
     case "discord":
@@ -148,7 +152,7 @@ export function ConnectorFields({ step, uid, setConfig }: { step: Connector; uid
             label={action === "get_repo" ? "Token (optional for public repositories)" : "Token"}
             value={step.config.token}
             placeholder="{{ secrets.GITHUB_TOKEN }}"
-            hint={secretHint("GITHUB_TOKEN", "A fine-grained personal access token with Issues: read and write on this repository.")}
+            hint={secretHint("GITHUB_TOKEN", "A fine-grained personal access token with Issues: read and write on this repository (add Pull requests: read and write to comment on pull requests).")}
             onChange={(token) => setConfig({ token })}
           />
           {action === "create_issue" && (

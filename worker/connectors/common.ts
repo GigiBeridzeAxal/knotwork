@@ -16,10 +16,23 @@ export function serviceUrl(text: string, hosts: readonly string[], service: stri
   return url;
 }
 
+/**
+ * When a credential field rendered to nothing, says which secret to check instead of a vague
+ * "isn't valid" (a missing or misspelt `{{ secrets.NAME }}` renders as an empty string).
+ */
+export function missingCredential(service: string, field: string, template: string, rendered: string): string | null {
+  if (rendered.trim()) return null;
+  const name = /secrets\.([A-Za-z0-9_]+)/.exec(template)?.[1];
+  return name
+    ? `The ${service} ${field} is empty. Check that the secret ${name} exists in this workspace`
+    : `The ${service} ${field} is empty`;
+}
+
 /** Hides credentials in a message, in case a service or the network ever repeats one back. */
 export function hide(message: string, secrets: string[]): string {
   let out = message;
-  for (const secret of secrets) if (secret.length >= 6) out = out.split(secret).join("•••");
+  const all = secrets.flatMap((s) => [s, s.trim()]).filter((s) => s.length >= 6).sort((a, b) => b.length - a.length);
+  for (const secret of all) out = out.split(secret).join("•••");
   return out;
 }
 
@@ -43,7 +56,13 @@ export async function callService(
     body = JSON.stringify(init.json);
     headers.set("content-type", "application/json");
   }
-  const sent = await send({ method: init.method ?? "POST", url, headers, body, maxRedirects: 0 }, options);
+  let sent;
+  try {
+    sent = await send({ method: init.method ?? "POST", url, headers, body, maxRedirects: 0 }, options);
+  } catch (err) {
+    // A bad header value or similar thrown before the request goes out; its text may quote the credential.
+    return { ok: false, result: { kind: "fail", message: hide(`${service}: ${(err as Error).message || "the request failed"}`, secrets) } };
+  }
   if (sent.kind === "fail") return { ok: false, result: { kind: "fail", message: hide(sent.message, secrets) } };
   const { res } = sent;
   if (!res.ok) {

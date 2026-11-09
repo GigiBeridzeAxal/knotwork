@@ -5,6 +5,7 @@ import { PlusIcon } from "../components/icons";
 import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
+import { useSession } from "../session";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
   if (wf.trigger.type === "schedule") return `Schedule · ${wf.trigger.cron}`;
@@ -21,6 +22,9 @@ export function WorkflowsPage() {
     api.workflows().then(setWorkflows, (e) => setError(e.message));
   }, []);
 
+  // Examples with ready-made steps can't run in the shared demo account, so it doesn't offer them.
+  const isDemo = useSession().me?.user.demo ?? false;
+  const examples = EXAMPLES.map((ex, i) => ({ ex, i })).filter(({ ex }) => !(isDemo && ex.demo === false));
   async function useExample(i: number) {
     setBusy(i);
     try {
@@ -96,7 +100,7 @@ export function WorkflowsPage() {
           Start from an example
         </h2>
         <div className="grid gap-4 md:grid-cols-3">
-          {EXAMPLES.map((ex, i) => (
+          {examples.map(({ ex, i }) => (
             <Card key={ex.title} className="flex flex-col gap-3 p-5">
               <Eyebrow>{triggerLabel(ex.workflow)}</Eyebrow>
               <h3 className="font-semibold">{ex.title}</h3>

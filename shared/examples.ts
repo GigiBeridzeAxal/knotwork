@@ -38,7 +38,7 @@ export function newStep(type: StepType, taken: string[]): Step {
     case "log":
       return { id, name: "Log", type, retry, config: { message: "Run {{ run.id }} reached this step" } };
     case "slack":
-      return { id, name: "Post to Slack", type, retry: { max: 2, backoffSeconds: 5 }, config: { webhookUrl: "{{ secrets.SLACK_WEBHOOK }}", text: "Run {{ run.id }} of {{ workflow.name }} says hello" } };
+      return { id, name: "Post to Slack", type, retry: { max: 2, backoffSeconds: 5 }, config: { webhookUrl: "{{ secrets.SLACK_WEBHOOK }}", text: "Run {{ run.id }} of {{ workflow.name }} says hello", mentions: false } };
     case "discord":
       return { id, name: "Post to Discord", type, retry: { max: 2, backoffSeconds: 5 }, config: { webhookUrl: "{{ secrets.DISCORD_WEBHOOK }}", content: "Run {{ run.id }} of {{ workflow.name }} says hello", username: "" } };
     case "telegram":
