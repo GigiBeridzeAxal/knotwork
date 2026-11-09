@@ -11,6 +11,9 @@ Knotwork wires a **trigger** (a webhook, a schedule, or a button) to a list of *
 transforms, filters, delays, log lines). When a step fails it waits and tries again with backoff, and every
 attempt is written to a run log you can open in the dashboard.
 
+**Try it:** [open the live demo](https://knotwork.gigiberidze.com/demo) (one click, no account) ·
+[user guide](https://knotwork.gigiberidze.com/docs) · [case study](https://gigiberidze.com/work/knotwork)
+
 ![The workflow editor](docs/editor.png)
 
 ## What it does
@@ -53,14 +56,17 @@ attempt is written to a run log you can open in the dashboard.
 ## How it works
 
 ```
-Browser ──► Cloudflare Worker ──► MongoDB Atlas (free M0 cluster)
+Browser ──► Cloudflare Worker ──► hub (one Durable Object) ──► MongoDB Atlas (free M0 cluster)
               │  /api/auth/*  sign up, log in, demo, log out, password, delete account (session cookie)
               │  /api/*       Hono JSON API for the dashboard
               │  /hooks/*     public webhook endpoints
-              │  /*           React dashboard (static assets)
+              │  /*           React dashboard (static assets, served without the hub), incl. /docs and /demo
               └─ cron: every minute → fire schedules, resume parked runs;
                        every 10 min check storage, hourly check indexes, daily reset the demo
 ```
+
+The Worker checks the per-IP rate limit and a webhook key's signature, and passes `/api/*`, `/hooks/*` and
+the cron tick to the hub, which runs them on a database connection it keeps open.
 
 | Part | Where |
 | --- | --- |
@@ -103,8 +109,11 @@ Atlas (DNS, TLS, SCRAM) measured 30 to 90 ms of CPU in production, several times
 the Worker hands `/api/` and `/hooks/` requests and the cron tick to one Durable Object, the hub
 ([`worker/hub.ts`](worker/hub.ts)), placed in western Europe next to the cluster. The hub keeps its
 connection open between requests (two pooled sockets, monitors polling instead of streaming), so only its
-first request after a quiet spell pays the handshake. Without the `HUB` binding (the tests), each request
-opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
+first request after it starts pays the handshake. If a request fails with a connection error, the hub
+starts a new connection for later requests (at most one every 30 seconds) and closes the old one once the
+work still using it has finished; other errors leave the connection alone. A query that hangs fails after
+20 seconds, and one that waits more than 10 seconds for a free socket fails too. Without the `HUB` binding (the tests) or with `HUB_OFF`
+set, each request opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
 time, and the connect time when the request had to open the connection.
 
 Measured in production over an hour (2026-11-09): the Worker's CPU was at most 2 ms for a request and 6 ms
@@ -114,7 +123,8 @@ about 11,060 GB-s of the free plan's 13,000 GB-s of Durable Object duration a da
 so that is also the most it can use. Workers & Pages > Durable Objects in the dashboard shows the usage.
 
 **Accounts.** Passwords are hashed with PBKDF2-SHA-256 over an HMAC of the password keyed with `AUTH_PEPPER`,
-a secret that is never stored in the database. The free plan's CPU budget allows only 10,000 iterations; the
+a secret that is never stored in the database. The iteration count is low, 10,000: it was sized for the
+free plan's 10 ms of CPU in a Worker, and still has to fit there when the hub is switched off (`HUB_OFF`). The
 pepper is what keeps a copy of the database alone from being used to guess passwords. The session is a random
 token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefix; the database stores only its
 SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
@@ -135,8 +145,8 @@ account's HTTP steps can only call a few public test APIs (`DEMO_HOSTS` in `work
 a browser rather than an account. That database is left as it was and no longer used: its workflows had no
 owner to move them to.
 
-Everything fits free plans: Cloudflare Workers, static assets, cron triggers and the rate limiter, and a
-MongoDB Atlas M0 cluster. It doesn't call any paid AI API.
+Everything fits free plans: Cloudflare Workers, static assets, cron triggers, the rate limiter and one
+Durable Object, and a MongoDB Atlas M0 cluster. It doesn't call any paid AI API.
 
 ## Run it locally
 
@@ -196,7 +206,10 @@ fails twice in a row, it opens an issue labelled `live-check`, and closes it whe
 
 ## Deploy to Cloudflare
 
-1. Create a free **M0** cluster on [MongoDB Atlas](https://cloud.mongodb.com) and a database user with only
+1. Create a free **M0** cluster on [MongoDB Atlas](https://cloud.mongodb.com), in or near western Europe
+   (the hub is placed there; for a cluster elsewhere, change `locationHint: "weur"` in
+   [`worker/index.ts`](worker/index.ts) to the nearest
+   [location hint](https://developers.cloudflare.com/durable-objects/reference/data-location/)), and a database user with only
    the `readWrite` role on the `knotwork` database and a long random password. Add the IP access list entry
    `0.0.0.0/0`: Workers have no fixed IP addresses, so that password is what protects the data.
 2. Then:
@@ -219,12 +232,30 @@ password and webhook URL stop working.
    allows one rule, so it can't have a looser one of its own); the Worker refuses made-up webhook URLs
    without touching the database and limits each URL to 60 calls a minute and each IP to 600. A person
    watching a run polls every 3 seconds, well under the rule.
-   The Worker's own limiter answers floods with 429, but those requests still count toward the free plan's
-   100,000 a day; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
+   The Worker's own limiter answers floods with 429 before they reach the hub, but those requests still
+   count toward the Worker's 100,000 a day on the free plan; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
    plan: an IP that stays just under the rule (about 86,000 requests a day) uses most of the daily quota, so
    two such IPs can use all of it, as can heavy calls to webhook URLs. If that happens, `/api` and `/hooks`
    fail until 00:00 UTC while the
    dashboard's static files keep loading.
+
+### The hub
+
+- **First deploy.** `npm run deploy` creates the Durable Object class `Hub` (the `v1` migration in
+  `wrangler.jsonc`). Nothing else needs setting up; the free plan allows it because the class is SQLite-backed.
+- **Rolling back.** Cloudflare refuses `wrangler rollback` to a version from before a Durable Object
+  migration, so you can't roll back past the deploy that added the hub. If the hub itself is the problem,
+  deploy without it: `npm run build && npx wrangler deploy --var HUB_OFF:1`. Every request then opens its own connection
+  (about 2 seconds slower, and over the free plan's CPU limit, which Cloudflare enforces loosely), so use it
+  only until the fix is deployed. Rollbacks between versions that both have the hub work as usual.
+- **Daily limits on the free plan.** 100,000 requests to the hub (every `/api/` and `/hooks/` call that
+  passes the rate limit and, for a webhook, has a real key, plus 1,440 cron ticks) and 13,000 GB-s of duration (the hub uses about 11,060).
+  They are separate from the Worker's own 100,000 requests, and they are per Cloudflare account: a second
+  always-on Durable Object (a staging copy, say) would take the duration over the limit.
+- **At a limit.** Calls to the hub fail until 00:00 UTC. The Worker then answers `/api/` and `/hooks/` with
+  503 and a plain message, the dashboard shows "Knotwork isn't answering right now" instead of the login
+  page, and schedules and waiting runs pick up again after midnight. Workers & Pages > Durable Objects in
+  the dashboard shows both numbers.
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
 own domain, or remove it to use the `*.workers.dev` address.
@@ -237,6 +268,7 @@ Because anyone can sign up, there are limits ([`shared/limits.ts`](shared/limits
 person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
+- JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400.
 - 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
   first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
@@ -267,11 +299,11 @@ person from using up the free plans:
 
 ## Roadmap
 
-- Inviting other people into a workspace
 - Secrets per workspace, usable in templates (`{{ secrets.SLACK_WEBHOOK }}`)
 - Branching (if / else) and loops over arrays
-- A visual canvas editor
-- Signed webhooks (GitHub, Stripe) and replaying a past run
+- Signed webhooks (GitHub, Stripe), replaying a past run, and an "on failure" step
+- A visual canvas editor, templates, version history
+- Teams: invite links with roles, recovery codes, API keys
 
 ## License
 

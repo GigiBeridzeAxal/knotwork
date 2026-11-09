@@ -5,7 +5,7 @@ import { api } from "../api";
 import { Link, navigate, usePath } from "../router";
 import { initials, useSession } from "../session";
 import { useWorkspace } from "../workspace";
-import { CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon } from "./icons";
+import { BookIcon, CheckIcon, ChevronIcon, CloseIcon, CodeIcon, FlowIcon, HomeIcon, LogoutIcon, MenuIcon, PlusIcon, RunsIcon, SettingsIcon } from "./icons";
 import { cn, Logo } from "./ui";
 
 const NAV = [
@@ -299,6 +299,14 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
           <Meter label={`Workflows in ${workspace.name}`} used={workflows?.length ?? 0} max={LIMITS.workflowsPerWorkspace} />
           <Meter label="Runs this hour" used={runsThisHour} max={runsLimit} />
         </div>
+        <Link
+          href="/docs"
+          onClick={onNavigate}
+          className="flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] text-muted transition-colors hover:bg-graphite/60 hover:text-text"
+        >
+          <BookIcon className="size-[18px]" />
+          Docs
+        </Link>
         <a
           href="https://github.com/GigiBeridzeAxal/knotwork"
           className="flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13px] text-muted transition-colors hover:bg-graphite/60 hover:text-text"
@@ -344,6 +352,12 @@ function AccountMenu() {
             <p className="px-2.5 pb-2.5 text-xs leading-relaxed text-muted">Anyone can use this account, and it resets every day at 03:00 UTC. Create your own to keep your workflows.</p>
           )}
           <div className="mx-1 my-1 h-px bg-line" />
+          {me.user.demo && (
+            <Link href="/signup" role="menuitem" onClick={close} className={cn(menuItem, "text-text")}>
+              <PlusIcon className="size-[18px] text-wire" />
+              Create your own account
+            </Link>
+          )}
           <Link href="/settings" role="menuitem" onClick={close} className={menuItem}>
             <SettingsIcon className="size-[18px] text-muted" />
             Settings
