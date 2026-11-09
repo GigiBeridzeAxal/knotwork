@@ -136,7 +136,9 @@ each pass of a loop, each retry, each `if` check and each start of a loop (so 50
 is 151). A loop inside a loop can't run away.
 
 **Saving as it goes.** A step that reaches outside (an `http` call, a `delay`) starts from a saved place and
-is saved right after, so a Worker that stops can't make it happen twice. Steps that only compute (`if`,
+is saved right after, so a Worker that stops before the step can't make it happen twice (one that stops
+between the request and its save repeats that one request). If the requests run out between a redirect's
+hops, the step starts over at the next turn, so its first request is sent again. Steps that only compute (`if`,
 `transform`, `filter`, `log`, a loop moving on) are saved together, every 25 log lines or every second,
 whichever comes first; if the Worker
 stops in between they run again and give the same result. A 50-item loop of such steps costs a handful of
@@ -153,7 +155,8 @@ bound into the ciphertext, so a stored value can't be moved to another name or w
 names and dates and never sends a value back. A run reads and decrypts only the secrets its steps name. Every
 output, log line and error a run stores goes through one function that replaces each secret's value (as it
 is, as it looks inside JSON text, URL-encoded, and, for a secret that is a web address, without its scheme,
-as its path alone, or as one of its query values of 8 characters or more) with `[secret NAME]`, also in what later steps see. What a step says about itself in
+as its path alone, or as one of its query values or path pieces of 8 characters or more; also with JSON's `\/`
+and with `+` read back as a space) with `[secret NAME]`, also in what later steps see. What a step says about itself in
 the log (the address it called, the two sides of a condition) is written with the secret already swapped
 for its mark, so cutting or parsing the text can't leave part of one: a Slack webhook URL kept as a secret
 logs as `POST [secret SLACK_URL] → 200`. A value changed some other way (hashed, base64) can't be
