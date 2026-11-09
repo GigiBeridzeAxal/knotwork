@@ -256,11 +256,12 @@ person from using up the free plans:
 
 ## Roadmap
 
-- Inviting other people into a workspace
 - Secrets per workspace, usable in templates (`{{ secrets.SLACK_URL }}`)
 - Branching (if / else) and loops over arrays
-- A visual canvas editor
-- Signed webhooks (GitHub, Stripe) and replaying a past run
+- Signed webhooks (GitHub, Stripe), replaying a past run, and an "on failure" step
+- A visual canvas editor, templates, version history
+- Ready-made Slack, Discord, Telegram and GitHub steps
+- Teams: invite links with roles, recovery codes, API keys
 
 ## License
 

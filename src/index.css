@@ -84,6 +84,31 @@ body {
 .docs section {
   margin-top: 64px;
 }
+.docs .toc {
+  margin-top: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--color-line);
+  background: var(--color-graphite);
+}
+.docs .toc summary {
+  cursor: pointer;
+  padding: 12px 16px;
+  min-height: 44px;
+  font-size: 14px;
+  font-weight: 500;
+}
+.docs .toc ul {
+  margin: 0;
+  padding: 0 8px 8px;
+  list-style: none;
+}
+.docs .toc a {
+  display: block;
+  border-radius: 8px;
+  padding: 10px 8px;
+  font-size: 14px;
+  color: var(--color-soft);
+}
 .docs h2 {
   font-family: var(--font-display);
   font-size: 28px;

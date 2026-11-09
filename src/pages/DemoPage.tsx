@@ -3,9 +3,18 @@ import { api } from "../api";
 import { Link, navigate } from "../router";
 import { useSession } from "../session";
 
+/** Where to go after signing in: `?next=` when it is a path inside the app, else home. */
+function nextPath() {
+  const next = new URLSearchParams(location.search).get("next") ?? "";
+  return next.startsWith("/") && !next.startsWith("//") && !next.startsWith("/demo") && !next.startsWith("/login") && !next.startsWith("/signup")
+    ? next
+    : "/home";
+}
+
 /**
- * /demo signs a visitor into the shared demo account and opens its home page, so a link from the
- * portfolio or the docs reaches a working dashboard in one click. Someone already signed in just goes
+ * /demo signs a visitor into the shared demo account and opens its home page (or `?next=`, e.g.
+ * /demo?next=/workflows/wf_demo_2), so a link from the portfolio or the docs reaches a working
+ * dashboard in one click. Someone already signed in just goes
  * home: their own account is never swapped for the demo.
  */
 export function DemoPage() {
@@ -18,13 +27,13 @@ export function DemoPage() {
     if (status === "loading" || started.current) return;
     started.current = true; // StrictMode runs effects twice in development; sign in once.
     if (status === "signed-in") {
-      navigate("/home", { replace: true });
+      navigate(nextPath(), { replace: true });
       return;
     }
     api.demo().then(
       (me) => {
         session.signedIn(me);
-        navigate("/home", { replace: true });
+        navigate(nextPath(), { replace: true });
       },
       (e: Error) => setError(e.message),
     );
@@ -37,7 +46,7 @@ export function DemoPage() {
           <p className="font-display text-2xl font-bold">The demo didn't open</p>
           <p role="alert" className="text-soft">{error}</p>
           <Link href="/login" className="text-wire hover:underline">
-            Go to the sign-in page
+            Log in instead
           </Link>
         </div>
       ) : (

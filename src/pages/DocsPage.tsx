@@ -37,6 +37,8 @@ const LIMIT_ROWS: [string, string][] = [
   ["Retries per step", "up to 5"],
   ["Longest delay", "7 days"],
   ["Run history", `${LIMITS.runHistoryDays} days`],
+  ["Template output per step", "64 KB"],
+  ["Demo sign-ins per network", `${LIMITS.demoLoginsPerIpPerHour} an hour`],
   ["Kept per run", "16 KB of output per step, 64 KB per run, the last 50 log lines"],
 ];
 
@@ -72,7 +74,7 @@ export function DocsPage() {
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-[1200px] gap-12 px-4 py-12 sm:px-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:py-16">
+      <div className="mx-auto grid max-w-[1200px] grid-cols-[minmax(0,1fr)] gap-12 px-4 py-12 sm:px-6 lg:grid-cols-[220px_minmax(0,1fr)] lg:py-16">
         <nav aria-label="On this page" className="hidden lg:block">
           <ul className="sticky top-28 m-0 flex list-none flex-col gap-1 p-0">
             {SECTIONS.map((s) => (
@@ -90,6 +92,16 @@ export function DocsPage() {
           <h1 className="mt-3 font-display text-[40px] leading-[1.05] font-bold tracking-tight text-balance sm:text-[56px]">
             How to use Knotwork
           </h1>
+          <details className="toc lg:hidden">
+            <summary>On this page</summary>
+            <ul>
+              {SECTIONS.map((s) => (
+                <li key={s.id}>
+                  <a href={`#${s.id}`}>{s.label}</a>
+                </li>
+              ))}
+            </ul>
+          </details>
           <p className="lead">
             Knotwork runs a list of steps when something happens: a webhook arrives, a schedule comes round, or you press Run.
             If a step fails it waits and tries again, and every attempt is in the run log.
@@ -105,12 +117,12 @@ export function DocsPage() {
                 Press <b>New workflow</b>. Pick a trigger, add steps, and press <b>Create</b> (later, <b>Save</b>).
               </li>
               <li>
-                Press <b>Run now</b>, type some test input if you like, and press <b>Run</b>. The run page shows each step as it lands.
+                Press <b>Run now</b>, type some test input if you like, and press <b>Run</b> (<b>Save and run</b> when there are unsaved changes). The run page shows each step as it lands.
               </li>
             </ol>
             <p>
-              A workflow only starts on its own (from its schedule or webhook) while it is <b>On</b>. The switch is in the
-              editor's side panel.
+              A workflow only starts on its own (from its schedule or webhook) while the box{" "}
+              <b>On (schedules and webhooks start runs)</b> in the editor's side panel is ticked.
             </p>
           </Section>
 
@@ -124,10 +136,16 @@ export function DocsPage() {
               </dd>
               <dt>Webhook</dt>
               <dd>
-                The editor shows a private URL. Any service can call it; the random key in the URL is the secret, so treat it
-                like a password. JSON and form bodies are parsed; anything else arrives as text. In templates you get{" "}
-                <code>trigger.body</code>, <code>trigger.query</code>, <code>trigger.headers</code> and <code>trigger.method</code>.
-                The call answers <code>202</code> with the new run's id straight away; the steps run after that.
+                Once the workflow is saved, the editor shows its private URL. Any service can call it, with any method; the
+                random key in the URL is the secret, so treat it like a password. JSON and form bodies are parsed; anything
+                else arrives as text. In templates you get <code>trigger.body</code>, <code>trigger.query</code>,{" "}
+                <code>trigger.headers</code> and <code>trigger.method</code>. The <code>cookie</code> and{" "}
+                <code>authorization</code> headers are never kept. The call answers <code>202</code> with the new run's id
+                straight away; the steps run after that. Invalid JSON answers <code>400</code>, and a body over{" "}
+                {LIMITS.runInputBytes / 1000} KB answers <code>413</code>.
+                <pre>{`curl -X POST https://knotwork.gigiberidze.com/hooks/<your key> \\
+  -H 'content-type: application/json' \\
+  -d '{"id": "order_1", "amount": 120}'`}</pre>
               </dd>
               <dt>Schedule</dt>
               <dd>
@@ -140,7 +158,7 @@ export function DocsPage() {
 
           <Section id="steps" title="Steps">
             <p>
-              Steps run in order. Each has an <b>id</b> (lowercase letters, digits and <code>_</code>), and later steps read its
+              Steps run in order. Each has an <b>id</b> (up to 40 lowercase letters, digits and <code>_</code>, starting with a letter), and later steps read its
               result as <code>steps.&lt;id&gt;</code>.
             </p>
             <dl>
@@ -195,13 +213,13 @@ export function DocsPage() {
 
           <Section id="runs" title="Runs">
             <p>
-              A run is <b>queued</b>, then <b>running</b>, maybe <b>waiting</b> (in a delay or before a retry), and ends{" "}
-              <b>succeeded</b>, <b>failed</b> or <b>stopped</b> (by a filter). The run page lists every attempt of every step,
+              A run is <b>Queued</b>, then <b>Running</b>, maybe <b>Waiting</b> (in a delay or before a retry), and ends{" "}
+              <b>Passed</b>, <b>Failed</b> or <b>Stopped by filter</b>. The run page lists every attempt of every step,
               with its output, its message and how long it took, and the input that started it.
             </p>
             <p>
               A run saves its place after every step. If anything cuts it off halfway, it continues from that step on the next
-              minute. If your account has used its storage budget for the hour, a run is <b>paused</b> before its next step
+              minute. If your account has used its storage budget for the hour, a run shows <b>Paused</b> before its next step
               (the run page says why) and tries again within 10 minutes or at the next hour. Runs are kept for{" "}
               {LIMITS.runHistoryDays} days after they start, or after they wake from their last wait; workflows stay until you
               delete them.
@@ -245,7 +263,7 @@ export function DocsPage() {
             </table>
             <p>
               When the whole service gets busy, accounts that have already used a lot this hour wait first. If storage gets
-              close to full, the oldest run history is trimmed, and new runs pause until there is room.
+              close to full, the oldest run history is trimmed, and new runs and sign-ups pause until there is room.
             </p>
           </Section>
 
@@ -259,10 +277,15 @@ export function DocsPage() {
               <dd>The workflow is turned off.</dd>
               <dt>A run answers 429 or won't start</dt>
               <dd>You reached a limit above. Runs per hour reset at the start of each clock hour.</dd>
-              <dt>Saving says someone else saved first</dt>
-              <dd>The workflow changed in another tab or by another person. Reload it, then make your change again.</dd>
+              <dt>Saving says "This workflow was saved somewhere else"</dt>
+              <dd>
+                It changed in another tab or on another device after you opened it. <b>Keep mine</b> saves your version over
+                theirs; <b>Load theirs</b> drops your changes and shows theirs.
+              </dd>
               <dt>A template comes out empty</dt>
               <dd>The path doesn't match the data. Open a past run and look at the step's output to see the real shape.</dd>
+              <dt>A step fails with "templates add up to more than 64 KB"</dt>
+              <dd>Everything one step fills in from templates is capped at 64 KB. Pass a smaller part of the data, not all of it.</dd>
             </dl>
             <p>
               Something else? <a href="https://github.com/GigiBeridzeAxal/knotwork/issues">Open an issue on GitHub</a>.
