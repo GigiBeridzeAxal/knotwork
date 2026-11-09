@@ -2,7 +2,7 @@ import { LIMITS } from "../shared/limits";
 import type { Collections, SessionDoc, UserDoc } from "./mongo";
 import { randomId } from "./mongo";
 
-export { hookKeyValid, newHookKey } from "./hookKey";
+export { API_KEY_PREFIX_CHARS, apiKeyValid, hookKeyValid, newApiKey, newHookKey } from "./hookKey";
 
 /**
  * Passwords: PBKDF2-SHA-256 over HMAC-SHA-256(pepper, password), with a random salt per password.
@@ -58,8 +58,42 @@ export async function verifyPassword(password: string, stored: UserDoc["password
 /** Checked when the email is unknown, so a wrong email and a wrong password take the same time. */
 export const DECOY_PASSWORD = { hash: toB64(new Uint8Array(32)), salt: toB64(new Uint8Array(16)), iterations: PBKDF2_ITERATIONS };
 
+/**
+ * Recovery codes: 12 characters from an alphabet without the look-alikes I, L, O and U (60 random
+ * bits), shown as ABCD-EFGH-JKMN. They are the only way back into an account whose password is
+ * lost, since Knotwork sends no email.
+ *
+ * A code is random, so unlike a password it needs no slow hash: what is stored is
+ * HMAC-SHA-256(pepper, user id and code). Without the pepper (a Wrangler secret that never enters
+ * the database) a copy of the database can't be used to test guesses.
+ */
+const CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const CODE_CHARS = 12;
+
+export function newRecoveryCodes(count: number): string[] {
+  return Array.from({ length: count }, () => {
+    // 32 symbols, so the low five bits of each random byte pick one without bias.
+    const bytes = crypto.getRandomValues(new Uint8Array(CODE_CHARS));
+    const raw = Array.from(bytes, (b) => CODE_ALPHABET[b & 31]).join("");
+    return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8)}`;
+  });
+}
+
+/** A typed code without dashes or spaces, in capitals, with the look-alikes read as intended. */
+export const normalizeRecoveryCode = (code: string) =>
+  code.toUpperCase().replace(/[\s-]/g, "").replace(/[IL]/g, "1").replace(/O/g, "0");
+
+export async function recoveryCodeHash(pepper: string, userId: string, code: string): Promise<string> {
+  return toB64(await hmac(pepper, `recovery:${userId}:${normalizeRecoveryCode(code)}`));
+}
+
 export async function sha256(text: string): Promise<string> {
   return toB64(await crypto.subtle.digest("SHA-256", enc.encode(text)));
+}
+
+/** The same hash in base64url, for ids that also appear in URLs (invite links, API keys). */
+export async function sha256url(text: string): Promise<string> {
+  return (await sha256(text)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export async function createSession(c: Collections, user: Pick<UserDoc, "_id" | "demo">, now: number) {

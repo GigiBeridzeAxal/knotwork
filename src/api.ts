@@ -1,4 +1,20 @@
-import type { Me, Overview, Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type {
+  ApiKey,
+  ApiKeyAccess,
+  InvitePreview,
+  Me,
+  MemberRole,
+  NewApiKey,
+  NewInvite,
+  Overview,
+  Run,
+  RunDetail,
+  Team,
+  Workflow,
+  WorkflowInput,
+  WorkflowSummary,
+  Workspace,
+} from "../shared/schema";
 
 /**
  * The signed-in session lives in an HttpOnly cookie the browser sends by itself. The workspace being
@@ -53,6 +69,27 @@ export const api = {
   logout: () => request<void>("/auth/logout", post()),
   changePassword: (current: string, next: string) => request<void>("/auth/password", post({ current, next })),
   deleteAccount: (password: string) => request<void>("/auth/delete-account", post({ password })),
+  /** Sets a new password with a recovery code, and signs in. The code stops working. */
+  recover: (input: { email: string; code: string; password: string }) => request<Me>("/auth/recover", post(input)),
+  /** Makes a fresh set of recovery codes (the old ones stop working). Shown once. */
+  newRecoveryCodes: (password: string) => request<{ codes: string[] }>("/auth/recovery-codes", post({ password })),
+
+  /** The people in a workspace, and (for its owner) its open invite links. */
+  team: (workspaceId: string) => request<Team>(`/workspaces/${workspaceId}/team`),
+  createInvite: (workspaceId: string, role: MemberRole) => request<NewInvite>(`/workspaces/${workspaceId}/invites`, post({ role })),
+  revokeInvite: (workspaceId: string, inviteId: string) =>
+    request<void>(`/workspaces/${workspaceId}/invites/${encodeURIComponent(inviteId)}`, { method: "DELETE" }),
+  changeRole: (workspaceId: string, userId: string, role: MemberRole) =>
+    request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "PATCH", body: JSON.stringify({ role }) }),
+  /** Removes a member; with your own id, leaves the workspace. */
+  removeMember: (workspaceId: string, userId: string) => request<void>(`/workspaces/${workspaceId}/members/${userId}`, { method: "DELETE" }),
+  invite: (token: string) => request<InvitePreview>(`/invites/${encodeURIComponent(token)}`),
+  acceptInvite: (token: string) => request<{ workspaceId: string }>(`/invites/${encodeURIComponent(token)}/accept`, post()),
+
+  apiKeys: () => request<ApiKey[]>("/keys"),
+  createApiKey: (input: { name: string; workspaceId: string; access: ApiKeyAccess }) => request<NewApiKey>("/keys", post(input)),
+  revokeApiKey: (id: string) => request<void>(`/keys/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   /** Which of the user's workspaces holds a workflow or run. */
   locate: (kind: "workflow" | "run", id: string) =>
     request<{ workspaceId: string }>(`/locate/${kind}/${encodeURIComponent(id)}`),

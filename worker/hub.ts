@@ -1,6 +1,6 @@
 import { handle, HUB_TICK } from "./index";
 import { tick } from "./engine";
-import { type Env, Mongo } from "./mongo";
+import { ensureIndexes, type Env, Mongo } from "./mongo";
 
 /**
  * One Durable Object that runs the API, the webhooks and the cron tick on a single database
@@ -16,6 +16,8 @@ export class Hub {
   private mongo: Mongo;
   private env: Env;
   private state: DurableObjectState;
+  /** Whether this instance has made sure the database's indexes exist (see `fetch`). */
+  private indexed = false;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -30,6 +32,17 @@ export class Hub {
       props: {},
     } as unknown as ExecutionContext;
     if (request.url === HUB_TICK && request.method === "POST") {
+      // Once per start of the hub: create any index a newer version added (`createIndex` does nothing
+      // for one that exists), so a deploy that adds collections needs no `npm run db:setup` by hand.
+      if (!this.indexed) {
+        this.indexed = true;
+        this.state.waitUntil(
+          ensureIndexes(this.mongo.c).then(
+            (failed) => failed.length && console.warn("indexes", failed),
+            () => (this.indexed = false),
+          ),
+        );
+      }
       try {
         await tick(this.mongo.c, Date.now(), this.mongo.db, this.env.AUTH_PEPPER);
       } catch (err) {

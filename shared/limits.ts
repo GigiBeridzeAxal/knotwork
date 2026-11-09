@@ -45,4 +45,16 @@ export const LIMITS = {
   duplicateSignupsPerHour: 10,
   /** Sessions one account can have at once; logging in again drops the oldest. */
   sessionsPerAccount: 20,
+  /** People in one workspace besides its owner, and open invite links it can have at once. */
+  membersPerWorkspace: 10,
+  invitesPerWorkspace: 5,
+  /** An invite link stops working after this many days, or once this many people joined with it. */
+  inviteDays: 7,
+  inviteUses: 10,
+  /** Workspaces of other people one account can be a member of. */
+  joinedWorkspacesPerAccount: 20,
+  /** Recovery codes made at a time. Each works once. */
+  recoveryCodes: 8,
+  /** API keys one account can have. */
+  apiKeysPerAccount: 10,
 } as const;

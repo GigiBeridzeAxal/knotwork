@@ -1,4 +1,4 @@
-import type { Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
+import type { Role, Run, RunDetail, Workflow, WorkflowInput, WorkflowSummary, Workspace } from "../shared/schema";
 import { LIMITS } from "../shared/limits";
 import { bump, giveBack } from "./auth";
 import { DEMO_USER_ID } from "./demo";
@@ -10,11 +10,12 @@ import {
   type WorkspaceDoc,
 } from "./mongo";
 
-export const toWorkspace = (doc: WorkspaceDoc): Workspace => ({
+export const toWorkspace = (doc: WorkspaceDoc, role: Role = "owner"): Workspace => ({
   id: doc._id,
   name: doc.name,
   personal: doc.personal,
   createdAt: doc.createdAt,
+  role,
 });
 
 export function toWorkflow(doc: WorkflowDoc): Workflow {
@@ -69,15 +70,12 @@ export function toRun(doc: Pick<RunDoc, keyof typeof RUN_SUMMARY>): Run {
 
 // ---------- Workspaces ----------
 
-export async function listWorkspaces(c: Collections, ownerId: string) {
-  const docs = await c.workspaces.find({ ownerId }).sort({ personal: -1, createdAt: 1 }).toArray();
-  return docs.map(toWorkspace);
-}
-
-/** Deletes a workspace with its workflows and runs. The personal workspace can't be deleted. */
+/** Deletes a workspace with its workflows, runs, members, invite links and API keys. The personal one can't be deleted. */
 export async function deleteWorkspace(c: Collections, id: string, ownerId: string): Promise<boolean> {
   const ws = await c.workspaces.findOne({ _id: id, ownerId });
   if (!ws || ws.personal) return false;
+  // Other people's ways in go first (members, invite links, API keys), then the data.
+  await Promise.all([c.members.deleteMany({ workspaceId: id }), c.invites.deleteMany({ workspaceId: id }), c.apiKeys.deleteMany({ workspaceId: id })]);
   await c.runs.deleteMany({ workspaceId: id });
   await c.workflows.deleteMany({ workspaceId: id });
   await c.workspaces.deleteOne({ _id: id });
