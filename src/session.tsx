@@ -1,8 +1,13 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Me, Workspace } from "../shared/schema";
-import { api, setCurrentWorkspace, whenSignedOut } from "./api";
+import { api, ApiError, setCurrentWorkspace, whenSignedOut } from "./api";
 
-type State = { status: "loading" } | { status: "signed-out" } | { status: "signed-in"; me: Me; workspaceId: string };
+type State =
+  | { status: "loading" }
+  | { status: "signed-out" }
+  /** The first request failed for a reason other than "not signed in", e.g. the server is over a daily limit. */
+  | { status: "unavailable"; message: string }
+  | { status: "signed-in"; me: Me; workspaceId: string };
 
 interface SessionApi {
   state: State;
@@ -59,7 +64,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     });
     api.me().then(
       (me) => signedIn(me),
-      () => setState({ status: "signed-out" }),
+      (e) =>
+        // Only a 401 means signed out. Anything else is the server or the network, and sending
+        // the user to the login page would be wrong.
+        setState(
+          e instanceof ApiError && e.status === 401
+            ? { status: "signed-out" }
+            : { status: "unavailable", message: e instanceof ApiError ? e.message : "Check your connection and try again." },
+        ),
     );
   }, [signedIn]);
 
