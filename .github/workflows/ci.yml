@@ -19,13 +19,6 @@ jobs:
     # (SERVER-121912), and a service container runs on the runner's kernel.
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    services:
-      mongo:
-        image: mongo:8
-        ports: ["27017:27017"]
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
-          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,6 +26,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Start a throwaway MongoDB
+        # Started here, not as a service, so its log doesn't bury the test output.
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --quiet --logpath /dev/null
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          docker logs mongo | tail -n 20
+          exit 1
       - name: Type-check and build
         run: npm run build
       - name: Unit, engine and data tests
@@ -44,13 +47,6 @@ jobs:
     name: Browser scenarios (Chromium, Firefox, WebKit)
     runs-on: ubuntu-22.04
     timeout-minutes: 25
-    services:
-      mongo:
-        image: mongo:8
-        ports: ["27017:27017"]
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
-          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       MONGODB_URI: mongodb://127.0.0.1:27017
     steps:
@@ -60,6 +56,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Start a throwaway MongoDB
+        # Started here, not as a service, so its log doesn't bury the test output.
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --quiet --logpath /dev/null
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' > /dev/null 2>&1 && exit 0
+            sleep 2
+          done
+          docker logs mongo | tail -n 20
+          exit 1
       - name: Install the three browsers
         run: npx playwright install --with-deps chromium firefox webkit
       - name: Start Knotwork on a throwaway database
