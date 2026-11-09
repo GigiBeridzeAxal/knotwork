@@ -89,7 +89,7 @@ class Cursor {
   }
 }
 
-class FakeCollection {
+export class FakeCollection {
   docs = new Map<string, Doc>();
   private unique: string[];
   constructor(unique: string[] = []) {

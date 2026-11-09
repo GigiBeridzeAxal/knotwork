@@ -296,7 +296,8 @@ api.post("/auth/demo", async (c) => {
  * Sets a new password with a recovery code, for someone who lost theirs. Knotwork sends no email, so
  * the codes (made in Settings) are the only way back in. A code works once: the same update that
  * sets the password takes the code out, so two requests with one code can't both succeed. Every
- * device is signed out, and the answer is the same for an unknown email as for a wrong code.
+ * device is signed out and the account's API keys are revoked, and the answer is the same for an
+ * unknown email as for a wrong code.
  */
 api.post("/auth/recover", async (c) => {
   const parsed = recoverInput.safeParse(await c.req.json().catch(() => null));
@@ -319,7 +320,12 @@ api.post("/auth/recover", async (c) => {
       ? await db(c).users.updateOne({ _id: user._id, recoveryCodes: codeHash }, { $pull: { recoveryCodes: codeHash }, $set: { password: next } })
       : null;
   if (!user || !used?.modifiedCount) return c.json({ error: "That email and recovery code don't match an account." }, 401);
-  await Promise.all([giveBack(db(c), key, 15 * MINUTE), db(c).sessions.deleteMany({ userId: user._id })]);
+  // Whoever had a way in before is out: every session, and every API key the account made.
+  await Promise.all([
+    giveBack(db(c), key, 15 * MINUTE),
+    db(c).sessions.deleteMany({ userId: user._id }),
+    db(c).apiKeys.deleteMany({ userId: user._id }),
+  ]);
   return signIn(c, user);
 });
 
@@ -377,14 +383,18 @@ async function confirmPassword(c: C, password: string): Promise<Response | UserD
   return user;
 }
 
-/** Changes the password and signs out every other device. */
+/** Changes the password, signs out every other device and revokes the account's API keys. */
 api.post("/auth/password", async (c) => {
   const parsed = passwordChange.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
   const user = await confirmPassword(c, parsed.data.current);
   if (user instanceof Response) return user;
   await db(c).users.updateOne({ _id: user._id }, { $set: { password: await hashPassword(parsed.data.next, c.env.AUTH_PEPPER) } });
-  await db(c).sessions.deleteMany({ userId: user._id, _id: { $ne: c.var.session._id } });
+  // A key made from a borrowed session would otherwise outlive the password change.
+  await Promise.all([
+    db(c).sessions.deleteMany({ userId: user._id, _id: { $ne: c.var.session._id } }),
+    db(c).apiKeys.deleteMany({ userId: user._id }),
+  ]);
   return c.body(null, 204);
 });
 

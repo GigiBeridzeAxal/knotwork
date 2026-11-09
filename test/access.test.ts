@@ -570,6 +570,21 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       gina = { ...gina, cookie: ok.cookie, password: "gina-new-password-1" };
     });
 
+    it("recovering or changing the password revokes the account's API keys", async () => {
+      const make = async () => (await call("POST", "/api/keys", { cookie: gina.cookie, body: { name: "k", workspaceId: gina.personal, access: "write" } })).body.key;
+      const first = await make();
+      expect((await call("GET", "/api/workflows", { key: first })).status).toBe(200);
+      const changed = await call("POST", "/api/auth/password", { cookie: gina.cookie, body: { current: gina.password, next: "gina-changed-password" } });
+      expect(changed.status).toBe(204);
+      gina = { ...gina, password: "gina-changed-password" };
+      expect((await call("GET", "/api/workflows", { key: first })).status).toBe(401);
+      const second = await make();
+      const ok = await recover(gina.email, codes[3], "gina-recovered-again");
+      expect(ok.status).toBe(200);
+      gina = { ...gina, cookie: ok.cookie, password: "gina-recovered-again" };
+      expect((await call("GET", "/api/workflows", { key: second })).status).toBe(401);
+    });
+
     it("one code used twice at the same moment works once", async () => {
       const results = await Promise.all([
         recover(gina.email, codes[1], "race-password-aaa", "198.51.100.253"),
@@ -578,7 +593,7 @@ describe(`teams, recovery codes and API keys (${uri ? "MongoDB" : "in memory"})`
       expect(results.map((r) => r.status).sort()).toEqual([200, 401]);
       const winner = results.find((r) => r.status === 200)!;
       gina = { ...gina, cookie: winner.cookie, password: results[0].status === 200 ? "race-password-aaa" : "race-password-bbb" };
-      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 2);
+      expect((await call("GET", "/api/me", { cookie: gina.cookie })).body.recoveryCodesLeft).toBe(LIMITS.recoveryCodes - 3);
     });
 
     it("making new codes ends the old ones", async () => {

@@ -47,5 +47,10 @@ const ids = users.map((u) => u._id);
 await db.collection("runs").deleteMany({ ownerId: { $in: ids } });
 await db.collection("workflows").deleteMany({ ownerId: { $in: ids } });
 await db.collection("workspaces").deleteMany({ ownerId: { $in: ids }, personal: false });
+// Teams, keys and recovery codes from earlier runs: memberships either way round, invite links, API keys.
+await db.collection("members").deleteMany({ $or: [{ userId: { $in: ids } }, { ownerId: { $in: ids } }] });
+await db.collection("invites").deleteMany({ ownerId: { $in: ids } });
+await db.collection("apiKeys").deleteMany({ $or: [{ userId: { $in: ids } }, { ownerId: { $in: ids } }] });
+await db.collection("users").updateMany({ _id: { $in: ids } }, { $unset: { recoveryCodes: "" } });
 await db.collection("counters").deleteMany({});
 await client.close();

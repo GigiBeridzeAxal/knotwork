@@ -37,10 +37,8 @@ export class Hub {
       if (!this.indexed) {
         this.indexed = true;
         this.state.waitUntil(
-          ensureIndexes(this.mongo.c).then(
-            (failed) => failed.length && console.warn("indexes", failed),
-            () => (this.indexed = false),
-          ),
+          // Reports the ones the server refused instead of throwing; the next start tries again.
+          ensureIndexes(this.mongo.c).then((failed) => failed.length && console.warn("indexes", failed)),
         );
       }
       try {
