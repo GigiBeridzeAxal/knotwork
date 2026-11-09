@@ -10,6 +10,8 @@ export interface Env {
   AUTH_PEPPER: string;
   /** Cloudflare's rate-limiting binding: a per-IP request budget checked before any database work. */
   IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  /** A looser per-IP limit for /hooks, which many senders share addresses for. */
+  HOOK_IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   ASSETS: Fetcher;
 }
 

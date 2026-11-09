@@ -75,7 +75,8 @@ taken out again if it went over.
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB it deletes
-the oldest finished runs and stops the waiting runs of the three accounts with the most of them; past
+the oldest finished runs and stops the waiting runs of the (up to three) accounts with the most of them,
+if they have more than 20; past
 450 MB it pauses new runs and sign-ups until there's room again.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
@@ -91,8 +92,8 @@ pepper is what keeps a copy of the database alone from being used to guess passw
 token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefix; the database stores only its
 SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
 limiter turns away more than 60 requests a minute from one IP before any database work. Webhooks are
-limited per webhook URL instead, since services like GitHub send everyone's webhooks from a few shared
-addresses. Sign-ups and demo
+limited per webhook URL instead (60 a minute), since services like GitHub send everyone's webhooks from a
+few shared addresses, with a looser 600 a minute per IP so made-up webhook URLs can't flood the database. Sign-ups and demo
 sign-ins are limited per network (IPv6 per /48) and sign-ups per day, login attempts per email and IP, and an
 account keeps at most 20 sessions.
 
@@ -189,7 +190,7 @@ person from using up the free plans:
   Accounts take turns: those it has served least this hour go first, 2 runs each, oldest first, and spare
   slots go to busy accounts. Webhook and manual runs start in their own request.
 - 100 runs per account queued or waiting (in a delay or retry) at once.
-- 60 requests a minute per IP address, and 60 calls a minute per webhook URL; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
+- 60 requests a minute per IP address; webhooks 60 calls a minute per URL and 600 per IP; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
   attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.

@@ -204,22 +204,53 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect((await c.runs.findOne({ _id: late }))?.status).toBe("succeeded");
   });
 
-  it("stops the biggest backlogs when the database is nearly full", async () => {
+  it("stops the biggest backlogs when the database is nearly full, but not a few runs in flight", async () => {
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
-    const wf = await addWorkflow("ws_heap", "usr_heap", wfInput([transform("a", 1)]));
-    const heap = [];
-    for (let i = 0; i < 5; i++) heap.push(await createRun(c, { ...wf, ownerId: "usr_heap" }, "manual", {}));
-    for (const [owner, n] of [["usr_m1", 3], ["usr_m2", 2]] as const) {
-      const other = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
-      for (let i = 0; i < n; i++) await createRun(c, { ...other, ownerId: owner }, "manual", {});
-    }
-    const { runId: small } = await start([transform("a", 1)], "usr_small", "ws_small");
+    const backlog = async (owner: string, n: number) => {
+      const wf = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
+      const ids = [];
+      for (let i = 0; i < n; i++) ids.push(await createRun(c, { ...wf, ownerId: owner }, "manual", {}));
+      return { wf, ids };
+    };
+    const heap = await backlog("usr_heap", 30);
+    await backlog("usr_m1", 25);
+    await backlog("usr_m2", 22);
+    await backlog("usr_m3", 21);
+    const few = await backlog("usr_few", 3);
     const nearlyFull = { stats: async () => ({ dataSize: 400_000_000, indexSize: 0 }) } as unknown as Db;
     await guardStorage(c, nearlyFull, Date.now());
-    expect(await c.runs.countDocuments({ _id: { $in: heap }, status: "stopped" })).toBe(5);
-    // Only the three biggest backlogs are stopped.
-    expect(await c.runs.countDocuments({ ownerId: { $in: ["usr_m1", "usr_m2"] }, status: "stopped" })).toBe(5);
-    expect((await c.runs.findOne({ _id: small }))?.status).toBe("queued");
+    // The three biggest backlogs (over 20 each) are stopped, and their workflows show it.
+    expect(await c.runs.countDocuments({ _id: { $in: heap.ids }, status: "stopped" })).toBe(30);
+    expect(await c.runs.countDocuments({ ownerId: { $in: ["usr_m1", "usr_m2"] }, status: "stopped" })).toBe(47);
+    expect((await c.workflows.findOne({ _id: heap.wf.id }))?.lastRun?.status).toBe("stopped");
+    // The fourth, and an account with only a few in flight, are left alone.
+    expect(await c.runs.countDocuments({ ownerId: "usr_m3", status: "stopped" })).toBe(0);
+    expect(await c.runs.countDocuments({ _id: { $in: few.ids }, status: "queued" })).toBe(3);
+    await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
+  });
+
+  it("leaves a schedule saved during the tick to be worked out again", async () => {
+    const input = { ...wfInput([transform("a", 1)]), trigger: { type: "schedule" as const, cron: "0 0 1 1 *" } };
+    const wf = await addWorkflow("ws_race", "usr_race", input);
+    // The save lands after the tick read the workflow: its version no longer matches the scan's.
+    await c.workflows.updateOne({ _id: wf.id }, { $inc: { version: 1 } });
+    const scanned = c.workflows.find.bind(c.workflows);
+    const base = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+    let calls = 0;
+    (c.workflows as { find: unknown }).find = (...args: Parameters<typeof scanned>) => {
+      const cursor = scanned(...args);
+      if (calls++ === 0) {
+        const toArray = cursor.toArray.bind(cursor);
+        cursor.toArray = async () => (await toArray()).map((d) => (d._id === wf.id ? { ...d, version: (d.version ?? 1) - 1 } : d));
+      }
+      return cursor;
+    };
+    try {
+      await tick(c, base + 3 * 60_000);
+    } finally {
+      (c.workflows as { find: unknown }).find = scanned;
+    }
+    expect((await c.workflows.findOne({ _id: wf.id }))?.nextFireAt ?? null).toBeNull();
   });
 
   it("fires a schedule once in its minute and skips it in the scan until its next one", async () => {

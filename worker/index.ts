@@ -450,9 +450,15 @@ app.all(
   async (c) => {
     const key = c.req.param("key");
     if (!HOOK_KEY.test(key)) return c.json({ error: "Unknown webhook" }, 404);
-    if (c.env.IP_LIMITER && !(await c.env.IP_LIMITER.limit({ key: `hook:${key}` })).success) {
-      return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429);
-    }
+    // Per webhook URL, and a much looser per-IP limit (shared by every sender behind that address),
+    // so made-up keys can't be used to make unlimited database lookups from one address.
+    const from = c.req.header("cf-connecting-ip") ?? "local";
+    const [perHook, perIp] = await Promise.all([
+      c.env.IP_LIMITER?.limit({ key: `hook:${key}` }),
+      LOOPBACK.has(from) ? undefined : c.env.HOOK_IP_LIMITER?.limit({ key: ipKey(from) }),
+    ]);
+    if (perHook?.success === false) return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429);
+    if (perIp?.success === false) return c.json({ error: "Too many webhook calls from your network. Wait a minute and try again." }, 429);
     const doc = await db(c).workflows.findOne({ hookKey: key });
     if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
     if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);

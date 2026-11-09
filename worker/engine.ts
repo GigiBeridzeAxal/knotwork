@@ -1,4 +1,4 @@
-import type { Run, Step, StepLog, Trigger, Workflow } from "../shared/schema";
+import type { Run, RunStatus, Step, StepLog, Trigger, Workflow } from "../shared/schema";
 import { cronMatches, nextFire, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
 import type { Db, Filter } from "mongodb";
@@ -36,6 +36,8 @@ const MAX_ERROR = 1_000;
 const DUE_PER_TICK = 10;
 /** At most this many of one account's runs per tick, so one account can't take every slot. */
 const DUE_PER_OWNER = 2;
+/** When the database is nearly full, accounts with more pending runs than this have them stopped. */
+const STOP_BACKLOG_ABOVE = 20;
 const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
 const MB = 1024 * 1024;
@@ -304,18 +306,22 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
       .toArray();
     if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
     // Waiting runs can't be pruned, so a few accounts could fill the space with them. Stop the
-    // pending runs of the accounts holding the most; they're deleted as finished runs next time.
+    // pending runs of the (at most three) accounts holding many; they're deleted as finished runs
+    // next time. Accounts with only a few in flight are left alone.
     const top = await c.runs
       .aggregate<{ _id: string }>([
         { $match: { status: { $in: ["queued", "waiting"] } } },
         { $group: { _id: "$ownerId", n: { $sum: 1 } } },
+        { $match: { n: { $gt: STOP_BACKLOG_ABOVE } } },
         { $sort: { n: -1 } },
         { $limit: 3 },
       ])
       .toArray();
     if (old.length < 2_000 && top.length) {
+      const pending = { ownerId: { $in: top.map((t) => t._id) }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
+      const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).toArray()).map((r) => r._id);
       await c.runs.updateMany(
-        { ownerId: { $in: top.map((t) => t._id) }, status: { $in: ["queued", "waiting"] } },
+        { _id: { $in: ids }, status: { $in: ["queued", "waiting"] } },
         {
           $set: {
             status: "stopped",
@@ -325,6 +331,7 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
           },
         },
       );
+      await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped" } });
     }
   }
   if (used > STORAGE_FULL_BYTES) {
@@ -354,22 +361,24 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
   const schedules = await c.workflows
     .find(
       { "trigger.type": "schedule", enabled: true, $or: [{ nextFireAt: null }, { nextFireAt: { $lte: minute } }] },
-      { projection: { _id: 1, trigger: 1, lastScheduledAt: 1 } },
+      { projection: { _id: 1, trigger: 1, lastScheduledAt: 1, version: 1 } },
     )
     .toArray();
 
-  for (const { _id, trigger, lastScheduledAt } of schedules) {
+  // Each write below checks `version`, so a workflow saved since the scan (whose nextFireAt the save
+  // reset) is left for the next tick instead of getting a time worked out from its old schedule.
+  for (const { _id, trigger, lastScheduledAt, version } of schedules) {
     try {
       const cron = parseCron((trigger as Extract<Trigger, { type: "schedule" }>).cron);
       // Never firing again within a year (e.g. February 30th): look again in a day.
       const next = nextFire(cron, minute) ?? minute + DAY;
       if (!cronMatches(cron, new Date(minute)) || (lastScheduledAt ?? -1) >= minute) {
-        await c.workflows.updateOne({ _id, nextFireAt: { $ne: next } }, { $set: { nextFireAt: next } });
+        await c.workflows.updateOne({ _id, version, nextFireAt: { $ne: next } }, { $set: { nextFireAt: next } });
         continue;
       }
       // Mark the minute first, so two ticks can never fire the same schedule twice.
       const wf = await c.workflows.findOneAndUpdate(
-        { _id, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
+        { _id, version, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
         { $set: { lastScheduledAt: minute, nextFireAt: next } },
         { returnDocument: "after" },
       );
