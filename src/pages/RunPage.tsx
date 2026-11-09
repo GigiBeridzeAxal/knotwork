@@ -27,7 +27,7 @@ export function RunPage({ id }: { id: string }) {
         setRun(next);
         // Poll quickly while a run is moving, slowly while it waits for a delay or retry, and not
         // at all while the tab is hidden.
-        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 1500);
+        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 3000);
       } catch (e) {
         if (stopped) return;
         if (e instanceof ApiError && e.status === 404 && (await findElsewhere("run", id))) return;

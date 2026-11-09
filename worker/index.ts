@@ -82,9 +82,12 @@ const tooLarge = (c: C) => c.json({ error: `The request is larger than ${MAX_API
 // A per-IP request budget, checked by Cloudflare before any database work. Skipped for loopback
 // addresses, which only local development sends (every test browser there shares one address).
 const LOOPBACK = new Set(["127.0.0.1", "::1", "local"]);
+// Webhooks are limited per hook key instead (below): senders such as GitHub, Stripe or another
+// Worker deliver for many customers from a few shared addresses, so a per-IP limit would let one
+// noisy sender block everyone else's webhooks.
 app.use("*", async (c, next) => {
   const from = c.req.header("cf-connecting-ip") ?? "local";
-  if (c.env.IP_LIMITER && !LOOPBACK.has(from)) {
+  if (c.env.IP_LIMITER && !LOOPBACK.has(from) && !c.req.path.startsWith("/hooks/")) {
     const { success } = await c.env.IP_LIMITER.limit({ key: ipKey(from) });
     if (!success) return c.json({ error: "Too many requests from your network. Wait a minute and try again." }, 429);
   }
@@ -447,6 +450,9 @@ app.all(
   async (c) => {
     const key = c.req.param("key");
     if (!HOOK_KEY.test(key)) return c.json({ error: "Unknown webhook" }, 404);
+    if (c.env.IP_LIMITER && !(await c.env.IP_LIMITER.limit({ key: `hook:${key}` })).success) {
+      return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429);
+    }
     const doc = await db(c).workflows.findOne({ hookKey: key });
     if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
     if (!doc.enabled) return c.json({ error: "This workflow is turned off" }, 409);

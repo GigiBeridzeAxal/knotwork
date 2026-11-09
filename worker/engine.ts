@@ -1,5 +1,5 @@
 import type { Run, Step, StepLog, Trigger, Workflow } from "../shared/schema";
-import { cronMatches, parseCron } from "../shared/cron";
+import { cronMatches, nextFire, parseCron } from "../shared/cron";
 import { LIMITS } from "../shared/limits";
 import type { Db, Filter } from "mongodb";
 import { giveBack, underLimit } from "./auth";
@@ -303,6 +303,29 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
       .limit(2_000)
       .toArray();
     if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
+    // Waiting runs can't be pruned, so a few accounts could fill the space with them. Stop the
+    // pending runs of the accounts holding the most; they're deleted as finished runs next time.
+    const top = await c.runs
+      .aggregate<{ _id: string }>([
+        { $match: { status: { $in: ["queued", "waiting"] } } },
+        { $group: { _id: "$ownerId", n: { $sum: 1 } } },
+        { $sort: { n: -1 } },
+        { $limit: 3 },
+      ])
+      .toArray();
+    if (old.length < 2_000 && top.length) {
+      await c.runs.updateMany(
+        { ownerId: { $in: top.map((t) => t._id) }, status: { $in: ["queued", "waiting"] } },
+        {
+          $set: {
+            status: "stopped",
+            error: "Stopped to free space: Knotwork's free database was nearly full, and this account had the most runs waiting.",
+            finishedAt: now,
+            nextRunAt: null,
+          },
+        },
+      );
+    }
   }
   if (used > STORAGE_FULL_BYTES) {
     // Lasts until a little after the next check, which renews it while the database stays full.
@@ -326,26 +349,28 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
   const minuteOfHour = new Date(minute).getUTCMinutes();
   let scheduled = 0;
 
-  // Only schedules this minute could fire: never marked, or marked before this minute. The scan reads
-  // just the cron; a workflow's steps are loaded only when it fires.
+  // Only schedules due by this minute: each keeps the next minute it fires (nextFireAt), so the scan
+  // skips the rest. A missing nextFireAt (new, edited or turned back on) is worked out here first.
   const schedules = await c.workflows
     .find(
-      {
-        "trigger.type": "schedule",
-        enabled: true,
-        $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }],
-      },
-      { projection: { _id: 1, trigger: 1 } },
+      { "trigger.type": "schedule", enabled: true, $or: [{ nextFireAt: null }, { nextFireAt: { $lte: minute } }] },
+      { projection: { _id: 1, trigger: 1, lastScheduledAt: 1 } },
     )
     .toArray();
 
-  for (const { _id, trigger } of schedules) {
+  for (const { _id, trigger, lastScheduledAt } of schedules) {
     try {
-      if (!cronMatches(parseCron((trigger as Extract<Trigger, { type: "schedule" }>).cron), new Date(minute))) continue;
+      const cron = parseCron((trigger as Extract<Trigger, { type: "schedule" }>).cron);
+      // Never firing again within a year (e.g. February 30th): look again in a day.
+      const next = nextFire(cron, minute) ?? minute + DAY;
+      if (!cronMatches(cron, new Date(minute)) || (lastScheduledAt ?? -1) >= minute) {
+        await c.workflows.updateOne({ _id, nextFireAt: { $ne: next } }, { $set: { nextFireAt: next } });
+        continue;
+      }
       // Mark the minute first, so two ticks can never fire the same schedule twice.
       const wf = await c.workflows.findOneAndUpdate(
         { _id, $or: [{ lastScheduledAt: null }, { lastScheduledAt: { $lt: minute } }] },
-        { $set: { lastScheduledAt: minute } },
+        { $set: { lastScheduledAt: minute, nextFireAt: next } },
         { returnDocument: "after" },
       );
       if (!wf) continue;
@@ -369,34 +394,42 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
       { status: "running", leaseUntil: { $lt: now } },
     ],
   };
-  // In the order they became ready, at most DUE_PER_OWNER per account. A run that used up its time in
-  // one invocation is parked with nextRunAt = now, so it goes to the back of the line. Each pass skips
-  // accounts that already have their share, so one account's backlog can't hide everyone else's runs.
-  const due: { _id: string; ownerId: string }[] = [];
-  const later: { _id: string; ownerId: string }[] = [];
-  const perOwner = new Map<string, number>();
-  const capped: string[] = [];
-  const window = DUE_PER_TICK * 2;
-  for (let pass = 0; pass < 4 && due.length < DUE_PER_TICK; pass++) {
-    const skip = [...due.map((r) => r._id), ...later.map((r) => r._id)];
-    const filter: Filter<RunDoc> = pass === 0 ? ready : { $and: [ready, { ownerId: { $nin: capped } }, { _id: { $nin: skip } }] };
-    const batch = await c.runs.find(filter, { projection: { _id: 1, ownerId: 1 } }).sort({ nextRunAt: 1 }).limit(window).toArray();
-    for (const run of batch) {
-      const n = perOwner.get(run.ownerId) ?? 0;
-      if (n >= DUE_PER_OWNER || due.length >= DUE_PER_TICK) {
-        later.push(run);
-        continue;
-      }
-      due.push(run);
-      perOwner.set(run.ownerId, n + 1);
-      if (n + 1 === DUE_PER_OWNER) capped.push(run.ownerId);
-    }
-    if (batch.length < window) break;
+  // Accounts take turns: those the cron has served least this hour go first, each with its oldest
+  // ready runs (at most DUE_PER_OWNER). A run that used up its time in one invocation is parked with
+  // nextRunAt = now, so within an account it goes to the back of the line. Slots nobody else needs
+  // go to the busy accounts, so a lone busy account still gets DUE_PER_TICK.
+  const owners: string[] = await c.runs.distinct("ownerId", ready);
+  const hour = Math.floor(now / 3_600_000);
+  const servedKey = (owner: string) => `cron:${owner}:${hour}`;
+  const served = new Map<string, number>();
+  if (owners.length > 1) {
+    const counts = await c.counters.find({ _id: { $in: owners.map(servedKey) } }).toArray();
+    for (const doc of counts) served.set(doc._id, doc.n);
   }
-  // Slots nobody else needs go to the busy accounts, oldest first, so a lone busy account still gets 10.
-  for (const run of later) {
-    if (due.length >= DUE_PER_TICK) break;
-    if ((perOwner.get(run.ownerId) ?? 0) >= DUE_PER_OWNER) due.push(run);
+  const turn = owners
+    .map((owner) => ({ owner, n: served.get(servedKey(owner)) ?? 0 }))
+    .sort((a, b) => a.n - b.n || (a.owner < b.owner ? -1 : 1))
+    .slice(0, Math.ceil(DUE_PER_TICK / DUE_PER_OWNER))
+    .map((t) => t.owner);
+  const oldest = (filter: Filter<RunDoc>, limit: number) =>
+    c.runs.find({ $and: [ready, filter] }, { projection: { _id: 1, ownerId: 1 } }).sort({ nextRunAt: 1 }).limit(limit).toArray();
+  const due = (await Promise.all(turn.map((owner) => oldest({ ownerId: owner }, DUE_PER_OWNER)))).flat();
+  if (due.length < DUE_PER_TICK && owners.length) {
+    due.push(...(await oldest({ _id: { $nin: due.map((r) => r._id) } }, DUE_PER_TICK - due.length)));
+  }
+  if (owners.length > 1 && due.length) {
+    const perOwner = new Map<string, number>();
+    for (const run of due) perOwner.set(run.ownerId, (perOwner.get(run.ownerId) ?? 0) + 1);
+    await c.counters.bulkWrite(
+      [...perOwner].map(([owner, n]) => ({
+        updateOne: {
+          filter: { _id: servedKey(owner) },
+          update: { $inc: { n }, $setOnInsert: { expiresAt: new Date((hour + 1) * 3_600_000) } },
+          upsert: true,
+        },
+      })),
+      { ordered: false },
+    );
   }
 
   // A few at a time: they share one database connection, and the Worker one CPU budget.

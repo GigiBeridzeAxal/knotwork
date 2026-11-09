@@ -52,6 +52,8 @@ export interface WorkflowDoc extends WorkflowInput {
   version: number;
   /** Minute (ms) the schedule last fired, so a minute never fires twice. */
   lastScheduledAt: number | null;
+  /** Next minute (ms) the schedule fires; null or missing means "work it out on the next tick". */
+  nextFireAt?: number | null;
   lastRun: { id: string; status: RunStatus; createdAt: number } | null;
   createdAt: number;
   updatedAt: number;
@@ -187,11 +189,12 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.workspaces.createIndex({ ownerId: 1, personal: -1, createdAt: 1 }),
     c.workflows.createIndex({ workspaceId: 1, updatedAt: -1 }),
     c.workflows.createIndex({ hookKey: 1 }, { unique: true }),
-    c.workflows.createIndex({ "trigger.type": 1, enabled: 1 }),
+    c.workflows.createIndex({ "trigger.type": 1, enabled: 1, nextFireAt: 1 }),
     c.runs.createIndex({ workspaceId: 1, createdAt: -1 }),
     c.runs.createIndex({ workflowId: 1, createdAt: -1 }),
     c.runs.createIndex({ status: 1, createdAt: 1 }),
-    c.runs.createIndex({ status: 1, nextRunAt: 1 }),
+    c.runs.createIndex({ status: 1, nextRunAt: 1, ownerId: 1 }),
+    c.runs.createIndex({ ownerId: 1, status: 1, nextRunAt: 1 }),
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
   ]);

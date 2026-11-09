@@ -75,7 +75,8 @@ taken out again if it went over.
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB it deletes
-the oldest finished runs, past 450 MB it pauses new runs and sign-ups until there's room again.
+the oldest finished runs and stops the waiting runs of the three accounts with the most of them; past
+450 MB it pauses new runs and sign-ups until there's room again.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
 needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
@@ -89,7 +90,9 @@ a secret that is never stored in the database. The free plan's CPU budget allows
 pepper is what keeps a copy of the database alone from being used to guess passwords. The session is a random
 token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefix; the database stores only its
 SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
-limiter turns away more than 60 requests a minute from one IP before any database work. Sign-ups and demo
+limiter turns away more than 60 requests a minute from one IP before any database work. Webhooks are
+limited per webhook URL instead, since services like GitHub send everyone's webhooks from a few shared
+addresses. Sign-ups and demo
 sign-ins are limited per network (IPv6 per /48) and sign-ups per day, login attempts per email and IP, and an
 account keeps at most 20 sessions.
 
@@ -156,11 +159,15 @@ Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without
 password stop working.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
-   whose path starts with `/api/` or `/hooks/`, more than 10 per 10 seconds from one IP, block for 10 seconds.
+   for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
+   from one IP, block for 10 seconds. Leave `/hooks/` out, for the same shared-address reason; the Worker
+   limits each webhook URL to 60 calls a minute. A person watching a run polls every 3 seconds, well under
+   the rule.
    The Worker's own limiter answers floods with 429, but those requests still count toward the free plan's
    100,000 a day; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
    plan: an IP that stays just under the rule (about 86,000 requests a day) uses most of the daily quota, so
-   two such IPs can use all of it. If that happens, `/api` and `/hooks` fail until 00:00 UTC while the
+   two such IPs can use all of it, as can heavy calls to webhook URLs. If that happens, `/api` and `/hooks`
+   fail until 00:00 UTC while the
    dashboard's static files keep loading.
 
 The Worker is served at `knotwork.gigiberidze.com` (the `routes` entry in `wrangler.jsonc`). Change that to your
@@ -178,10 +185,11 @@ person from using up the free plans:
   first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
   limit is skipped for that time.
-- The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry), at
-  most 2 per account while other accounts have runs waiting, in the order they became ready. Webhook and
-  manual runs start in their own request.
-- 60 requests a minute per IP address; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
+- The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry).
+  Accounts take turns: those it has served least this hour go first, 2 runs each, oldest first, and spare
+  slots go to busy accounts. Webhook and manual runs start in their own request.
+- 100 runs per account queued or waiting (in a delay or retry) at once.
+- 60 requests a minute per IP address, and 60 calls a minute per webhook URL; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
   attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.

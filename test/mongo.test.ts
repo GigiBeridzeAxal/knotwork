@@ -4,7 +4,7 @@ import type { WorkflowInput } from "../shared/schema";
 import type { Workflow } from "../shared/schema";
 import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
 import { ensureDemo } from "../worker/demo";
-import { advance, createRun, tick } from "../worker/engine";
+import { advance, createRun, guardStorage, tick } from "../worker/engine";
 import { bump } from "../worker/auth";
 import { type Collections, collections } from "../worker/mongo";
 import { dropAll } from "./dropAll";
@@ -177,6 +177,82 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect((await c.runs.findOne({ _id: other }))?.status).toBe("succeeded");
     // The other account's run goes first; slots nobody else needs go to the busy account.
     expect(await c.runs.countDocuments({ ownerId: "usr_hog", status: "succeeded" })).toBe(9);
+  });
+
+  it("lets accounts take turns, so five busy accounts ahead don't hold a quiet one back", async () => {
+    await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } }); // the last test's backlog
+    const now = Date.now();
+    for (const owner of ["usr_b1", "usr_b2", "usr_b3", "usr_b4", "usr_b5"]) {
+      const wf = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
+      for (let i = 0; i < 25; i++) {
+        const runId = await createRun(c, { ...wf, ownerId: owner }, "manual", {});
+        await c.runs.updateOne({ _id: runId }, { $set: { nextRunAt: now - 60_000 + i } });
+      }
+    }
+    const { runId: quiet } = await start([transform("a", 1)], "usr_q", "ws_q");
+    // The first tick serves five accounts (the quiet one among the least served); every account is
+    // reached within two ticks.
+    await tick(c, now + 1_000);
+    await tick(c, now + 61_000);
+    expect((await c.runs.findOne({ _id: quiet }))?.status).toBe("succeeded");
+    for (const owner of ["usr_b1", "usr_b2", "usr_b3", "usr_b4", "usr_b5"]) {
+      expect(await c.runs.countDocuments({ ownerId: owner, status: "succeeded" })).toBeGreaterThanOrEqual(1);
+    }
+    // A newcomer with one ready run is served on the very next tick, ahead of accounts already served.
+    const { runId: late } = await start([transform("a", 1)], "usr_late", "ws_late");
+    await tick(c, now + 121_000);
+    expect((await c.runs.findOne({ _id: late }))?.status).toBe("succeeded");
+  });
+
+  it("stops the biggest backlogs when the database is nearly full", async () => {
+    await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
+    const wf = await addWorkflow("ws_heap", "usr_heap", wfInput([transform("a", 1)]));
+    const heap = [];
+    for (let i = 0; i < 5; i++) heap.push(await createRun(c, { ...wf, ownerId: "usr_heap" }, "manual", {}));
+    for (const [owner, n] of [["usr_m1", 3], ["usr_m2", 2]] as const) {
+      const other = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
+      for (let i = 0; i < n; i++) await createRun(c, { ...other, ownerId: owner }, "manual", {});
+    }
+    const { runId: small } = await start([transform("a", 1)], "usr_small", "ws_small");
+    const nearlyFull = { stats: async () => ({ dataSize: 400_000_000, indexSize: 0 }) } as unknown as Db;
+    await guardStorage(c, nearlyFull, Date.now());
+    expect(await c.runs.countDocuments({ _id: { $in: heap }, status: "stopped" })).toBe(5);
+    // Only the three biggest backlogs are stopped.
+    expect(await c.runs.countDocuments({ ownerId: { $in: ["usr_m1", "usr_m2"] }, status: "stopped" })).toBe(5);
+    expect((await c.runs.findOne({ _id: small }))?.status).toBe("queued");
+  });
+
+  it("fires a schedule once in its minute and skips it in the scan until its next one", async () => {
+    await account("usr_sched");
+    const wf = await addWorkflow("ws_sched", "usr_sched", { ...wfInput([transform("a", 1)]), trigger: { type: "schedule", cron: "*/10 * * * *" } });
+    const base = Math.floor(Date.now() / 3_600_000) * 3_600_000; // the top of this hour fires
+    // A minute that doesn't fire: nothing runs, and the next fire time is stored.
+    await tick(c, base - 3 * 60_000);
+    expect(await c.runs.countDocuments({ workflowId: wf.id })).toBe(0);
+    expect((await c.workflows.findOne({ _id: wf.id }))?.nextFireAt).toBe(base);
+    // Its minute: one run, even if two ticks land in the same minute. (At the same moment only on
+    // MongoDB: FerretDB doesn't apply parallel findOneAndUpdate atomically.)
+    if (ferret) {
+      await tick(c, base + 1_000);
+      await tick(c, base + 2_000);
+    } else await Promise.all([tick(c, base + 1_000), tick(c, base + 2_000)]);
+    expect(await c.runs.countDocuments({ workflowId: wf.id, triggerType: "schedule" })).toBe(1);
+    expect((await c.workflows.findOne({ _id: wf.id }))?.nextFireAt).toBe(base + 10 * 60_000);
+    // Saving the workflow clears it, so a changed schedule is worked out again.
+    const saved = await updateWorkflow(c, wf.id, "ws_sched", { ...wfInput([transform("a", 1)]), trigger: { type: "schedule", cron: "5 * * * *" } }, wf.version, Date.now());
+    expect(saved.ok).toBe(true);
+    expect((await c.workflows.findOne({ _id: wf.id }))?.nextFireAt).toBeNull();
+    await tick(c, base + 60_000);
+    expect((await c.workflows.findOne({ _id: wf.id }))?.nextFireAt).toBe(base + 5 * 60_000);
+  });
+
+  it("caps how many runs one account can have waiting", async () => {
+    await account("usr_pile");
+    await c.runs.insertMany(
+      Array.from({ length: 100 }, (_, i) => ({ _id: `run_pile_${i}`, ownerId: "usr_pile", status: "waiting" }) as never),
+    );
+    expect(await takeRunSlot(c, "usr_pile", Date.now(), "webhook")).toMatch(/100 runs waiting/);
+    await c.runs.deleteMany({ ownerId: "usr_pile" });
   });
 
   it("never lets parallel saves put more workflows in a workspace than the limit", async () => {

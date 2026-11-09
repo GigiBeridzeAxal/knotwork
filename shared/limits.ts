@@ -16,6 +16,8 @@ export const LIMITS = {
   /** The same for an account in its first 24 hours. */
   newAccountRunsPerHour: 10,
   /** Webhook and manual runs started this clock hour across every account (schedules don't count). */
+  /** Runs one account can have queued or waiting (in a delay or retry) at once. */
+  pendingRunsPerAccount: 100,
   runsPerHourOverall: 3_000,
   /** Once half of that is used, accounts that have started more than this many this hour must wait. */
   fairShareRunsPerHour: 20,

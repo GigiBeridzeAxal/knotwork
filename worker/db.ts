@@ -123,6 +123,7 @@ export async function insertWorkflow(
     hookKey: newHookKey(),
     version: 1,
     lastScheduledAt: null,
+    nextFireAt: null,
     lastRun: null,
     createdAt: now,
     updatedAt: now,
@@ -159,6 +160,8 @@ export async function updateWorkflow(
         enabled: input.enabled,
         trigger: input.trigger,
         steps: input.steps,
+        // The schedule may have changed or been turned back on; the next tick works out when it fires.
+        nextFireAt: null,
         updatedAt: now,
       },
       $inc: { version: 1 },
@@ -208,8 +211,17 @@ export async function takeRunSlot(
   now: number,
   kind: "schedule" | "webhook" | "manual" = "manual",
 ): Promise<string | null> {
-  const [full, max] = await Promise.all([storageFull(c), runLimit(c, ownerId, now)]);
+  const [full, max, pending] = await Promise.all([
+    storageFull(c),
+    runLimit(c, ownerId, now),
+    c.runs.countDocuments({ ownerId, status: { $in: ["queued", "waiting"] } }, { limit: LIMITS.pendingRunsPerAccount }),
+  ]);
   if (max === null) return "This workflow's account has been deleted.";
+  // Runs that are waiting (a delay, a retry) can pile up over days; this keeps one account's backlog
+  // small enough that the cron, and the database, keep up.
+  if (pending >= LIMITS.pendingRunsPerAccount) {
+    return `This account has ${LIMITS.pendingRunsPerAccount} runs waiting or queued, which is the most it can have. New runs can start once some of them finish.`;
+  }
   const used = await bump(c, runCounter(ownerId), HOUR, now);
   const mine = used <= max;
   // A refused run gives its slot back, so the counter (shown as "runs this hour") counts started runs.

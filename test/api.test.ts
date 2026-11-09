@@ -153,6 +153,29 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect((await call("GET", "/api/workflows", { cookie: bob.cookie, ws })).status).toBe(200);
   });
 
+  it("limits webhooks per hook, not per sender address", async () => {
+    // A stand-in for Cloudflare's rate limiter: 60 per key.
+    const counts = new Map<string, number>();
+    env.IP_LIMITER = {
+      async limit({ key }: { key: string }) {
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        return { success: counts.get(key)! <= 60 };
+      },
+    };
+    try {
+      const a = await call("POST", "/api/workflows", { cookie: alice.cookie, ws: alice.ws, body: flow("Hook A", { type: "webhook" }) });
+      const side = await call("POST", "/api/workspaces", { cookie: alice.cookie, body: { name: "Hooks" } });
+      const b = await call("POST", "/api/workflows", { cookie: alice.cookie, ws: side.body.id, body: flow("Hook B", { type: "webhook" }) });
+      // 60 calls to hook A use up its budget, without touching hook B's or the sender's.
+      for (let i = 0; i < 60; i++) counts.set(`hook:${a.body.hookKey}`, i + 1);
+      expect((await call("POST", `/hooks/${a.body.hookKey}`, { body: {} })).status).toBe(429);
+      expect((await call("POST", `/hooks/${b.body.hookKey}`, { body: {} })).status).toBe(202);
+      expect([...counts.keys()].every((k) => k.startsWith("hook:"))).toBe(true);
+    } finally {
+      env.IP_LIMITER = undefined;
+    }
+  });
+
   it("lets anyone into the shared demo, but not change its password", async () => {
     const demo = await call("POST", "/api/auth/demo");
     expect(demo.body.user).toMatchObject({ demo: true });
