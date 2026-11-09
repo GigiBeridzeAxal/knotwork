@@ -299,9 +299,9 @@ npm run deploy
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
 password, webhook URL, API key and recovery code stop working.
 
-A later deploy that adds collections or indexes needs no `db:setup`: the hub creates any missing index on
-its first cron tick after it starts, and the cron checks them again every hour. Running `db:setup` anyway
-does no harm.
+A later deploy that adds collections or indexes needs no `db:setup`: the cron creates any missing index
+within the hour (at minute 7). Until then the new collections are nearly empty, so nothing is slow.
+Running `db:setup` anyway does no harm.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds

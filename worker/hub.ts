@@ -1,6 +1,6 @@
 import { handle, HUB_TICK } from "./index";
 import { tick } from "./engine";
-import { ensureIndexes, type Env, isConnectionError, Mongo } from "./mongo";
+import { type Env, isConnectionError, Mongo } from "./mongo";
 
 const REPLACE_GAP_MS = 30_000;
 
@@ -30,8 +30,6 @@ export class Hub {
   private replacedAt = 0;
   /** What the hub runs; a field so tests can replace it. */
   protected work = { handle, tick };
-  /** Whether this instance has made sure the database's indexes exist (see `fetch`). */
-  private indexed = false;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -53,19 +51,6 @@ export class Hub {
     if (request.url === HUB_TICK && request.method === "POST") {
       try {
         await hold(this.work.tick(conn.mongo.c, Date.now(), conn.mongo.db, this.env.AUTH_PEPPER));
-        // Once per start of the hub: create any index a newer version added (`createIndex` does nothing
-        // for one that exists), so a deploy that adds collections needs no `npm run db:setup` by hand.
-        // It starts after a tick that worked, so the tick doesn't wait behind it for a connection.
-        if (!this.indexed) {
-          this.indexed = true;
-          this.state.waitUntil(
-            // Reports the ones the server refused; if it can't run at all, the next tick tries again.
-            Promise.resolve()
-              .then(() => ensureIndexes(conn.mongo.c))
-              .then((failed) => failed.length && console.warn("indexes", failed))
-              .catch(() => void (this.indexed = false)),
-          );
-        }
       } catch (err) {
         console.error("tick", err);
         if (isConnectionError(err)) this.replace(conn);
