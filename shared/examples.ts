@@ -126,19 +126,19 @@ export const EXAMPLES: { title: string; blurb: string; workflow: WorkflowInput }
   },
   {
     title: "Retry and recover",
-    blurb: "Calls an API that fails on purpose, so you can watch the retries.",
+    blurb: "Calls an API that fails about half the time, so you can watch the retries and the recovery.",
     workflow: {
       name: "Retry and recover",
-      description: "The first request always fails with a 503, and Knotwork retries it with backoff.",
+      description: "This API answers 503 about half the time. Knotwork retries with backoff until it answers 200.",
       enabled: true,
       trigger: { type: "manual" },
       steps: [
         {
           id: "flaky",
-          name: "Call a failing API",
+          name: "Call a flaky API",
           type: "http",
-          retry: { max: 2, backoffSeconds: 5 },
-          config: { method: "GET", url: "https://httpbin.org/status/503", headers: {}, failOnError: true },
+          retry: { max: 4, backoffSeconds: 5 },
+          config: { method: "GET", url: "https://httpbin.org/status/200,503", headers: {}, failOnError: true },
         },
       ],
     },
