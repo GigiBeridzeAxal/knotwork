@@ -56,7 +56,7 @@ export function RunPage({ id }: { id: string }) {
         </Link>
         <div className="flex flex-wrap items-center gap-4">
           <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">Run</h1>
-          <StatusBadge status={run.status} />
+          <StatusBadge status={run.status} error={run.error} />
         </div>
         <p className="font-mono text-sm text-muted">
           {run.id} · {run.triggerType} · started {timeAgo(run.createdAt)}
@@ -121,7 +121,11 @@ export function RunPage({ id }: { id: string }) {
               </div>
             </li>
           ))}
-          {run.logs.length === 0 && remaining === 0 && <p className="text-muted">This workflow has no steps.</p>}
+          {run.logs.length === 0 && remaining === 0 && (
+            <p className="text-muted">
+              {run.status === "stopped" && run.error ? "The rest of this run was removed to free space." : "This workflow has no steps."}
+            </p>
+          )}
         </ol>
 
         <aside className="flex flex-col gap-3">

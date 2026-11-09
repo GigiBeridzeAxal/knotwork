@@ -305,7 +305,7 @@ export function EditorPage({ id }: { id: string | null }) {
                 {runs.slice(0, 8).map((r) => (
                   <li key={r.id}>
                     <Link href={`/runs/${r.id}`} className="flex min-h-11 items-center justify-between gap-2 rounded-[10px] px-2 hover:bg-ink">
-                      <StatusBadge status={r.status} />
+                      <StatusBadge status={r.status} error={r.error} />
                       <span className="text-sm text-muted">{timeAgo(r.createdAt)}</span>
                     </Link>
                   </li>

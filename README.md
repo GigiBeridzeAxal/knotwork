@@ -74,10 +74,10 @@ taken out again if it went over.
 
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
-data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB it deletes
-the queued and waiting runs of the (up to five) accounts holding more than 20 are stopped and shrunk to
-their error message, and only if that isn't enough are everyone's oldest finished runs deleted; past
-450 MB it pauses new runs and sign-ups until there's room again.
+data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB, the queued
+and waiting runs of up to five accounts holding more than 20 are stopped, keeping only their log and the
+reason, and only if that isn't enough are everyone's oldest finished runs deleted; past 450 MB it pauses
+new runs and sign-ups until there's room again.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
 needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
@@ -125,7 +125,9 @@ npm run dev                                                # http://localhost:51
 ```
 
 `AUTH_PEPPER` must be at least 16 characters, or sign-up and login fail. The database is called `knotwork`
-(`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable).
+(`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable). Webhook URLs carry a signature made
+with `AUTH_PEPPER`; a database used by a build from before that (or with another pepper) needs one run of
+`db:setup` with `AUTH_PEPPER` set too, which gives those workflows new webhook URLs.
 
 Locally every browser has the same address, so the per-network limits (5 sign-ups an hour, 30 demo sign-ins,
 10 login attempts) are shared by everything you test. To start them over, empty the `counters` collection:
@@ -158,7 +160,7 @@ npm run deploy
 ```
 
 Keep a copy of `AUTH_PEPPER` outside the repo. It can't be changed later without making every existing
-password stop working.
+password and webhook URL stop working.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds

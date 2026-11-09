@@ -2,6 +2,8 @@ import { LIMITS } from "../shared/limits";
 import type { Collections, SessionDoc, UserDoc } from "./mongo";
 import { randomId } from "./mongo";
 
+export { hookKeyValid, newHookKey } from "./hookKey";
+
 /**
  * Passwords: PBKDF2-SHA-256 over HMAC-SHA-256(pepper, password), with a random salt per password.
  *
@@ -25,32 +27,6 @@ async function hmac(pepper: string, password: string): Promise<Uint8Array> {
   if (!pepper || pepper.length < 16) throw new Error("AUTH_PEPPER is missing or shorter than 16 characters");
   const key = await crypto.subtle.importKey("raw", enc.encode(pepper), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(password)));
-}
-
-const b64url = (bytes: Uint8Array) => toB64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-const HOOK_RANDOM_BYTES = 12;
-const HOOK_TAG_BYTES = 6;
-
-/**
- * Webhook keys carry their own signature: 12 random bytes plus the first 6 bytes of
- * HMAC(pepper, those bytes), 24 characters of base64url. The webhook route checks the signature with
- * CPU alone, so made-up keys never reach the database or the rate limiter.
- */
-export async function newHookKey(pepper: string): Promise<string> {
-  const random = crypto.getRandomValues(new Uint8Array(HOOK_RANDOM_BYTES));
-  const tag = (await hmac(pepper, `hook:${b64url(random)}`)).slice(0, HOOK_TAG_BYTES);
-  const key = new Uint8Array(HOOK_RANDOM_BYTES + HOOK_TAG_BYTES);
-  key.set(random);
-  key.set(tag, HOOK_RANDOM_BYTES);
-  return b64url(key);
-}
-
-export async function hookKeyValid(key: string, pepper: string): Promise<boolean> {
-  if (!/^[A-Za-z0-9_-]{24}$/.test(key)) return false;
-  const bytes = fromB64(key.replace(/-/g, "+").replace(/_/g, "/"));
-  const random = bytes.slice(0, HOOK_RANDOM_BYTES);
-  const expected = (await hmac(pepper, `hook:${b64url(random)}`)).slice(0, HOOK_TAG_BYTES);
-  return sameBytes(bytes.slice(HOOK_RANDOM_BYTES), expected);
 }
 
 async function pbkdf2(secret: Uint8Array, salt: Uint8Array, iterations: number): Promise<Uint8Array> {

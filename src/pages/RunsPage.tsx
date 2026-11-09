@@ -45,7 +45,7 @@ export function RunsPage() {
                     </Link>
                   </td>
                   <td className="px-5 py-3">
-                    <StatusBadge status={r.status} />
+                    <StatusBadge status={r.status} error={r.error} />
                   </td>
                   <td className="px-5 py-3 text-soft capitalize">{r.triggerType}</td>
                   <td className="px-5 py-3 text-soft">{timeAgo(r.createdAt)}</td>

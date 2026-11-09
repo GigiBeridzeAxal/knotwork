@@ -52,8 +52,9 @@ const STATUS: Record<RunStatus | LogStatus, { label: string; color: string }> = 
   stopped: { label: "Stopped by filter", color: "text-soft bg-soft/12" },
 };
 
-export function StatusBadge({ status }: { status: RunStatus | LogStatus }) {
-  const s = STATUS[status];
+/** `error` tells a run stopped for another reason (e.g. to free space) from one a filter step stopped. */
+export function StatusBadge({ status, error }: { status: RunStatus | LogStatus; error?: string | null }) {
+  const s = status === "stopped" && error ? { ...STATUS.stopped, label: "Stopped" } : STATUS[status];
   return (
     <span className={cn("inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap", s.color)}>
       <span className={cn("size-2 rounded-full bg-current", status === "running" && "animate-pulse")} />

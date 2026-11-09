@@ -53,7 +53,6 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 /** Biggest request body the API accepts. A workflow is at most LIMITS.workflowBytes of JSON. */
 const MAX_API_BODY = 64 * 1024;
-/** Webhook keys are 18 random bytes in base64url. Anything else is refused before the database. */
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
