@@ -105,10 +105,11 @@ app.use("*", async (c, next) => {
   return next();
 });
 
-// One database connection per request, opened on first use and closed once the response and any
-// background work (a run started by this request) are done.
+// The hub's long-lived database connection, or (without the hub) one per request, opened on first
+// use and closed once the response and any background work (a run started by this request) are done.
 app.use("*", async (c, next) => {
-  const mongo = new Mongo(c.env);
+  const shared = c.env.SHARED_MONGO;
+  const mongo = shared ?? new Mongo(c.env);
   const later: Promise<unknown>[] = [];
   c.set("mongo", mongo);
   c.set("later", later);
@@ -118,14 +119,19 @@ app.use("*", async (c, next) => {
     // How long the database connection took to open, and the whole request, so slow pages can be
     // told apart from slow handshakes (browser dev tools show this under Timing).
     const timing = [`total;dur=${Date.now() - start}`];
-    if (mongo.connected) timing.unshift(`db-connect;dur=${mongo.connected - mongo.started}`);
+    if (mongo.connected >= start) timing.unshift(`db-connect;dur=${mongo.connected - mongo.started}`);
     c.res.headers.append("Server-Timing", timing.join(", "));
   } finally {
-    c.executionCtx.waitUntil(Promise.allSettled(later).then(() => mongo.close()));
+    c.executionCtx.waitUntil(Promise.allSettled(later).then(() => (shared ? undefined : mongo.close())));
   }
 });
 
 const db = (c: C) => c.var.mongo.c;
+
+/** The one hub, placed in western Europe next to the Atlas cluster (Frankfurt). */
+const hub = (env: Env) => env.HUB!.get(env.HUB!.idFromName("main"), { locationHint: "weur" });
+/** The hub's cron entry. The Worker only forwards /api/ and /hooks/ paths, so visitors can't reach it. */
+export const HUB_TICK = "https://hub.internal/__hub/tick";
 
 // ---------- API (used by the dashboard) ----------
 
@@ -525,9 +531,24 @@ app.all(
   },
 );
 
+/** The API and webhooks, run with the given environment (the hub passes its open connection in it). */
+export const handle = app.fetch;
+
+export { Hub } from "./hub";
+
 export default {
-  fetch: app.fetch,
+  async fetch(request, env, ctx) {
+    // The API and webhooks run in the hub, on its open database connection. (Static files never
+    // reach this code; see run_worker_first in wrangler.jsonc.)
+    const { pathname } = new URL(request.url);
+    if (env.HUB && (pathname.startsWith("/api/") || pathname.startsWith("/hooks/"))) return hub(env).fetch(request);
+    return app.fetch(request, env, ctx);
+  },
   async scheduled(_controller, env, ctx) {
+    if (env.HUB) {
+      ctx.waitUntil(hub(env).fetch(HUB_TICK, { method: "POST" }).then((res) => res.body?.cancel()));
+      return;
+    }
     const mongo = new Mongo(env);
     ctx.waitUntil(tick(mongo.c, Date.now(), mongo.db, env.AUTH_PEPPER).finally(() => mongo.close()));
   },

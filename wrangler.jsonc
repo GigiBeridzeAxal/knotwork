@@ -13,9 +13,12 @@
   // MONGODB_URI (the connection string) and AUTH_PEPPER (a long random string mixed into password
   // hashes). Locally both come from .dev.vars (see README).
   "vars": { "MONGODB_DB": "knotwork" },
-  // Run the Worker near the database instead of near the visitor: each request opens a database
-  // connection, and the handshake is several round trips.
-  "placement": { "mode": "smart" },
+  // The API, webhooks and cron tick run in one Durable Object (worker/hub.ts) that keeps its database
+  // connection open between requests, placed in western Europe next to the cluster. Opening a
+  // connection per request would cost more CPU than the free plan allows. (SQLite-backed Durable
+  // Objects are on the free plan; this one stores nothing itself.)
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
   // Cloudflare's free rate limiter: 60 requests a minute per IP (or IPv6 /64) to /api, and 60 calls a
   // minute per webhook URL, turned away before the Worker opens a database connection. Matches
   // LIMITS.requestsPerIpPerMinute. HOOK_IP_LIMITER is a looser per-IP limit for /hooks, so random

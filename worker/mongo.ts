@@ -16,6 +16,13 @@ export interface Env {
   NET_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   HOOK_NET_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
   ASSETS: Fetcher;
+  /**
+   * The Durable Object that runs the API and the cron tick on one long-lived database connection
+   * (worker/hub.ts). Without it (tests, plain `vite dev`), each request opens its own connection.
+   */
+  HUB?: DurableObjectNamespace;
+  /** Set only inside the hub: the connection it keeps open across requests. */
+  SHARED_MONGO?: Mongo;
 }
 
 // ---------- Documents ----------
@@ -134,9 +141,10 @@ export function collections(db: Db): Collections {
 }
 
 /**
- * A Worker can't keep a socket from one request for the next, so each request (and each cron tick)
- * opens its own connection the first time it needs one and closes it when its work is done. The
- * Worker uses Smart Placement, so it runs next to the cluster and the handshake stays short.
+ * A database connection, opened on first use. A Worker can't keep a socket from one request for the
+ * next, and opening one (TLS, then SCRAM) costs far more CPU than the free plan's 10 ms per request,
+ * so in production one Durable Object (worker/hub.ts) keeps a single Mongo open across requests.
+ * Without the hub, each request makes its own and closes it when done.
  */
 export class Mongo {
   private client: MongoClient | null = null;
@@ -148,17 +156,21 @@ export class Mongo {
   started = 0;
   connected = 0;
 
-  constructor(env: Env) {
+  /** A shared connection (the hub's) serves requests that overlap, so it may use two sockets. */
+  private shared: boolean;
+
+  constructor(env: Env, { shared = false } = {}) {
     this.env = env;
+    this.shared = shared;
   }
 
   get c(): Collections {
     if (!this.cols) {
       if (!this.env.MONGODB_URI) throw new Error("MONGODB_URI is not set");
       this.client = new MongoClient(this.env.MONGODB_URI, {
-        // One pooled connection per request: each extra one costs a TLS and SCRAM handshake, and a
-        // Worker may only hold six sockets open at once (the replica set's monitors take three).
-        maxPoolSize: 1,
+        // One pooled connection per request (two in the hub): each extra one costs a TLS and SCRAM
+        // handshake, and a Worker may only hold six sockets open at once (the monitors take three).
+        maxPoolSize: this.shared ? 2 : 1,
         // "stream" would add a second socket per server after 10 s; polling keeps one.
         serverMonitoringMode: "poll",
         serverSelectionTimeoutMS: 8_000,

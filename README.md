@@ -55,7 +55,8 @@ Browser ──► Cloudflare Worker ──► MongoDB Atlas (free M0 cluster)
 | API and webhooks | [`worker/index.ts`](worker/index.ts) |
 | Accounts: password hashing, sessions, rate-limit counters | [`worker/auth.ts`](worker/auth.ts) |
 | Queries, and the limits that need the database | [`worker/db.ts`](worker/db.ts) |
-| Collections, indexes and the per-request connection | [`worker/mongo.ts`](worker/mongo.ts) |
+| Collections, indexes and the database connection | [`worker/mongo.ts`](worker/mongo.ts) |
+| The Durable Object that keeps the connection open | [`worker/hub.ts`](worker/hub.ts) |
 | Demo account | [`worker/demo.ts`](worker/demo.ts) |
 | Workflow schema (shared by API and dashboard) | [`shared/schema.ts`](shared/schema.ts) |
 | Limits | [`shared/limits.ts`](shared/limits.ts) |
@@ -83,12 +84,14 @@ or more are stopped, then everyone's oldest finished runs are deleted; near 450 
 stopped run keeps only the reason. Past 450 MB it pauses new runs and sign-ups until there's room again. Runs may also store only so much per hour (90 MB
 in all; see Limits), so even a burst can't fill the space between two checks.
 
-A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
-needs it and closes it when it's done. The driver keeps one pooled connection and polls the cluster instead
-of streaming, so a request stays within the Worker's six open sockets, and Smart Placement runs the Worker
-next to the cluster to keep the handshake short. That handshake is most of a request's CPU time, close to the
-free plan's 10 ms; if requests start hitting the limit, the next step is a Durable Object that keeps one
-connection open.
+**One connection, kept open.** A Worker can't reuse a socket across requests, and opening a connection to
+Atlas (DNS, TLS, SCRAM) measured 30 to 90 ms of CPU in production, several times the free plan's 10 ms. So
+the Worker hands `/api/` and `/hooks/` requests and the cron tick to one Durable Object, the hub
+([`worker/hub.ts`](worker/hub.ts)), placed in western Europe next to the cluster. The hub keeps its
+connection open between requests (two pooled sockets, monitors polling instead of streaming), so only its
+first request after a quiet spell pays the handshake. Without the `HUB` binding (the tests), each request
+opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
+time, and the connect time when the request had to open the connection.
 
 **Accounts.** Passwords are hashed with PBKDF2-SHA-256 over an HMAC of the password keyed with `AUTH_PEPPER`,
 a secret that is never stored in the database. The free plan's CPU budget allows only 10,000 iterations; the
