@@ -6,7 +6,6 @@ import { ArrowIcon, PlusIcon } from "../components/icons";
 import { cn, duration, timeAgo } from "../components/ui";
 import { EXAMPLES } from "../../shared/examples";
 import { Link, navigate } from "../router";
-import { useSession } from "../session";
 import { HOUR, runsSince, useWorkspace } from "../workspace";
 
 const DAY = 24 * HOUR;
@@ -416,9 +415,6 @@ function Feed({ runs, count }: { runs: Run[]; count: number }) {
 function Welcome() {
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState("");
-  // Examples with ready-made steps can't run in the shared demo account, so it doesn't offer them.
-  const isDemo = useSession().me?.user.demo ?? false;
-  const examples = EXAMPLES.map((ex, i) => ({ ex, i })).filter(({ ex }) => !(isDemo && ex.demo === false));
   async function useExample(i: number) {
     setBusy(i);
     try {
@@ -461,7 +457,7 @@ function Welcome() {
           Start from an example
         </h2>
         <div className="grid gap-4 lg:grid-cols-3">
-          {examples.map(({ ex, i }) => (
+          {EXAMPLES.map((ex, i) => (
             <button
               key={ex.title}
               type="button"

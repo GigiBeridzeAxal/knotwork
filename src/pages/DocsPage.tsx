@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect } from "react";
 import { LIMITS } from "../../shared/limits";
+import { TEMPLATES } from "../../shared/templates";
 import { Logo } from "../components/ui";
 import { Link } from "../router";
 import { useSession } from "../session";
@@ -12,6 +13,7 @@ import { useSession } from "../session";
 
 const SECTIONS = [
   { id: "start", label: "Get started" },
+  { id: "editor", label: "The editor" },
   { id: "triggers", label: "Triggers" },
   { id: "steps", label: "Steps" },
   { id: "templates", label: "Templates" },
@@ -28,6 +30,8 @@ const LIMIT_ROWS: [string, string][] = [
   ["Workflows per workspace", String(LIMITS.workflowsPerWorkspace)],
   ["Steps per workflow", String(LIMITS.stepsPerWorkflow)],
   ["Size of a saved workflow", `${LIMITS.workflowBytes / 1000} KB`],
+  ["Saved versions per workflow", `the newest ${LIMITS.versionsPerWorkflow}`],
+  ["Step tests per hour", String(LIMITS.stepTestsPerHour)],
   ["Webhook body or test input", `${LIMITS.runInputBytes / 1000} KB`],
   ["Runs per hour, per account", `${LIMITS.runsPerAccountPerHour} (${LIMITS.newAccountRunsPerHour} in the first 24 hours)`],
   ["Runs waiting at once, per account", String(LIMITS.pendingRunsPerAccount)],
@@ -124,6 +128,46 @@ export function DocsPage() {
               A workflow only starts on its own (from its schedule or webhook) while the box{" "}
               <b>On (schedules and webhooks start runs)</b> in the editor's side panel is ticked.
             </p>
+          </Section>
+
+          <Section id="editor" title="The editor">
+            <p>
+              A workflow opens on the <b>canvas</b>: the trigger on top, one box per step, and a <b>+</b> in every gap. Press a{" "}
+              <b>+</b> to add a step there, and press a box to change it in the panel beside the canvas (on a phone, a sheet
+              from the bottom). Drag the background to move around; pinch, hold Ctrl and scroll, or use the buttons in the
+              corner to zoom. The <b>Canvas / List</b> switch at the top shows the same steps as a plain list, and your choice
+              is remembered.
+            </p>
+            <dl>
+              <dt>Move a step</dt>
+              <dd>Drag its box onto another <b>+</b>, or press it and use <b>Move up</b> and <b>Move down</b> in the panel.</dd>
+              <dt>Test one step</dt>
+              <dd>
+                Press a step, open its <b>Test</b> tab and press <b>Test this step</b>. Only that step runs, against the test
+                data shown, which you can type or fill with <b>Use the last run's data</b>. Nothing is saved, no run is
+                started, and a delay doesn't wait. A step that passes adds its output to the test data, so you can test your
+                way down. You get {LIMITS.stepTestsPerHour} tests an hour.
+              </dd>
+              <dt>Version history</dt>
+              <dd>
+                Every save keeps a copy, the newest {LIMITS.versionsPerWorkflow} of them. Open <b>History</b> in the panel (with
+                no step selected) and pick a version to see it on the canvas. <b>Restore this version</b> puts it in the editor;
+                it replaces the current one only when you press <b>Save</b>.
+              </dd>
+              <dt>Ready-made workflows</dt>
+              <dd>
+                <b>Templates</b> in the sidebar holds {TEMPLATES.length} workflows that run as they are. One opens on the canvas
+                unsaved, so nothing is created until you press <b>Create</b>. (These are not the <code>{"{{ }}"}</code>{" "}
+                templates described below.)
+              </dd>
+              <dt>Export and import</dt>
+              <dd>
+                <b>Export as a file</b> in the panel saves the trigger and steps as a small JSON file. <b>Import a file</b> on the
+                Workflows and Templates pages opens such a file as a new, unsaved workflow, checked the same way as a save.
+                The file holds whatever you typed into the steps, API keys in headers included, so look it over before you
+                share it.
+              </dd>
+            </dl>
           </Section>
 
           <Section id="triggers" title="Triggers">

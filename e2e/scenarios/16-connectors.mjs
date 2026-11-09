@@ -19,17 +19,19 @@ async function waitRun(a, ws, runId) {
 }
 
 export default {
-  name: "Ready-made steps: GitHub star to Discord, every form saves, phone fits, real calls go out",
+  name: "Ready-made steps: GitHub star to Discord template, every form saves, phone fits, real calls go out",
   tags: ["happy", "lifecycle", "device"],
   actors: ["alice", "bob", "carol", "erin"],
   async run({ actors: { alice, bob, carol, erin }, step, check, runTag, data, note }) {
-    await step(alice, "starts from the 'New GitHub star to Discord' example on an empty home", async ({ page }) => {
+    await step(alice, "opens the 'New GitHub star to Discord' template and switches to the list view", async ({ page }) => {
       await page.goto("/home");
       data.aws = await personal(alice);
-      const card = page.getByRole("button", { name: /New GitHub star to Discord/ });
-      await card.click();
-      await page.waitForURL("**/workflows/**");
-      data.awf = page.url().split("/workflows/")[1];
+      await page.goto("/templates");
+      await page.getByRole("link", { name: /New GitHub star to Discord/ }).click();
+      await page.waitForURL(/\/workflows\/new\?template=github-star-to-discord/);
+      await page.locator("[data-step]").first().waitFor();
+      check((await page.locator("[data-step]").count()) === 2, "the template's two steps aren't on the canvas");
+      await page.getByRole("button", { name: "list", exact: true }).click();
     });
     await step(alice, "sees the Discord form with the secret placeholder and the step's message", async ({ page }) => {
       await page.getByRole("button", { name: /Tell Discord/ }).click();
@@ -43,8 +45,9 @@ export default {
       await page.getByLabel("Retries if it fails").selectOption("0");
       check((await page.getByLabel("Webhook URL").getAttribute("type")) === "password", "a pasted webhook URL is hidden");
       await page.locator("#wf-name").fill(`${runTag} star`);
-      await page.getByRole("button", { name: "Save" }).click();
-      await page.getByRole("status").filter({ hasText: "Saved" }).waitFor();
+      await page.getByRole("button", { name: "Create" }).click();
+      await page.waitForURL(/\/workflows\/wf_/);
+      data.awf = page.url().split("/workflows/")[1].split(/[?#]/)[0];
     });
     await step(alice, "GitHub-style star webhook arrives; the run reaches Discord, which rejects the fake hook", async ({ page }) => {
       const wf = (await api(alice, "GET", `/workflows/${data.awf}`, undefined, data.aws)).body;
@@ -71,6 +74,7 @@ export default {
       data.bws = await personal(bob);
       data.bwf = (await api(bob, "POST", "/workflows", { name: `${runTag} four`, description: "", enabled: true, trigger: { type: "manual" }, steps: [] }, data.bws)).body.id;
       await page.goto(`/workflows/${data.bwf}`);
+      await page.getByRole("button", { name: "list", exact: true }).click();
       for (const label of ["Slack", "Discord", "Telegram", "GitHub"]) {
         await page.getByRole("button", { name: new RegExp(`^${label}`) }).click();
       }
@@ -99,6 +103,7 @@ export default {
       check(by.telegram?.chatId === "-1001234567890" && by.telegram.parseMode === "HTML" && by.telegram.silent === true, `telegram ${JSON.stringify(by.telegram)}`);
       check(by.slack?.webhookUrl === "{{ secrets.SLACK_WEBHOOK }}" && by.discord?.webhookUrl === "{{ secrets.DISCORD_WEBHOOK }}", "credential fields default to secrets");
       await page.reload();
+      await page.getByRole("button", { name: "list", exact: true }).click();
       await page.getByRole("button", { name: /Send on Telegram/ }).click();
       check((await page.getByLabel("Chat id").inputValue()) === "-1001234567890", "form shows the stored chat id after reload");
     });
@@ -142,6 +147,7 @@ export default {
       data.ews = await personal(erin);
       const id = (await api(erin, "POST", "/workflows", { name: `${runTag} phone`, description: "", enabled: true, trigger: { type: "manual" }, steps: [] }, data.ews)).body.id;
       await page.goto(`/workflows/${id}`);
+      await page.getByRole("button", { name: "list", exact: true }).click();
       await page.getByRole("button", { name: /^Telegram/ }).click();
       await page.getByLabel("Bot token").waitFor();
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

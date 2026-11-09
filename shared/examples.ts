@@ -68,7 +68,7 @@ export const BLANK: WorkflowInput = {
   steps: [],
 };
 
-export const EXAMPLES: { title: string; blurb: string; demo?: false; workflow: WorkflowInput }[] = [
+export const EXAMPLES: { title: string; blurb: string; workflow: WorkflowInput }[] = [
   {
     title: "Watch a GitHub repo",
     blurb: "Every hour, read a repo's stars and forks and log them.",
@@ -166,39 +166,6 @@ export const EXAMPLES: { title: string; blurb: string; demo?: false; workflow: W
           type: "http",
           retry: { max: 4, backoffSeconds: 5 },
           config: { method: "GET", url: "https://httpbin.org/status/200,503", headers: {}, failOnError: true },
-        },
-      ],
-    },
-  },
-  {
-    title: "New GitHub star to Discord",
-    blurb: "A GitHub webhook tells Discord every time someone stars your repo.",
-    // The demo can't call Discord or hold secrets, so it isn't seeded there.
-    demo: false,
-    workflow: {
-      name: "New GitHub star to Discord",
-      description:
-        "In the repo's Settings > Webhooks, add this workflow's webhook URL with content type application/json and only the Stars event. Save the Discord channel's webhook URL as the secret DISCORD_WEBHOOK.",
-      enabled: true,
-      trigger: { type: "webhook" },
-      steps: [
-        {
-          id: "starred",
-          name: "Only new stars",
-          type: "filter",
-          retry: { max: 0, backoffSeconds: 5 },
-          config: { left: "{{ trigger.body.action }}", op: "equals", right: "created" },
-        },
-        {
-          id: "discord",
-          name: "Tell Discord",
-          type: "discord",
-          retry: { max: 2, backoffSeconds: 5 },
-          config: {
-            webhookUrl: "{{ secrets.DISCORD_WEBHOOK }}",
-            content: "⭐ {{ trigger.body.sender.login }} starred {{ trigger.body.repository.full_name }}, now at {{ trigger.body.repository.stargazers_count }} stars",
-            username: "Knotwork",
-          },
         },
       ],
     },

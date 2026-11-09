@@ -116,6 +116,23 @@ export interface RunDoc {
   expiresAt: Date;
 }
 
+/**
+ * One saved version of a workflow, kept so an earlier version can be looked at or loaded back. The id
+ * is the workflow id and version number, so saving the same version twice writes one document.
+ */
+export interface VersionDoc {
+  _id: string;
+  workflowId: string;
+  workspaceId: string;
+  ownerId: string;
+  version: number;
+  /** When this version was saved (ms). */
+  savedAt: number;
+  /** JSON length of `workflow`, so pruning can keep a workflow's history under its byte limit. */
+  bytes: number;
+  workflow: WorkflowInput;
+}
+
 export interface CounterDoc {
   _id: string;
   n: number;
@@ -129,6 +146,7 @@ export interface Collections {
   workflows: Collection<WorkflowDoc>;
   runs: Collection<RunDoc>;
   counters: Collection<CounterDoc>;
+  versions: Collection<VersionDoc>;
 }
 
 export function collections(db: Db): Collections {
@@ -139,6 +157,7 @@ export function collections(db: Db): Collections {
     workflows: db.collection("workflows"),
     runs: db.collection("runs"),
     counters: db.collection("counters"),
+    versions: db.collection("versions"),
   };
 }
 
@@ -250,6 +269,7 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.runs.createIndex({ ownerId: 1, status: 1, createdAt: -1 }),
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    c.versions.createIndex({ workflowId: 1, version: -1 }),
   ]);
   // Indexes that newer ones above replaced. Dropping one that isn't there is fine.
   await Promise.allSettled([c.runs.dropIndex("status_1_nextRunAt_1"), c.workflows.dropIndex("trigger.type_1_enabled_1")]);

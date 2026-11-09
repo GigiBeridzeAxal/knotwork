@@ -1,7 +1,4 @@
-import { EXAMPLES as ALL_EXAMPLES } from "../shared/examples";
-
-// Examples the demo can run. Ready-made steps need secrets and hosts the demo doesn't allow.
-const EXAMPLES = ALL_EXAMPLES.filter((example) => example.demo !== false);
+import { EXAMPLES } from "../shared/examples";
 import { newHookKey } from "./auth";
 import type { Collections } from "./mongo";
 
@@ -90,6 +87,7 @@ export async function resetDemo(c: Collections, now: number, pepper: string) {
   const extra = await c.workspaces.find({ ownerId: DEMO_USER_ID, _id: { $ne: DEMO_WORKSPACE_ID } }).toArray();
   const ids = [DEMO_WORKSPACE_ID, ...extra.map((w) => w._id)];
   await c.runs.deleteMany({ workspaceId: { $in: ids } });
+  await c.versions.deleteMany({ workspaceId: { $in: ids } });
   await c.workflows.deleteMany({ workspaceId: { $in: ids } });
   await c.workspaces.deleteMany({ _id: { $in: extra.map((w) => w._id) } });
   await c.workspaces.updateOne({ _id: DEMO_WORKSPACE_ID }, { $set: { name: "Personal" } });
