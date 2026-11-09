@@ -15,12 +15,17 @@ permissions:
 jobs:
   test:
     name: Build and tests
-    runs-on: ubuntu-latest
+    # Ubuntu 22.04 on purpose: MongoDB 8 refuses to start on the 6.19 kernel of newer runners
+    # (SERVER-121912), and a service container runs on the runner's kernel.
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     services:
       mongo:
         image: mongo:8
         ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,12 +42,15 @@ jobs:
 
   scenarios:
     name: Browser scenarios (Chromium, Firefox, WebKit)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 25
     services:
       mongo:
         image: mongo:8
         ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     env:
       MONGODB_URI: mongodb://127.0.0.1:27017
     steps:
