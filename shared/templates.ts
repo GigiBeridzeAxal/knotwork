@@ -10,6 +10,8 @@ export interface Template {
   /** One sentence, under 90 characters, saying what it does in plain words. */
   blurb: string;
   category: TemplateCategory;
+  /** false: hidden in the shared demo account, which can't run it (ready-made steps need secrets and other hosts). */
+  demo?: false;
   /** Sample test input for a manual or webhook run (becomes trigger.body), or null for schedules. */
   sampleInput: unknown;
   workflow: WorkflowInput;
@@ -238,6 +240,42 @@ export const TEMPLATES: Template[] = [
     },
   },
 
+  {
+    id: "github-star-to-discord",
+    title: "New GitHub star to Discord",
+    blurb: "Tell a Discord channel each time someone stars your GitHub repo.",
+    category: "Webhooks",
+    // Needs a Discord webhook, which the shared demo account can't call.
+    demo: false,
+    sampleInput: { action: "created", sender: { login: "octocat" }, repository: { full_name: "octocat/hello-world", stargazers_count: 42 } },
+    workflow: {
+      name: "New GitHub star to Discord",
+      description:
+        "Save the Discord channel's webhook URL as the secret DISCORD_WEBHOOK (or paste it into the step). Then in the repo's Settings > Webhooks, add this workflow's webhook URL with content type application/json and only the Stars event.",
+      enabled: true,
+      trigger: { type: "webhook" },
+      steps: [
+        {
+          id: "starred",
+          name: "Only new stars",
+          type: "filter",
+          retry: noRetry,
+          config: { left: "{{ trigger.body.action }}", op: "equals", right: "created" },
+        },
+        {
+          id: "discord",
+          name: "Tell Discord",
+          type: "discord",
+          retry: { max: 2, backoffSeconds: 5 },
+          config: {
+            webhookUrl: "{{ secrets.DISCORD_WEBHOOK }}",
+            content: "⭐ {{ trigger.body.sender.login }} starred {{ trigger.body.repository.full_name }}, now at {{ trigger.body.repository.stargazers_count }} stars",
+            username: "Knotwork",
+          },
+        },
+      ],
+    },
+  },
   // ---------- Data ----------
   {
     id: "form-to-crm",

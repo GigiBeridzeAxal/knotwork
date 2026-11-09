@@ -1,6 +1,10 @@
 import { LIMITS } from "../shared/limits";
 import type { FilterOp, IfStep, LeafStep, LoopStep, Step } from "../shared/schema";
 import { type Budget, newBudget, render, renderString, renderText } from "../shared/template";
+import { discord } from "./connectors/discord";
+import { github } from "./connectors/github";
+import { slack } from "./connectors/slack";
+import { telegram } from "./connectors/telegram";
 import { secretRefs } from "./secrets";
 
 export type StepResult =
@@ -71,6 +75,9 @@ function forShow(scope: Scope): Scope {
   return { ...scope, secrets: Object.fromEntries(names.map((name) => [name, `[secret ${name}]`])) };
 }
 
+/** Step types that make outgoing requests, and so take from the request allowance and start from a saved place. */
+export const reachesOut = (type: string) => type === "http" || type === "slack" || type === "discord" || type === "telegram" || type === "github";
+
 /** Cuts text that will be stored or shown (log lines, errors), so no step can make them huge. */
 export const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 
@@ -98,6 +105,14 @@ export async function executeStep(step: LeafStep, scope: Scope, options: StepOpt
       const shown = show === scope ? message : renderText(step.config.message, show, newBudget());
       return { kind: "ok", output: { message }, message: clip(shown, 2_000) };
     }
+    case "slack":
+      return slack(step, scope, options, budget);
+    case "discord":
+      return discord(step, scope, options, budget);
+    case "telegram":
+      return telegram(step, scope, options, budget);
+    case "github":
+      return github(step, scope, options, budget);
   }
 }
 
@@ -370,4 +385,54 @@ export function privateHost(hostname: string): boolean {
     return /^(fc|fd|fe[89a-f])/.test(host);
   }
   return false;
+}
+
+/** A request a ready-made step has already rendered. Nothing in it is a template any more. */
+export interface Outbound {
+  method: string;
+  url: URL;
+  headers: Headers;
+  body?: string;
+}
+
+export type Sent =
+  | { kind: "fail"; message: string; calls: number; outOfCalls?: boolean; noRoom?: boolean }
+  | { kind: "sent"; res: Response; body: unknown; calls: number };
+
+/**
+ * Sends a ready-made step's request with the http step's guards (private addresses, the demo's host
+ * list, the request allowance, a timeout, a size cap on the answer) and **no redirects**: their URLs
+ * carry credentials. Messages name only the host, never the path or query, where tokens sit.
+ */
+export async function send(req: Outbound, options: StepOptions): Promise<Sent> {
+  const { url, headers } = req;
+  if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
+  if (privateHost(url.hostname)) return { kind: "fail", message: `${url.host} is a private address, which steps can't call`, calls: 0 };
+  const blocked = notAllowed(url.hostname, options);
+  if (blocked) return { kind: "fail", message: blocked, calls: 0 };
+  if (options.take && !options.take()) {
+    return { kind: "fail", message: `${req.method} ${url.host} paused: no requests left in this go`, calls: 0, noRoom: true };
+  }
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), { method: req.method, headers, body: req.body, redirect: "manual", signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+  } catch (err) {
+    const reason = (err as Error).name === "TimeoutError" ? `timed out after ${HTTP_TIMEOUT_MS / 1000}s` : (err as Error).message;
+    const outOfCalls = /too many subrequests/i.test((err as Error).message ?? "");
+    return { kind: "fail", message: `${req.method} ${url.host} failed: ${clip(reason, 300)}`, calls: 1, ...(outOfCalls ? { outOfCalls } : {}) };
+  }
+  if (res.status >= 300 && res.status <= 399 && res.headers.get("location")) {
+    await res.body?.cancel();
+    return { kind: "fail", message: `${url.host} answered with a redirect, which this step doesn't follow`, calls: 1 };
+  }
+  const text = await readLimited(res, MAX_RESPONSE_BYTES);
+  let body: unknown = text;
+  if (text && (res.headers.get("content-type") ?? "").includes("json")) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // Not valid JSON after all; keep the text.
+    }
+  }
+  return { kind: "sent", res, body, calls: 1 };
 }

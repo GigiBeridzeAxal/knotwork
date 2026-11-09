@@ -244,6 +244,17 @@ export function DocsPage() {
               <dd>Parks the run for a number of seconds, up to 7 days, then carries on. Nothing is held in memory while it waits.</dd>
               <dt>Log</dt>
               <dd>Writes a line, with templates, to the run log.</dd>
+              <dt>Slack, Discord, Telegram, GitHub</dt>
+              <dd>
+                Ready-made steps with their own forms. <b>Slack</b> and <b>Discord</b> post to a channel webhook,{" "}
+                <b>Telegram</b> sends as your bot (from @BotFather) to a chat id or <code>@channel</code>, and <b>GitHub</b> opens an
+                issue, comments on an issue or pull request, or reads a repository (no token needed for a public one). Put the
+                webhook URL or token in a workspace secret and write <code>{"{{ secrets.NAME }}"}</code> in its field; a pasted value
+                works too and is shown hidden. They call only their own service and never repeat the credential in the run log.
+                Mass pings (<code>@everyone</code>, <code>@channel</code>) from template text are switched off. Results: Discord{" "}
+                <code>messageId</code>, Telegram <code>messageId</code>, GitHub issue <code>number</code> and <code>url</code>, or a
+                repository's <code>stars</code>, <code>forks</code> and more.
+              </dd>
             </dl>
           </Section>
 

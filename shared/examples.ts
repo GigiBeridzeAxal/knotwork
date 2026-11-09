@@ -8,7 +8,14 @@ export const STEP_TYPES: { type: StepType; label: string; blurb: string }[] = [
   { type: "log", label: "Log", blurb: "Write a line to the run log" },
   { type: "if", label: "If / else", blurb: "Run one set of steps or another" },
   { type: "loop", label: "Loop", blurb: "Run steps once per item of a list" },
+  { type: "slack", label: "Slack", blurb: "Post a message to a channel" },
+  { type: "discord", label: "Discord", blurb: "Post a message to a channel" },
+  { type: "telegram", label: "Telegram", blurb: "Send a message as your bot" },
+  { type: "github", label: "GitHub", blurb: "Open an issue, comment, read a repo" },
 ];
+
+/** Ready-made steps: forms for one service each, instead of a raw HTTP request. */
+export const CONNECTOR_TYPES = ["slack", "discord", "telegram", "github"] as const satisfies readonly StepType[];
 
 export function newStep(type: StepType, taken: string[]): Step {
   let n = 1;
@@ -36,6 +43,26 @@ export function newStep(type: StepType, taken: string[]): Step {
       return { id, name: "If", type, retry, config: { left: "{{ trigger.body.amount }}", op: "gt", right: "100" }, then: [], else: [] };
     case "loop":
       return { id, name: "Loop", type, retry, config: { items: "{{ trigger.body.items }}" }, steps: [] };
+    case "slack":
+      return { id, name: "Post to Slack", type, retry: { max: 2, backoffSeconds: 5 }, config: { webhookUrl: "{{ secrets.SLACK_WEBHOOK }}", text: "Run {{ run.id }} of {{ workflow.name }} says hello", mentions: false } };
+    case "discord":
+      return { id, name: "Post to Discord", type, retry: { max: 2, backoffSeconds: 5 }, config: { webhookUrl: "{{ secrets.DISCORD_WEBHOOK }}", content: "Run {{ run.id }} of {{ workflow.name }} says hello", username: "" } };
+    case "telegram":
+      return {
+        id,
+        name: "Send on Telegram",
+        type,
+        retry: { max: 2, backoffSeconds: 5 },
+        config: { botToken: "{{ secrets.TELEGRAM_BOT_TOKEN }}", chatId: "@your_channel", text: "Run {{ run.id }} of {{ workflow.name }} says hello", parseMode: "", silent: false },
+      };
+    case "github":
+      return {
+        id,
+        name: "Open a GitHub issue",
+        type,
+        retry: { max: 2, backoffSeconds: 5 },
+        config: { action: "create_issue", token: "{{ secrets.GITHUB_TOKEN }}", repo: "owner/name", title: "Knotwork run {{ run.id }}", body: "", number: "", labels: "" },
+      };
   }
 }
 

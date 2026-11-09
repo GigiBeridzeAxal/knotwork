@@ -42,6 +42,7 @@ export default {
     "scenarios/20-secrets.mjs",
     "scenarios/21-blocks.mjs",
     "scenarios/22-signed-webhook-rerun.mjs",
+    "scenarios/23-connectors.mjs",
   ],
   retries: 2,
   timeouts: { action: 10000, step: 30000, scenario: 180000 },

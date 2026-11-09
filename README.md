@@ -30,6 +30,20 @@ attempt is written to a run log you can open in the dashboard.
   never shown again after saving, and are replaced by `[secret SLACK_URL]` wherever they would appear in a run's log.
 - **Run again.** A finished run can be started again with the same input, on the workflow as it is now. It
   counts as a manual run, and isn't possible once the run's input was removed to free space.
+- **Ready-made steps for Slack, Discord, Telegram and GitHub.** Forms instead of raw HTTP: post to a Slack or
+  Discord channel webhook, send a message as a Telegram bot, or open a GitHub issue, comment on an issue or pull
+  request, or read a repository. Credential fields default to a workspace secret (`{{ secrets.DISCORD_WEBHOOK }}`; a pasted
+  URL or token works too and is shown hidden). Credentials are
+  sent only to that service (`hooks.slack.com`, `discord.com/api/webhooks/`, `api.telegram.org`,
+  `api.github.com`, no redirects followed) and never appear in step messages. Discord mentions of
+  `@everyone` and roles (and in Slack `@channel`, `@here` and groups, unless the step allows them) are switched off, so text from a webhook can't mass-ping a server. Each service is one
+  file in `shared/connectors/` (settings) and one in `worker/connectors/` (sending). The template
+  **New GitHub star to Discord** sets up the whole flow: add its webhook URL to a repo with the Stars event.
+  Outputs later steps can use: Slack `ok`; Discord `messageId`, `channelId`; Telegram `messageId`, `chatId`;
+  GitHub `number`, `url` (issue), `id`, `url` (comment), or `fullName`, `stars`, `forks`, `openIssues`,
+  `watchers`, `defaultBranch`, `url` (repository). To add a service, add a settings file and a sending file,
+  a member of the step union in `shared/schema.ts`, a case in `executeStep`, a form in `ConnectorFields.tsx`, and
+  starting settings in `newStep` and `STEP_TYPES` (`shared/examples.ts`), and a canvas line and glyph in `src/canvas/describe.tsx`.
 - **Templates between steps.** Any string can use `{{ trigger.body.id }}` or `{{ steps.fetch.body.items.0.name }}`.
   A string that is only one template keeps the value's type, so arrays and numbers pass through intact.
   Templates are plain lookups: nothing is evaluated, so a workflow can't run arbitrary code.
@@ -497,7 +511,6 @@ Built: teams with invite links and roles, recovery codes, and API keys; secrets,
 signed webhooks and run again (2026-11-09; live from the next deploy).
 
 - An "on failure" step, so a workflow can report that it broke
-- Ready-made Slack, Discord, Telegram and GitHub steps
 
 ## License
 

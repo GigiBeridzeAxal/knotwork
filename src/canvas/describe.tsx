@@ -60,6 +60,19 @@ export function describeStep(step: Step): string {
       return `Waits ${seconds(Number(config.seconds) || 0)}`;
     case "log":
       return bare(String(config.message ?? ""));
+    // Ready-made steps: what they post, never the credential field.
+    case "slack":
+      return `Posts ${bare(String(config.text ?? ""))}`;
+    case "discord":
+      return `Posts ${bare(String(config.content ?? ""))}`;
+    case "telegram":
+      return `To ${bare(String(config.chatId ?? "")) || "a chat"}: ${bare(String(config.text ?? ""))}`;
+    case "github": {
+      const repo = bare(String(config.repo ?? "")) || "a repository";
+      if (config.action === "add_comment") return `Comments on ${repo} #${bare(String(config.number ?? ""))}`;
+      if (config.action === "get_repo") return `Reads ${repo}`;
+      return `Opens an issue in ${repo}`;
+    }
     default: {
       const first = Object.values(config).find((v) => typeof v === "string" && v);
       return first ? bare(String(first)) : "";
@@ -110,6 +123,16 @@ const paths: Record<string, React.ReactNode> = {
     </>
   ),
   loop: <path d="M3 7a4 4 0 0 1 4-4h3.500M10.500 1 12.500 3l-2 2M13 9a4 4 0 0 1-4 4H5.500M5.500 15l-2-2 2-2" />,
+  // Plain shapes, not the services' logos: a message bubble for the chat services, an issue dot for GitHub.
+  slack: <path d="M3 3.500h10v7H7l-3 2.500v-2.500H3z" />,
+  discord: <path d="M3 3.500h10v7H7l-3 2.500v-2.500H3z" />,
+  telegram: <path d="M2.500 7.500 13.500 3l-2 10-3.500-3-2 2v-3.500l5.500-4" />,
+  github: (
+    <>
+      <circle cx="8" cy="8" r="5.500" />
+      <circle cx="8" cy="8" r="1.500" />
+    </>
+  ),
   other: <circle cx="8" cy="8" r="2.500" />,
 };
 

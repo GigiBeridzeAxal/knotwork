@@ -62,9 +62,13 @@ function Shape({ template }: { template: Template }) {
 export function TemplatesPage() {
   const [category, setCategory] = useState<TemplateCategory | "All">("All");
   const [error, setError] = useState("");
+  // The shared demo account can't run templates with ready-made steps, so it isn't offered them.
+  const session = useSession();
+  const isDemo = session.me?.user.demo ?? false;
   // A viewer can browse templates but not make workflows from them.
-  const editable = canEdit(useSession().workspace.role);
-  const shown = TEMPLATES.filter((t) => category === "All" || t.category === category);
+  const editable = canEdit(session.workspace.role);
+  const offered = TEMPLATES.filter((t) => !(isDemo && t.demo === false));
+  const shown = offered.filter((t) => category === "All" || t.category === category);
 
   return (
     <div className="flex flex-col gap-10">
@@ -72,7 +76,7 @@ export function TemplatesPage() {
         <div className="flex flex-col gap-2">
           <PageTitle>Templates</PageTitle>
           <p className="max-w-xl text-soft">
-            {TEMPLATES.length} workflows that run as they are.{" "}
+            {offered.length} workflows that run as they are, or with one secret added.{" "}
             {editable
               ? "Open one on the canvas, look it over, and it becomes yours when you press Create."
               : "You're a viewer in this workspace, so you can browse them; an editor can create from them."}

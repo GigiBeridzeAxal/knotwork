@@ -8,7 +8,7 @@ import { DEMO_USER_ID, resetDemo } from "./demo";
 import { type Collections, ensureIndexes, type LogDoc, newRunId, type RunDoc, unstorable } from "./mongo";
 import { compile, type Op } from "./program";
 import { loadSecrets, redactor, secretRefs } from "./secrets";
-import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loopItems, type Scope, type StepResult } from "./steps";
+import { DEMO_HOSTS, evaluateIf, executeStep, formatSeconds, type LoopFrame, loopItems, type Scope, reachesOut, type StepResult } from "./steps";
 
 /**
  * The engine. A run moves forward one step at a time and saves its place before and after every step
@@ -270,7 +270,7 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
   const unreadable = new Set<string>();
   // A run that can only pause again (its next step is a request and none are left) reads none.
   const first = ops[run.stepIndex];
-  const stuck = allowance.calls <= 0 && first?.kind === "step" && first.step.type === "http";
+  const stuck = allowance.calls <= 0 && first?.kind === "step" && reachesOut(first.step.type);
   const secrets = refs.size && !stuck ? await loadSecrets(c, pepper, run.workspaceId, refs, unreadable) : {};
   /** Hides secret values. Everything this run stores or passes on goes through it. */
   const clean = redactor(secrets);
@@ -577,8 +577,8 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
         return;
       }
       // A step that reaches outside starts from a saved place, so a crash can't make it happen twice.
-      const outside = op.kind === "step" && (current.type === "http" || current.type === "delay");
-      if (op.kind === "step" && current.type === "http") {
+      const outside = op.kind === "step" && (reachesOut(current.type) || current.type === "delay");
+      if (op.kind === "step" && reachesOut(current.type)) {
         // Its own share first, then what the runs woken together may still make between them.
         if (mine <= 0) {
           await park(Date.now(), undefined, PAUSED_OWN);
