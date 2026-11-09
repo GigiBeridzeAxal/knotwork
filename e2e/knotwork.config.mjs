@@ -31,6 +31,7 @@ export default {
     "scenarios/08-account.mjs",
     "scenarios/10-landing.mjs",
     "scenarios/11-editor-early-edit.mjs",
+    "scenarios/12-docs-demo.mjs",
   ],
   retries: 2,
   timeouts: { action: 10000, step: 30000, scenario: 180000 },
