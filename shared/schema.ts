@@ -238,4 +238,6 @@ export interface Overview {
   runs: Run[];
   /** Runs the whole account started this clock hour (the limit is per account). */
   runsThisHour: number;
+  /** This account's hourly run limit right now (lower in its first 24 hours). */
+  runsLimit: number;
 }

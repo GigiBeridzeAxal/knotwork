@@ -181,7 +181,7 @@ function DeleteAccount() {
 }
 
 export function SettingsPage() {
-  const { workflows, runsThisHour } = useWorkspace();
+  const { workflows, runsThisHour, runsLimit } = useWorkspace();
   const { me, workspace, logout } = useSession();
 
   return (
@@ -226,7 +226,7 @@ export function SettingsPage() {
         <Card>
           <Row label={`Workflows in ${workspace.name}`} value={`${workflows?.length ?? 0} / ${LIMITS.workflowsPerWorkspace}`} />
           <Row label="Workspaces" value={`${me.workspaces.length} / ${LIMITS.workspacesPerAccount}`} />
-          <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${LIMITS.runsPerAccountPerHour}`} />
+          <Row label="Runs this hour (whole account)" value={`${runsThisHour} / ${runsLimit}`} />
           <Row label="Steps per workflow" value={`up to ${LIMITS.stepsPerWorkflow}`} />
           <Row label="Shortest schedule" value={`every ${LIMITS.minScheduleMinutes} min`} />
         </Card>

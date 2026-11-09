@@ -187,6 +187,18 @@ export const runCounter = (ownerId: string) => `runs:${ownerId}`;
 export const storageFull = async (c: Collections) => (await c.counters.findOne({ _id: STORAGE_FULL })) !== null;
 
 /**
+ * How many runs an account may start per clock hour: fewer in its first 24 hours, so a batch of fresh
+ * sign-ups can't use up everyone's runs. Null when the account no longer exists (its workflows were
+ * left behind by a deletion that was cut off), so they can't run. The demo has no date: full budget.
+ */
+export async function runLimit(c: Collections, ownerId: string, now: number): Promise<number | null> {
+  if (ownerId === DEMO_USER_ID) return LIMITS.runsPerAccountPerHour;
+  const user = await c.users.findOne({ _id: ownerId }, { projection: { createdAt: 1 } });
+  if (!user) return null;
+  return now - user.createdAt < 24 * HOUR ? LIMITS.newAccountRunsPerHour : LIMITS.runsPerAccountPerHour;
+}
+
+/**
  * Takes one run from the account's and everyone's budget for this clock hour. Returns why the run
  * may not start, or null when it may. The counters are atomic, so parallel requests can't overshoot.
  */
@@ -196,13 +208,8 @@ export async function takeRunSlot(
   now: number,
   kind: "schedule" | "webhook" | "manual" = "manual",
 ): Promise<string | null> {
-  // Accounts younger than a day get a smaller budget, so a batch of fresh sign-ups can't use up
-  // everyone's runs. (The demo's own id has no user document with a date; it keeps the full budget.)
-  const [full, user] = await Promise.all([
-    storageFull(c),
-    ownerId === DEMO_USER_ID ? null : c.users.findOne({ _id: ownerId }, { projection: { createdAt: 1 } }),
-  ]);
-  const max = user && now - user.createdAt < 24 * HOUR ? LIMITS.newAccountRunsPerHour : LIMITS.runsPerAccountPerHour;
+  const [full, max] = await Promise.all([storageFull(c), runLimit(c, ownerId, now)]);
+  if (max === null) return "This workflow's account has been deleted.";
   const mine = await underLimit(c, runCounter(ownerId), HOUR, max, now);
   // A refused run gives its slot back, so the counter (shown as "runs this hour") counts started runs.
   if (full || !mine) await giveBack(c, runCounter(ownerId), HOUR, now);

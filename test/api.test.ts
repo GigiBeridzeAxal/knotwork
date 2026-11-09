@@ -2,6 +2,7 @@ import { MongoClient } from "mongodb";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import worker from "../worker/index";
 import { collections, ensureIndexes, type Env } from "../worker/mongo";
+import { dropAll } from "./dropAll";
 
 /**
  * The HTTP API end to end: sign-up, login, sessions, workspace isolation, password change and
@@ -16,7 +17,7 @@ describe.skipIf(!uri)("HTTP API", () => {
 
   afterAll(async () => {
     const client = await MongoClient.connect(uri!);
-    await client.db(dbName).dropDatabase();
+    await dropAll(client.db(dbName));
     await client.close();
   });
 

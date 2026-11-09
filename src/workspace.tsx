@@ -1,5 +1,6 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from "react";
 import type { Run, WorkflowSummary } from "../shared/schema";
+import { LIMITS } from "../shared/limits";
 import { api, ApiError } from "./api";
 import { useSession } from "./session";
 
@@ -9,11 +10,13 @@ interface WorkspaceData {
   runs: Run[] | null;
   /** Runs the whole account started this clock hour; the hourly limit counts these. */
   runsThisHour: number;
+  /** The account's hourly run limit (lower in its first day). */
+  runsLimit: number;
   error: string;
   refresh: () => void;
 }
 
-const Ctx = createContext<WorkspaceData>({ workflows: null, runs: null, runsThisHour: 0, error: "", refresh: () => {} });
+const Ctx = createContext<WorkspaceData>({ workflows: null, runs: null, runsThisHour: 0, runsLimit: LIMITS.runsPerAccountPerHour, error: "", refresh: () => {} });
 
 /**
  * Loads the current workspace once for the sidebar and the home page, and refreshes it every
@@ -24,6 +27,7 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [runsThisHour, setRunsThisHour] = useState(0);
+  const [runsLimit, setRunsLimit] = useState<number>(LIMITS.runsPerAccountPerHour);
   const [error, setError] = useState("");
   const { reload } = useSession();
 
@@ -33,6 +37,7 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
         setWorkflows(o.workflows);
         setRuns(o.runs);
         setRunsThisHour(o.runsThisHour);
+        setRunsLimit(o.runsLimit);
         setError("");
       },
       (e: Error) => {
@@ -49,7 +54,7 @@ export function WorkspaceProvider({ path, children }: { path: string; children: 
     return () => clearInterval(timer);
   }, [refresh]);
 
-  return <Ctx.Provider value={{ workflows, runs, runsThisHour, error, refresh }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ workflows, runs, runsThisHour, runsLimit, error, refresh }}>{children}</Ctx.Provider>;
 }
 
 export const useWorkspace = () => useContext(Ctx);

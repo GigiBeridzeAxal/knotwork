@@ -6,6 +6,7 @@ import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } 
 import { ensureDemo } from "../worker/demo";
 import { advance, createRun, tick } from "../worker/engine";
 import { type Collections, collections } from "../worker/mongo";
+import { dropAll } from "./dropAll";
 
 /**
  * Database tests. They need a MongoDB to talk to, so they only run when MONGODB_TEST_URI is set,
@@ -28,7 +29,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   });
 
   afterAll(async () => {
-    await db?.dropDatabase();
+    if (db) await dropAll(db);
     await client?.close();
   });
 
@@ -114,7 +115,13 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect((await updateWorkflow(c, wf.id, "ws_other", wfInput([]), 2, Date.now())).ok).toBe(false);
   });
 
+  /** A user document, as the run budget looks up the account's age. */
+  async function account(id: string, ageMs = 2 * 86_400_000) {
+    await c.users.insertOne({ _id: id, name: id, email: `${id}@example.com`, password: null, demo: false, createdAt: Date.now() - ageMs });
+  }
+
   it("counts runs per account for the hourly limit", async () => {
+    await Promise.all([account("usr_busy"), account("usr_quiet")]);
     const now = Date.now();
     const results = [];
     for (let i = 0; i < 61; i++) results.push(await takeRunSlot(c, "usr_busy", now));
@@ -126,9 +133,20 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
   it("doesn't let runs started at the same moment get past the limit", async (ctx) => {
     // FerretDB (a stand-in for local testing) doesn't apply parallel $inc atomically; MongoDB does.
     if (ferret) ctx.skip();
+    await account("usr_rush");
     const now = Date.now();
     const results = await Promise.all(Array.from({ length: 70 }, () => takeRunSlot(c, "usr_rush", now)));
     expect(results.filter((r) => r === null)).toHaveLength(60);
+  });
+
+  it("gives a new account a smaller budget, and a deleted account's workflows none", async () => {
+    await account("usr_new", 3_600_000);
+    const now = Date.now();
+    const results = [];
+    for (let i = 0; i < 11; i++) results.push(await takeRunSlot(c, "usr_new", now));
+    expect(results.filter((r) => r === null)).toHaveLength(10);
+    expect(results[10]).toMatch(/first day/);
+    expect(await takeRunSlot(c, "usr_gone", now, "webhook")).toMatch(/deleted/);
   });
 
   it("never lets parallel saves put more workflows in a workspace than the limit", async () => {

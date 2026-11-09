@@ -197,7 +197,7 @@ function WorkspaceSwitcher({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }) {
-  const { workflows, runsThisHour } = useWorkspace();
+  const { workflows, runsThisHour, runsLimit } = useWorkspace();
   const { workspace } = useSession();
   const full = (workflows?.length ?? 0) >= LIMITS.workflowsPerWorkspace;
   return (
@@ -297,7 +297,7 @@ function Sidebar({ path, onNavigate }: { path: string; onNavigate?: () => void }
         <div className="flex flex-col gap-4 rounded-xl border border-line p-4">
           <span className="font-mono text-[11px] tracking-[0.12em] text-muted uppercase">Free plan</span>
           <Meter label={`Workflows in ${workspace.name}`} used={workflows?.length ?? 0} max={LIMITS.workflowsPerWorkspace} />
-          <Meter label="Runs this hour" used={runsThisHour} max={LIMITS.runsPerAccountPerHour} />
+          <Meter label="Runs this hour" used={runsThisHour} max={runsLimit} />
         </div>
         <a
           href="https://github.com/GigiBeridzeAxal/knotwork"

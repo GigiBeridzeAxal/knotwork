@@ -123,8 +123,9 @@ npm run dev                                                # http://localhost:51
 (`MONGODB_DB` in `wrangler.jsonc`; `db:setup` reads the same variable).
 
 Locally every browser has the same address, so the per-network limits (5 sign-ups an hour, 30 demo sign-ins,
-10 login attempts) are shared by everything you test. To start them over, clear the counters:
-`mongosh knotwork --eval 'db.counters.deleteMany({})'`.
+10 login attempts) are shared by everything you test. To start them over, empty the `counters` collection:
+`docker exec <container> mongosh knotwork --eval 'db.counters.deleteMany({})'` for the Docker database,
+or delete its documents in Atlas's Data Explorer.
 The cron doesn't fire on its own in local development: click **Check now** on a waiting run, or run one tick
 (schedules and waiting runs) with `curl http://localhost:5173/cdn-cgi/handler/scheduled`.
 

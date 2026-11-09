@@ -37,6 +37,7 @@ import {
   listWorkflows,
   listWorkspaces,
   runCounter,
+  runLimit,
   storageFull,
   takeRunSlot,
   toWorkspace,
@@ -350,12 +351,14 @@ scoped.get("/workflows", async (c) => c.json(await listWorkflows(db(c), c.var.wo
 
 /** Everything the sidebar and home page show, in one request: the app polls this while it's open. */
 scoped.get("/overview", async (c) => {
-  const [workflows, runs, runsThisHour] = await Promise.all([
+  const now = Date.now();
+  const [workflows, runs, runsThisHour, runsLimit] = await Promise.all([
     listWorkflows(db(c), c.var.workspace),
     listRuns(db(c), c.var.workspace, undefined, 100),
-    counterValue(db(c), runCounter(c.var.session.userId), HOUR),
+    counterValue(db(c), runCounter(c.var.session.userId), HOUR, now),
+    runLimit(db(c), c.var.session.userId, now),
   ]);
-  return c.json({ workflows, runs, runsThisHour });
+  return c.json({ workflows, runs, runsThisHour, runsLimit: runsLimit ?? 0 });
 });
 
 scoped.post("/workflows", async (c) => {
