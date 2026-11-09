@@ -70,7 +70,7 @@ export function describeStep(step: Step): string {
 export function describeTrigger(trigger: Trigger): { label: string; detail: string } {
   if (trigger.type === "schedule") return { label: "Schedule", detail: trigger.cron };
   if (trigger.type === "webhook") return { label: "Webhook", detail: "When a POST arrives" };
-  return { label: "Manual", detail: "When you press Run now" };
+  return { label: "Manual", detail: "Started by hand" };
 }
 
 /** 16px glyphs for the node tiles, on the same 1.75 stroke as the app's icons. */
