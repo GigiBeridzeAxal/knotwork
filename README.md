@@ -133,8 +133,9 @@ first request after it starts pays the handshake. When the database can't be rea
 503 with a `retry-after` header, and a network error on a connection that has worked before is left to the
 driver, which reconnects on its own. The hub starts a new connection only when the old client is finished
 (it was closed, or it never connected): at most one every 30 seconds, or after 5 seconds for one that never
-got through. It closes the old one once the work still using it has finished, after two minutes at the
-latest. Other errors leave the connection alone. A query that hangs fails after 20 seconds, and one that
+got through. As a last resort, a connection that has had nothing but connection errors for three minutes
+is replaced too. The hub closes the old one once the work still using it has finished, after two minutes
+at the latest. Other errors leave the connection alone. A query that hangs fails after 20 seconds, and one that
 waits more than 10 seconds for a free socket fails too. Without the `HUB` binding (the tests) or with
 `HUB_OFF` set, each request opens and closes its own connection. Every API response carries a `Server-Timing` header with the total
 time, and the connect time when the request had to open the connection.
@@ -292,7 +293,8 @@ person from using up the free plans:
 
 - 5 workspaces per account, 10 workflows per workspace and 25 steps per workflow.
 - JSON you send (a workflow, a test input, a webhook body) may be nested 50 levels deep; deeper gets a 400,
-  and so does a name containing a null character. Neither counts as a run.
+  and so does a field name containing a null character. Neither counts as a run. A step output like
+  that is replaced by a note saying it couldn't be saved.
 - 60 runs per account per clock hour (webhooks, schedules and manual runs together); 10 in an account's
   first 24 hours. Webhook and manual runs across everyone: 3,000 an hour, and once half of that is used,
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's

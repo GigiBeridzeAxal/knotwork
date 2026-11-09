@@ -55,6 +55,8 @@ export class Hub {
     if (request.url === HUB_TICK && request.method === "POST") {
       try {
         await hold(this.work.tick(conn.mongo.c, Date.now(), conn.mongo.db, this.env.AUTH_PEPPER));
+        // Every tick starts with a query, so one that worked means the database is answering.
+        conn.mongo.failingSince = 0;
       } catch (err) {
         console.error("tick", err);
         if (clientIsDead(conn.mongo, err)) this.replace(conn);
@@ -71,7 +73,8 @@ export class Hub {
       Promise.resolve(this.work.handle(request, { ...this.env, HUB: undefined, SHARED_MONGO: conn.mongo }, ctx)),
     );
     // Only a finished client is replaced (the API marks it). A bug that answers 500 doesn't replace
-    // it, and neither does a network error on a client that has connected: the driver repairs that.
+    // it, and neither does a network error on a client that has connected: the driver repairs that,
+    // unless nothing has worked for three minutes (clientIsDead's last resort).
     if (conn.mongo.broken) this.replace(conn);
     return res;
   }
