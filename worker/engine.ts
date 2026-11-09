@@ -36,7 +36,7 @@ const MAX_ERROR = 1_000;
 const DUE_PER_TICK = 10;
 /** At most this many of one account's runs per tick, so one account can't take every slot. */
 const DUE_PER_OWNER = 2;
-/** When the database is nearly full, accounts with more pending runs than this have them stopped. */
+/** When the database is nearly full, accounts with more pending runs than this have them stopped (at most five a check). */
 const STOP_BACKLOG_ABOVE = 20;
 const TICK_CONCURRENCY = 3;
 const DAY = 86_400_000;
@@ -296,28 +296,26 @@ async function inBatches<T>(items: T[], limit: number, work: (item: T) => Promis
 export async function guardStorage(c: Collections, db: Db, now: number) {
   // Atlas counts data plus indexes toward the 512 MB. (storageSize includes space freed by deletes,
   // which an M0 cluster can't compact, so it would never come back down.)
-  const stats = (await db.stats()) as { dataSize?: number; indexSize?: number };
-  const used = (stats.dataSize ?? 0) + (stats.indexSize ?? 0);
+  const measure = async () => {
+    const stats = (await db.stats()) as { dataSize?: number; indexSize?: number };
+    return (stats.dataSize ?? 0) + (stats.indexSize ?? 0);
+  };
+  let used = await measure();
   if (used > STORAGE_PRUNE_BYTES) {
-    const old = await c.runs
-      .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
-      .sort({ createdAt: 1 })
-      .limit(2_000)
-      .toArray();
-    if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
-    // Waiting runs can't be pruned, so a few accounts could fill the space with them. Stop the
-    // pending runs of the (at most three) accounts holding many; they're deleted as finished runs
-    // next time. Accounts with only a few in flight are left alone.
+    // Waiting runs can't simply be deleted, so a few accounts could fill the space with them. First
+    // stop the pending runs of the (at most five) accounts holding the most, if they hold many, and
+    // drop the bulky parts (input, step list, outputs). The run stays, small, with the reason; its
+    // workflow shows it as stopped. Accounts with only a few in flight are left alone.
     const top = await c.runs
       .aggregate<{ _id: string }>([
         { $match: { status: { $in: ["queued", "waiting"] } } },
         { $group: { _id: "$ownerId", n: { $sum: 1 } } },
         { $match: { n: { $gt: STOP_BACKLOG_ABOVE } } },
         { $sort: { n: -1 } },
-        { $limit: 3 },
+        { $limit: 5 },
       ])
       .toArray();
-    if (old.length < 2_000 && top.length) {
+    if (top.length) {
       const pending = { ownerId: { $in: top.map((t) => t._id) }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
       const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).toArray()).map((r) => r._id);
       await c.runs.updateMany(
@@ -328,10 +326,24 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
             error: "Stopped to free space: Knotwork's free database was nearly full, and this account had the most runs waiting.",
             finishedAt: now,
             nextRunAt: null,
+            input: null,
+            steps: [],
+            outputs: {},
+            outputBytes: 0,
           },
         },
       );
       await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped" } });
+      used = await measure();
+    }
+    // Only then, if still needed, everyone's oldest finished runs.
+    if (used > STORAGE_PRUNE_BYTES) {
+      const old = await c.runs
+        .find({ status: { $in: ["succeeded", "failed", "stopped"] } }, { projection: { _id: 1 } })
+        .sort({ createdAt: 1 })
+        .limit(2_000)
+        .toArray();
+      if (old.length) await c.runs.deleteMany({ _id: { $in: old.map((r) => r._id) } });
     }
   }
   if (used > STORAGE_FULL_BYTES) {
@@ -351,7 +363,13 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
  * Runs every minute: fire schedules, resume parked runs, and once in a while look after the
  * database (storage, indexes) and reset the demo account.
  */
-export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{ scheduled: number; resumed: number }> {
+export async function tick(
+  c: Collections,
+  now = Date.now(),
+  db?: Db,
+  /** AUTH_PEPPER, for the demo reset's webhook keys. Without it the demo isn't reset. */
+  pepper = "",
+): Promise<{ scheduled: number; resumed: number }> {
   const minute = Math.floor(now / 60_000) * 60_000;
   const minuteOfHour = new Date(minute).getUTCMinutes();
   let scheduled = 0;
@@ -403,21 +421,26 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
       { status: "running", leaseUntil: { $lt: now } },
     ],
   };
-  // Accounts take turns: those the cron has served least this hour go first, each with its oldest
-  // ready runs (at most DUE_PER_OWNER). A run that used up its time in one invocation is parked with
-  // nextRunAt = now, so within an account it goes to the back of the line. Slots nobody else needs
-  // go to the busy accounts, so a lone busy account still gets DUE_PER_TICK.
+  // Accounts take turns, round robin: those the cron served longest ago (or never, in the last day)
+  // go first, each with its oldest ready runs (at most DUE_PER_OWNER). Among accounts never served,
+  // the order is shuffled each minute, so no account id is always last. A run that used up its time
+  // in one invocation is parked with nextRunAt = now, so within an account it goes to the back of the
+  // line. Slots nobody else needs go to the busy accounts, so a lone busy account still gets DUE_PER_TICK.
   const owners: string[] = await c.runs.distinct("ownerId", ready);
-  const hour = Math.floor(now / 3_600_000);
-  const servedKey = (owner: string) => `cron:${owner}:${hour}`;
-  const served = new Map<string, number>();
+  const servedKey = (owner: string) => `cron-served:${owner}`;
+  const lastServed = new Map<string, number>();
   if (owners.length > 1) {
-    const counts = await c.counters.find({ _id: { $in: owners.map(servedKey) } }).toArray();
-    for (const doc of counts) served.set(doc._id, doc.n);
+    const docs = await c.counters.find({ _id: { $in: owners.map(servedKey) } }).toArray();
+    for (const doc of docs) lastServed.set(doc._id, doc.n);
   }
+  const shuffle = (owner: string) => {
+    let h = minute / 60_000;
+    for (let i = 0; i < owner.length; i++) h = (Math.imul(h, 31) + owner.charCodeAt(i)) | 0;
+    return h;
+  };
   const turn = owners
-    .map((owner) => ({ owner, n: served.get(servedKey(owner)) ?? 0 }))
-    .sort((a, b) => a.n - b.n || (a.owner < b.owner ? -1 : 1))
+    .map((owner) => ({ owner, at: lastServed.get(servedKey(owner)) ?? 0, mix: shuffle(owner) }))
+    .sort((a, b) => a.at - b.at || a.mix - b.mix)
     .slice(0, Math.ceil(DUE_PER_TICK / DUE_PER_OWNER))
     .map((t) => t.owner);
   const oldest = (filter: Filter<RunDoc>, limit: number) =>
@@ -427,13 +450,11 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
     due.push(...(await oldest({ _id: { $nin: due.map((r) => r._id) } }, DUE_PER_TICK - due.length)));
   }
   if (owners.length > 1 && due.length) {
-    const perOwner = new Map<string, number>();
-    for (const run of due) perOwner.set(run.ownerId, (perOwner.get(run.ownerId) ?? 0) + 1);
     await c.counters.bulkWrite(
-      [...perOwner].map(([owner, n]) => ({
+      [...new Set(due.map((r) => r.ownerId))].map((owner) => ({
         updateOne: {
           filter: { _id: servedKey(owner) },
-          update: { $inc: { n }, $setOnInsert: { expiresAt: new Date((hour + 1) * 3_600_000) } },
+          update: { $set: { n: minute, expiresAt: new Date(minute + DAY) } },
           upsert: true,
         },
       })),
@@ -457,8 +478,8 @@ export async function tick(c: Collections, now = Date.now(), db?: Db): Promise<{
 
   // Once a day, on the first tick from 03:00 UTC, put the shared demo account back the way it
   // started. The counter makes it once even if a tick is skipped or two overlap.
-  if (new Date(minute).getUTCHours() >= 3 && (await underLimit(c, "demo-reset", DAY, 1, now))) {
-    await resetDemo(c, now).catch(async (err) => {
+  if (pepper && new Date(minute).getUTCHours() >= 3 && (await underLimit(c, "demo-reset", DAY, 1, now))) {
+    await resetDemo(c, now, pepper).catch(async (err) => {
       console.error("demo reset", err);
       await giveBack(c, "demo-reset", DAY, now);
     });

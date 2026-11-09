@@ -171,6 +171,10 @@ describe.skipIf(!uri)("HTTP API", () => {
       expect((await call("POST", `/hooks/${a.body.hookKey}`, { body: {} })).status).toBe(429);
       expect((await call("POST", `/hooks/${b.body.hookKey}`, { body: {} })).status).toBe(202);
       expect([...counts.keys()].every((k) => k.startsWith("hook:"))).toBe(true);
+      // A made-up key in the right format is refused before any limiter or database work.
+      const before = counts.size;
+      expect((await call("POST", `/hooks/${"x".repeat(24)}`, { body: {} })).status).toBe(404);
+      expect(counts.size).toBe(before);
     } finally {
       env.IP_LIMITER = undefined;
     }

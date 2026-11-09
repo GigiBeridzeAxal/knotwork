@@ -4,7 +4,6 @@ import { bump, giveBack } from "./auth";
 import { DEMO_USER_ID } from "./demo";
 import {
   type Collections,
-  newHookKey,
   newWorkflowId,
   type RunDoc,
   type WorkflowDoc,
@@ -114,13 +113,15 @@ export async function insertWorkflow(
   ownerId: string,
   input: WorkflowInput,
   now: number,
+  /** From `newHookKey(pepper)`. */
+  hookKey: string,
 ): Promise<Workflow | "full" | "gone"> {
   const doc: WorkflowDoc = {
     _id: newWorkflowId(),
     workspaceId,
     ownerId,
     ...input,
-    hookKey: newHookKey(),
+    hookKey,
     version: 1,
     lastScheduledAt: null,
     nextFireAt: null,

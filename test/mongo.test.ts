@@ -5,7 +5,7 @@ import type { Workflow } from "../shared/schema";
 import { deleteWorkspace, getRun, insertWorkflow, takeRunSlot, updateWorkflow } from "../worker/db";
 import { ensureDemo } from "../worker/demo";
 import { advance, createRun, guardStorage, tick } from "../worker/engine";
-import { bump } from "../worker/auth";
+import { bump, newHookKey } from "../worker/auth";
 import { type Collections, collections } from "../worker/mongo";
 import { dropAll } from "./dropAll";
 
@@ -15,6 +15,7 @@ import { dropAll } from "./dropAll";
  * a fresh database and drops it at the end.
  */
 const uri = process.env.MONGODB_TEST_URI;
+const PEPPER = "test-pepper-0123456789abcdef";
 
 describe.skipIf(!uri)("engine and data on MongoDB", () => {
   let client: MongoClient;
@@ -43,7 +44,7 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
 
   async function addWorkflow(ws: string, owner: string, input: WorkflowInput): Promise<Workflow> {
     await workspace(ws, owner);
-    const wf = await insertWorkflow(c, ws, owner, input, Date.now());
+    const wf = await insertWorkflow(c, ws, owner, input, Date.now(), await newHookKey(PEPPER));
     if (typeof wf === "string") throw new Error(`insert refused: ${wf}`);
     return wf;
   }
@@ -204,7 +205,26 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect((await c.runs.findOne({ _id: late }))?.status).toBe("succeeded");
   });
 
-  it("stops the biggest backlogs when the database is nearly full, but not a few runs in flight", async () => {
+  it("serves every account with ready runs in turn, whatever its id", async () => {
+    await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
+    const now = Date.now();
+    const owners = [...Array.from({ length: 10 }, (_, a) => `usr_a${String(a).padStart(2, "0")}`), "usr_zz"];
+    for (const owner of owners) {
+      const wf = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
+      for (let i = 0; i < 5; i++) {
+        const runId = await createRun(c, { ...wf, ownerId: owner }, "manual", {});
+        await c.runs.updateOne({ _id: runId }, { $set: { nextRunAt: now - 60_000 + i } });
+      }
+    }
+    // 11 accounts, 5 served a minute: within three ticks every one has had a turn.
+    for (let t = 0; t < 3; t++) await tick(c, now + 1_000 + t * 60_000);
+    for (const owner of owners) {
+      expect(await c.runs.countDocuments({ ownerId: owner, status: "succeeded" }), owner).toBeGreaterThanOrEqual(1);
+    }
+    await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
+  });
+
+  it("stops and shrinks big backlogs when the database is nearly full, but not a few runs in flight", async () => {
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
     const backlog = async (owner: string, n: number) => {
       const wf = await addWorkflow(`ws_${owner}`, owner, wfInput([transform("a", 1)]));
@@ -217,14 +237,22 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     await backlog("usr_m2", 22);
     await backlog("usr_m3", 21);
     const few = await backlog("usr_few", 3);
-    const nearlyFull = { stats: async () => ({ dataSize: 400_000_000, indexSize: 0 }) } as unknown as Db;
+    // Nearly full at first; after the backlogs shrink, back under the pruning mark, so nobody's
+    // finished runs are deleted.
+    const finished = await createRun(c, { ...few.wf, ownerId: "usr_few" }, "manual", {});
+    await c.runs.updateOne({ _id: finished }, { $set: { status: "succeeded" } });
+    const sizes = [400_000_000, 300_000_000];
+    const nearlyFull = { stats: async () => ({ dataSize: sizes.shift() ?? 300_000_000, indexSize: 0 }) } as unknown as Db;
     await guardStorage(c, nearlyFull, Date.now());
-    // The three biggest backlogs (over 20 each) are stopped, and their workflows show it.
+    expect(await c.runs.findOne({ _id: finished })).not.toBeNull();
+    // The backlogs over 20 are stopped and shrunk, and their workflows show it.
     expect(await c.runs.countDocuments({ _id: { $in: heap.ids }, status: "stopped" })).toBe(30);
-    expect(await c.runs.countDocuments({ ownerId: { $in: ["usr_m1", "usr_m2"] }, status: "stopped" })).toBe(47);
+    const shrunk = await c.runs.findOne({ _id: heap.ids[0] });
+    expect([shrunk?.steps, shrunk?.input, shrunk?.outputs]).toEqual([[], null, {}]);
+    expect(await c.runs.countDocuments({ ownerId: { $in: ["usr_m1", "usr_m2", "usr_m3"] }, status: "stopped" })).toBe(68);
     expect((await c.workflows.findOne({ _id: heap.wf.id }))?.lastRun?.status).toBe("stopped");
-    // The fourth, and an account with only a few in flight, are left alone.
-    expect(await c.runs.countDocuments({ ownerId: "usr_m3", status: "stopped" })).toBe(0);
+    expect((await c.runs.findOne({ _id: heap.ids[0] }))?.error).toMatch(/free space/);
+    // An account with only a few in flight is left alone.
     expect(await c.runs.countDocuments({ _id: { $in: few.ids }, status: "queued" })).toBe(3);
     await c.runs.deleteMany({ status: { $in: ["queued", "waiting"] } });
   });
@@ -288,14 +316,14 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
 
   it("never lets parallel saves put more workflows in a workspace than the limit", async () => {
     await workspace("ws_full", "usr_f");
-    const results = await Promise.all(Array.from({ length: 14 }, () => insertWorkflow(c, "ws_full", "usr_f", wfInput([]), Date.now())));
+    const results = await Promise.all(Array.from({ length: 14 }, async () => insertWorkflow(c, "ws_full", "usr_f", wfInput([]), Date.now(), await newHookKey(PEPPER))));
     expect(results.filter((r) => typeof r !== "string").length).toBeLessThanOrEqual(10);
     expect(await c.workflows.countDocuments({ workspaceId: "ws_full" })).toBeLessThanOrEqual(10);
-    expect(await insertWorkflow(c, "ws_missing", "usr_f", wfInput([]), Date.now())).toBe("gone");
+    expect(await insertWorkflow(c, "ws_missing", "usr_f", wfInput([]), Date.now(), await newHookKey(PEPPER))).toBe("gone");
   });
 
   it("seeds the demo account once, even when many people open it at the same moment", async () => {
-    await Promise.all(Array.from({ length: 5 }, () => ensureDemo(c, Date.now())));
+    await Promise.all(Array.from({ length: 5 }, () => ensureDemo(c, Date.now(), PEPPER)));
     expect(await c.workflows.countDocuments({ ownerId: "usr_demo" })).toBe(3);
   });
 

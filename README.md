@@ -75,8 +75,8 @@ taken out again if it went over.
 **Data.** Collections `users`, `sessions`, `workspaces`, `workflows`, `runs` and `counters` (rate limits).
 TTL indexes delete runs after 7 days and sessions after 30 (1 for the demo), so nothing has to scan for old
 data. Every 10 minutes the cron checks how much of the cluster's 512 MB is in use: past 350 MB it deletes
-the oldest finished runs and stops the waiting runs of the (up to three) accounts with the most of them,
-if they have more than 20; past
+the queued and waiting runs of the (up to five) accounts holding more than 20 are stopped and shrunk to
+their error message, and only if that isn't enough are everyone's oldest finished runs deleted; past
 450 MB it pauses new runs and sign-ups until there's room again.
 
 A Worker can't reuse a socket across requests, so each request opens one connection to Atlas when it first
@@ -93,7 +93,8 @@ token in an `HttpOnly`, `Secure`, `SameSite=Lax` cookie with the `__Host-` prefi
 SHA-256. Writes from other sites are refused, request bodies are capped at 64 KB, and Cloudflare's rate
 limiter turns away more than 60 requests a minute from one IP before any database work. Webhooks are
 limited per webhook URL instead (60 a minute), since services like GitHub send everyone's webhooks from a
-few shared addresses, with a looser 600 a minute per IP so made-up webhook URLs can't flood the database. Sign-ups and demo
+few shared addresses, plus a looser 600 a minute per IP. Each webhook URL's key carries a signature made
+with `AUTH_PEPPER`, so a made-up URL is refused before any database work. Sign-ups and demo
 sign-ins are limited per network (IPv6 per /48) and sign-ups per day, login attempts per email and IP, and an
 account keeps at most 20 sessions.
 
@@ -161,9 +162,10 @@ password stop working.
 
 3. Add Cloudflare's free WAF rate-limiting rule for the zone (Security → WAF → Rate limiting rules): requests
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
-   from one IP, block for 10 seconds. Leave `/hooks/` out, for the same shared-address reason; the Worker
-   limits each webhook URL to 60 calls a minute. A person watching a run polls every 3 seconds, well under
-   the rule.
+   from one IP, block for 10 seconds. Leave `/hooks/` out, for the same shared-address reason (the free plan
+   allows one rule, so it can't have a looser one of its own); the Worker refuses made-up webhook URLs
+   without touching the database and limits each URL to 60 calls a minute and each IP to 600. A person
+   watching a run polls every 3 seconds, well under the rule.
    The Worker's own limiter answers floods with 429, but those requests still count toward the free plan's
    100,000 a day; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
    plan: an IP that stays just under the rule (about 86,000 requests a day) uses most of the daily quota, so
@@ -187,8 +189,8 @@ person from using up the free plans:
   accounts that have already started 20 this hour wait for the next. A schedule that hits its account's
   limit is skipped for that time.
 - The cron moves up to 10 runs a minute (scheduled runs, and runs coming back from a delay or retry).
-  Accounts take turns: those it has served least this hour go first, 2 runs each, oldest first, and spare
-  slots go to busy accounts. Webhook and manual runs start in their own request.
+  Accounts take turns, round robin: those it served longest ago go first, 2 runs each, oldest first, and
+  spare slots go to busy accounts. Webhook and manual runs start in their own request.
 - 100 runs per account queued or waiting (in a delay or retry) at once.
 - 60 requests a minute per IP address; webhooks 60 calls a minute per URL and 600 per IP; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login

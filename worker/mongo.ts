@@ -200,6 +200,8 @@ export async function ensureIndexes(c: Collections): Promise<string[]> {
     c.runs.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     c.counters.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
   ]);
+  // Indexes that newer ones above replaced. Dropping one that isn't there is fine.
+  await Promise.allSettled([c.runs.dropIndex("status_1_nextRunAt_1"), c.workflows.dropIndex("trigger.type_1_enabled_1")]);
   return results.flatMap((r) => (r.status === "rejected" ? [(r.reason as Error).message] : []));
 }
 
@@ -212,4 +214,3 @@ export const newUserId = () => `usr_${randomId(9)}`;
 export const newWorkspaceId = () => `ws_${randomId(12)}`;
 export const newWorkflowId = () => `wf_${randomId(8)}`;
 export const newRunId = () => `run_${randomId(10)}`;
-export const newHookKey = () => randomId(18);

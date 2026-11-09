@@ -20,7 +20,9 @@ import {
   findSession,
   giveBack,
   hashPassword,
+  hookKeyValid,
   ipKey,
+  newHookKey,
   readCookie,
   sessionCookie,
   sha256,
@@ -52,7 +54,6 @@ const HOUR = 60 * MINUTE;
 /** Biggest request body the API accepts. A workflow is at most LIMITS.workflowBytes of JSON. */
 const MAX_API_BODY = 64 * 1024;
 /** Webhook keys are 18 random bytes in base64url. Anything else is refused before the database. */
-const HOOK_KEY = /^[A-Za-z0-9_-]{24}$/;
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -221,7 +222,7 @@ api.post("/auth/demo", async (c) => {
   if (!(await underLimit(db(c), `demo:ip:${network(c)}`, HOUR, LIMITS.demoLoginsPerIpPerHour))) {
     return c.json({ error: "Too many demo sign-ins from your network. Try again in an hour." }, 429);
   }
-  await ensureDemo(db(c), Date.now());
+  await ensureDemo(db(c), Date.now(), c.env.AUTH_PEPPER);
   return signIn(c, { _id: DEMO_USER_ID, demo: true });
 });
 
@@ -372,7 +373,7 @@ scoped.get("/overview", async (c) => {
 scoped.post("/workflows", async (c) => {
   const parsed = workflowInput.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json(issues(parsed.error), 400);
-  const res = await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now());
+  const res = await insertWorkflow(db(c), c.var.workspace, c.var.session.userId, parsed.data, Date.now(), await newHookKey(c.env.AUTH_PEPPER));
   if (res === "full") return c.json({ error: `A workspace can hold ${LIMITS.workflowsPerWorkspace} workflows. Delete one to make room.` }, 409);
   if (res === "gone") return c.json({ error: "No workspace with that id" }, 404);
   return c.json(res, 201);
@@ -449,7 +450,8 @@ app.all(
   bodyLimit({ maxSize: LIMITS.runInputBytes, onError: (c) => c.json({ error: `Payload is larger than ${LIMITS.runInputBytes / 1000} KB` }, 413) }),
   async (c) => {
     const key = c.req.param("key");
-    if (!HOOK_KEY.test(key)) return c.json({ error: "Unknown webhook" }, 404);
+    // The key's own signature is checked first, with CPU only: a made-up key costs no database lookup.
+    if (!(await hookKeyValid(key, c.env.AUTH_PEPPER))) return c.json({ error: "Unknown webhook" }, 404);
     // Per webhook URL, and a much looser per-IP limit (shared by every sender behind that address),
     // so made-up keys can't be used to make unlimited database lookups from one address.
     const from = c.req.header("cf-connecting-ip") ?? "local";
@@ -496,6 +498,6 @@ export default {
   fetch: app.fetch,
   async scheduled(_controller, env, ctx) {
     const mongo = new Mongo(env);
-    ctx.waitUntil(tick(mongo.c, Date.now(), mongo.db).finally(() => mongo.close()));
+    ctx.waitUntil(tick(mongo.c, Date.now(), mongo.db, env.AUTH_PEPPER).finally(() => mongo.close()));
   },
 } satisfies ExportedHandler<Env>;

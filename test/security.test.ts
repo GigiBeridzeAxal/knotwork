@@ -126,3 +126,19 @@ describe("templates", () => {
     expect(performance.now() - started).toBeLessThan(100);
   });
 });
+
+describe("webhook keys", () => {
+  const pepper = "test-pepper-0123456789abcdef";
+
+  it("accepts keys it signed and refuses made-up or altered ones", async () => {
+    const { hookKeyValid, newHookKey } = await import("../worker/auth");
+    const key = await newHookKey(pepper);
+    expect(key).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(await hookKeyValid(key, pepper)).toBe(true);
+    expect(await hookKeyValid(key, "another-pepper-0123456789")).toBe(false);
+    const flipped = key.slice(0, 5) + (key[5] === "A" ? "B" : "A") + key.slice(6);
+    expect(await hookKeyValid(flipped, pepper)).toBe(false);
+    expect(await hookKeyValid("A".repeat(24), pepper)).toBe(false);
+    expect(await hookKeyValid("short", pepper)).toBe(false);
+  });
+});
