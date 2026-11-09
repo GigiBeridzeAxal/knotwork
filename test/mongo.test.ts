@@ -171,6 +171,17 @@ describe.skipIf(!uri)("engine and data on MongoDB", () => {
     expect(await takeRunSlot(c, "usr_bytes3", now, "webhook", 10_000)).toBeNull();
   });
 
+  it("reserves a run's most possible bytes once and gives back what it didn't use", async () => {
+    await account("usr_settle");
+    const { runId } = await start([transform("a", 1), transform("b", 2), transform("c", 3)], "usr_settle", "ws_settle");
+    await advance(c, runId);
+    expect((await c.runs.findOne({ _id: runId }))?.status).toBe("succeeded");
+    const counter = await c.counters.findOne({ _id: `runbytes:usr_settle:${Math.floor(Date.now() / 3_600_000)}` });
+    // Three tiny outputs and their logs: well under the ~70 KB reserved for three steps.
+    expect(counter?.n).toBeGreaterThan(0);
+    expect(counter?.n).toBeLessThan(2_000);
+  });
+
   it("counts what a run stores as it runs, and stops it when there's no room", async () => {
     await account("usr_writer");
     const big = { id: "big", name: "Big", type: "transform" as const, retry: { max: 0, backoffSeconds: 5 }, config: { output: "€".repeat(6_000) } };

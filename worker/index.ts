@@ -54,6 +54,9 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 /** Biggest request body the API accepts. A workflow is at most LIMITS.workflowBytes of JSON. */
 const MAX_API_BODY = 64 * 1024;
+/** How much of a webhook call's headers and query string a run keeps (characters). */
+const MAX_HOOK_HEADER_BYTES = 8_000;
+const MAX_HOOK_QUERY_BYTES = 2_000;
 
 type Vars = { mongo: Mongo; later: Promise<unknown>[]; session: SessionDoc; workspace: string };
 type C = Context<{ Bindings: Env; Variables: Vars }>;
@@ -490,16 +493,27 @@ app.all(
       body = Object.fromEntries(new URLSearchParams(text));
     }
 
-    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook", runBytes(text, doc.steps));
-    if (blocked) return c.json({ error: blocked }, 429);
-
+    // Headers and query are kept for templates, up to a few KB each; the whole input counts toward the
+    // run's byte budget.
     const headers: Record<string, string> = {};
+    let headerBytes = 0;
     c.req.raw.headers.forEach((value, name) => {
       if (name === "cookie" || name === "authorization" || name.startsWith("cf-") || name.startsWith("x-forwarded")) return;
-      headers[name] = value;
+      headerBytes += name.length + value.length;
+      if (headerBytes <= MAX_HOOK_HEADER_BYTES) headers[name] = value;
     });
+    const query: Record<string, string> = {};
+    let queryBytes = 0;
+    for (const [name, value] of Object.entries(c.req.query())) {
+      queryBytes += name.length + value.length;
+      if (queryBytes <= MAX_HOOK_QUERY_BYTES) query[name] = value;
+    }
+    const input = { method: c.req.method, query, headers, body };
 
-    const runId = await createRun(db(c), { ...doc, id: doc._id }, "webhook", { method: c.req.method, query: c.req.query(), headers, body });
+    const blocked = await takeRunSlot(db(c), doc.ownerId, Date.now(), "webhook", runBytes(input, doc.steps));
+    if (blocked) return c.json({ error: blocked }, 429);
+
+    const runId = await createRun(db(c), { ...doc, id: doc._id }, "webhook", input);
     c.var.later.push(advance(db(c), runId));
     return c.json({ runId }, 202);
   },

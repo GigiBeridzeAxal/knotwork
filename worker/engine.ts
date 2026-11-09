@@ -128,6 +128,8 @@ export function keepable(value: unknown, max = MAX_OUTPUT_BYTES): { value: unkno
 }
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+/** Most a log entry can add: a 1,000-character message (up to 4 bytes each), a 1 KB output preview, names. */
+const LOG_MAX_BYTES = 5_500;
 /** About what a log entry adds to its run. */
 const logBytes = (log: LogDoc) => utf8Bytes(JSON.stringify(log));
 
@@ -138,7 +140,15 @@ async function updateLastRun(c: Collections, run: Pick<RunDoc, "_id" | "workflow
 async function failRun(c: Collections, run: Pick<RunDoc, "_id" | "workflowId">, error: string) {
   await c.runs.updateOne(
     { _id: run._id },
-    { $set: { status: "failed", error: clip(error, MAX_ERROR), leaseUntil: null, nextRunAt: null, finishedAt: Date.now() } },
+    {
+      $set: {
+        status: "failed",
+        error: clip(error, MAX_ERROR),
+        leaseUntil: null,
+        nextRunAt: null,
+        finishedAt: Date.now(),
+      },
+    },
   );
   await updateLastRun(c, run, "failed");
 }
@@ -188,12 +198,15 @@ async function step(c: Collections, run: RunDoc, started: number) {
     durationMs: Date.now() - at,
   });
   const pool = run.triggerType === "schedule" ? "schedule" : "demand";
-  const pushLog = (log: LogDoc) => ({ logs: { $each: [log], $slice: -MAX_LOGS } });
-  // Logs of retries, stops and failures are counted too, but never refused: the run is ending or pausing.
-  const countLog = (log?: LogDoc) => (log ? chargeRunBytes(c, run.ownerId, pool, logBytes(log), Date.now(), false) : null);
+  // What this invocation stores (outputs, logs) counts against the hourly byte budgets. The most it
+  // can store is reserved up front, in one charge, and what it didn't use is given back at the end.
+  let used = 0;
+  const pushLog = (log: LogDoc) => {
+    used += logBytes(log);
+    return { logs: { $each: [log], $slice: -MAX_LOGS } };
+  };
 
   const finish = async (status: Run["status"], error: string | null, log?: LogDoc) => {
-    await countLog(log);
     await c.runs.updateOne(
       { _id: run._id },
       {
@@ -216,11 +229,18 @@ async function step(c: Collections, run: RunDoc, started: number) {
   // A waiting run is kept for the full history period after it wakes up, so a week-long delay
   // can't outlive its own run.
   const park = async (nextRunAt: number, log?: LogDoc) => {
-    await countLog(log);
     await c.runs.updateOne(
       { _id: run._id },
       {
-        $set: { status: "waiting", stepIndex: index, attempt, claims: 0, leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) },
+        $set: {
+          status: "waiting",
+          stepIndex: index,
+          attempt,
+          claims: 0,
+          leaseUntil: null,
+          nextRunAt,
+          expiresAt: expiry(nextRunAt),
+        },
         ...(log ? { $push: pushLog(log) } : {}),
       },
     );
@@ -228,79 +248,105 @@ async function step(c: Collections, run: RunDoc, started: number) {
   };
   const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
 
-  await updateLastRun(c, run, "running");
-
-  while (index < steps.length) {
-    if (Date.now() - started > TIME_BUDGET_MS) {
-      // Out of time for this invocation: hand the run to the next tick.
-      await park(Date.now());
-      return;
-    }
-
-    const current = steps[index];
-    const at = Date.now();
-    let result;
-    try {
-      result = await executeStep(current, scope, options);
-    } catch (err) {
-      result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
-    }
-
-    switch (result.kind) {
-      case "ok":
-      case "wait": {
-        const kept = keepable(result.output);
-        outputBytes += kept.bytes;
-        if (outputBytes > MAX_RUN_OUTPUT_BYTES) {
-          await finish("failed", `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`, entry(current, "failed", at, "Output too large"));
-          return;
-        }
-        const log = entry(current, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, kept.value);
-        // What this step stores counts against the same hourly byte budgets as the run's start, before
-        // it's written, so outputs can't store more than the budgets allow.
-        const noRoom = await chargeRunBytes(c, run.ownerId, pool, kept.bytes + logBytes(log), Date.now());
-        if (noRoom) {
-          await finish("failed", `${current.name}: ${noRoom}`, entry(current, "failed", at, "No room this hour"));
-          return;
-        }
-        scope.steps[current.id] = kept.value;
-        index += 1;
-        attempt = 0;
-        const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };
-        if (result.kind === "wait") {
-          const nextRunAt = Date.now() + result.seconds * 1000;
-          await c.runs.updateOne(
-            { _id: run._id },
-            { $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) }, $push: pushLog(log) },
-          );
-          await updateLastRun(c, run, "waiting");
-          return;
-        }
-        await c.runs.updateOne({ _id: run._id }, { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, $push: pushLog(log) });
-        break;
-      }
-      case "stop": {
-        const log = entry(current, "stopped", at, result.message);
-        index += 1;
-        await finish("stopped", null, log);
-        return;
-      }
-      case "fail": {
-        if (attempt < current.retry.max) {
-          const wait = current.retry.backoffSeconds * 4 ** attempt;
-          const message = `${result.message}. Trying again in ${formatSeconds(wait)} (${attempt + 1} of ${current.retry.max} retries)`;
-          const log = entry(current, "retrying", at, message, result.output);
-          attempt += 1;
-          await park(Date.now() + wait * 1000, log);
-        } else {
-          await finish("failed", `${current.name}: ${result.message}`, entry(current, "failed", at, result.message, result.output));
-        }
-        return;
-      }
-    }
+  const stepsLeft = steps.length - index;
+  const reserve =
+    Math.max(0, Math.min(MAX_RUN_OUTPUT_BYTES + MAX_OUTPUT_BYTES - outputBytes, stepsLeft * (MAX_OUTPUT_BYTES + 40))) +
+    Math.min(stepsLeft + 1, MAX_LOGS) * LOG_MAX_BYTES;
+  const noRoom = await chargeRunBytes(c, run.ownerId, pool, reserve, started);
+  if (noRoom) {
+    await finish("failed", noRoom);
+    await chargeRunBytes(c, run.ownerId, pool, used, Date.now(), false);
+    return;
+  }
+  try {
+    await runSteps();
+  } finally {
+    await chargeRunBytes(c, run.ownerId, pool, used - reserve, Date.now(), false);
   }
 
-  await finish("succeeded", null);
+  async function runSteps() {
+    await updateLastRun(c, run, "running");
+
+    while (index < steps.length) {
+      if (Date.now() - started > TIME_BUDGET_MS) {
+        // Out of time for this invocation: hand the run to the next tick.
+        await park(Date.now());
+        return;
+      }
+
+      const current = steps[index];
+      const at = Date.now();
+      let result;
+      try {
+        result = await executeStep(current, scope, options);
+      } catch (err) {
+        result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
+      }
+
+      switch (result.kind) {
+        case "ok":
+        case "wait": {
+          const kept = keepable(result.output);
+          outputBytes += kept.bytes;
+          if (outputBytes > MAX_RUN_OUTPUT_BYTES) {
+            await finish(
+              "failed",
+              `${current.name}: the run's outputs passed ${MAX_RUN_OUTPUT_BYTES / 1000} KB`,
+              entry(current, "failed", at, "Output too large"),
+            );
+            return;
+          }
+          const log = entry(current, result.kind === "ok" ? "ok" : "waiting", at, result.message ?? null, kept.value);
+          used += kept.bytes;
+          scope.steps[current.id] = kept.value;
+          index += 1;
+          attempt = 0;
+          const set = { [`outputs.${current.id}`]: kept.value, outputBytes, stepIndex: index, attempt: 0, claims: 0 };
+          if (result.kind === "wait") {
+            const nextRunAt = Date.now() + result.seconds * 1000;
+            await c.runs.updateOne(
+              { _id: run._id },
+              {
+                $set: { ...set, status: "waiting", leaseUntil: null, nextRunAt, expiresAt: expiry(nextRunAt) },
+                $push: pushLog(log),
+              },
+            );
+            await updateLastRun(c, run, "waiting");
+            return;
+          }
+          await c.runs.updateOne(
+            { _id: run._id },
+            { $set: { ...set, leaseUntil: Date.now() + LEASE_MS }, $push: pushLog(log) },
+          );
+          break;
+        }
+        case "stop": {
+          const log = entry(current, "stopped", at, result.message);
+          index += 1;
+          await finish("stopped", null, log);
+          return;
+        }
+        case "fail": {
+          if (attempt < current.retry.max) {
+            const wait = current.retry.backoffSeconds * 4 ** attempt;
+            const message = `${result.message}. Trying again in ${formatSeconds(wait)} (${attempt + 1} of ${current.retry.max} retries)`;
+            const log = entry(current, "retrying", at, message, result.output);
+            attempt += 1;
+            await park(Date.now() + wait * 1000, log);
+          } else {
+            await finish(
+              "failed",
+              `${current.name}: ${result.message}`,
+              entry(current, "failed", at, result.message, result.output),
+            );
+          }
+          return;
+        }
+      }
+    }
+
+    await finish("succeeded", null);
+  }
 }
 
 /** Runs `work` over `items`, at most `limit` at a time. */
@@ -323,13 +369,10 @@ async function inBatches<T>(items: T[], limit: number, work: (item: T) => Promis
  */
 async function shrinkBacklogs(c: Collections, now: number, from: number): Promise<number> {
   const backlogs = await c.runs
-    .aggregate<{ _id: string; n: number }>([
-      { $match: { status: { $in: ["queued", "waiting"] } } },
-      { $group: { _id: "$ownerId", n: { $sum: 1 } } },
-      { $match: { n: { $gte: from } } },
-      { $sort: { n: -1 } },
-      { $limit: 1_000 },
-    ])
+    .aggregate<{
+      _id: string;
+      n: number;
+    }>([{ $match: { status: { $in: ["queued", "waiting"] } } }, { $group: { _id: "$ownerId", n: { $sum: 1 } } }, { $match: { n: { $gte: from } } }, { $sort: { n: -1 } }, { $limit: 1_000 }])
     .toArray();
   const owners: string[] = [];
   let total = 0;
@@ -340,7 +383,12 @@ async function shrinkBacklogs(c: Collections, now: number, from: number): Promis
   }
   if (!owners.length) return 0;
   const pending = { ownerId: { $in: owners }, status: { $in: ["queued", "waiting"] as RunStatus[] } };
-  const ids = (await c.runs.find(pending, { projection: { _id: 1 } }).limit(SHRINK_PER_CHECK).toArray()).map((r) => r._id);
+  const ids = (
+    await c.runs
+      .find(pending, { projection: { _id: 1 } })
+      .limit(SHRINK_PER_CHECK)
+      .toArray()
+  ).map((r) => r._id);
   return shrinkRuns(c, now, ids, "this account had many runs waiting");
 }
 
@@ -351,7 +399,12 @@ async function shrinkLongWaits(c: Collections, now: number): Promise<number> {
     .sort({ nextRunAt: -1 })
     .limit(SHRINK_PER_CHECK)
     .toArray();
-  return shrinkRuns(c, now, ids.map((r) => r._id), "this run was waiting more than a day ahead");
+  return shrinkRuns(
+    c,
+    now,
+    ids.map((r) => r._id),
+    "this run was waiting more than a day ahead",
+  );
 }
 
 async function shrinkRuns(c: Collections, now: number, ids: string[], why: string): Promise<number> {
@@ -372,7 +425,10 @@ async function shrinkRuns(c: Collections, now: number, ids: string[], why: strin
       },
     },
   );
-  await c.workflows.updateMany({ "lastRun.id": { $in: ids } }, { $set: { "lastRun.status": "stopped", "lastRun.error": "space" } });
+  await c.workflows.updateMany(
+    { "lastRun.id": { $in: ids } },
+    { $set: { "lastRun.status": "stopped", "lastRun.error": "space" } },
+  );
   return ids.length;
 }
 
@@ -412,7 +468,11 @@ export async function guardStorage(c: Collections, db: Db, now: number) {
   // Above the watch mark, the cron checks every minute instead of every 10, so a burst can't fill
   // the rest of the space between two checks.
   if (used > STORAGE_WATCH_BYTES) {
-    await c.counters.updateOne({ _id: STORAGE_HIGH }, { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } }, { upsert: true });
+    await c.counters.updateOne(
+      { _id: STORAGE_HIGH },
+      { $set: { n: 1, expiresAt: new Date(now + 15 * 60_000) } },
+      { upsert: true },
+    );
   } else {
     await c.counters.deleteOne({ _id: STORAGE_HIGH });
   }
@@ -514,7 +574,11 @@ export async function tick(
     .slice(0, Math.ceil(DUE_PER_TICK / DUE_PER_OWNER))
     .map((t) => t.owner);
   const oldest = (filter: Filter<RunDoc>, limit: number) =>
-    c.runs.find({ $and: [ready, filter] }, { projection: { _id: 1, ownerId: 1 } }).sort({ nextRunAt: 1 }).limit(limit).toArray();
+    c.runs
+      .find({ $and: [ready, filter] }, { projection: { _id: 1, ownerId: 1 } })
+      .sort({ nextRunAt: 1 })
+      .limit(limit)
+      .toArray();
   const due = (await Promise.all(turn.map((owner) => oldest({ ownerId: owner }, DUE_PER_OWNER)))).flat();
   if (due.length < DUE_PER_TICK && owners.length) {
     due.push(...(await oldest({ _id: { $nin: due.map((r) => r._id) } }, DUE_PER_TICK - due.length)));
@@ -536,7 +600,10 @@ export async function tick(
   await inBatches(due, TICK_CONCURRENCY, (run) => advance(c, run._id));
 
   // Every 10 minutes, check how much of the free cluster is in use; every minute once it's high.
-  if (db && (minuteOfHour % 10 === 0 || (await c.counters.findOne({ _id: STORAGE_HIGH }, { projection: { _id: 1 } })))) {
+  if (
+    db &&
+    (minuteOfHour % 10 === 0 || (await c.counters.findOne({ _id: STORAGE_HIGH }, { projection: { _id: 1 } })))
+  ) {
     await guardStorage(c, db, now).catch((err) => console.error("storage check", err));
   }
 

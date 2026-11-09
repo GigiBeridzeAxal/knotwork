@@ -197,16 +197,18 @@ person from using up the free plans:
   Accounts take turns, round robin: those it served longest ago go first, 2 runs each, oldest first, and
   spare slots go to busy accounts. Webhook and manual runs start in their own request.
 - 100 runs per account queued or waiting (in a delay or retry) at once.
-- What runs store (input, steps, outputs and logs, in UTF-8 bytes, counted before each write): 4 MB per
-  account per hour; 60 MB for webhook and manual runs together and 30 MB for scheduled runs, each a pool
-  of its own; past half of a pool, accounts that stored more than 200 KB this hour wait for the next. A
-  run that hits a budget mid-way fails with the reason.
+- What runs store (input, steps, outputs and logs, in UTF-8 bytes): 4 MB per account per hour; 60 MB for
+  webhook and manual runs together and 30 MB for scheduled runs, each a pool of its own; past half of a
+  pool, accounts that stored more than 200 KB this hour wait for the next. A new run is charged for its
+  input and steps; each time it moves, it reserves the most its remaining steps could write and gives back
+  what they didn't. A run that can't reserve fails with the reason. Workflows with big outputs can reach
+  the 4 MB before the 60 runs an hour (about 60 KB per run on average).
 - 60 requests a minute per IP address (IPv6 per /64) and 600 per network (IPv6 per /48); webhooks 60 calls
   a minute per URL, 600 per IP and 3,000 per network; 5 new accounts per network (IPv4 address or IPv6 /48) per hour and
   300 a day; 10 sign-ups with an email that already has an account per network per hour; 10 login
   attempts per email and IP per 15 minutes; 30 demo sign-ins per network per hour; 20 sessions per account.
 - Schedules run at most every 5 minutes, in UTC.
-- 32 KB per workflow and 64 KB per webhook payload or test input; 64 KB of rendered templates per step.
+- 32 KB per workflow and 64 KB per webhook payload or test input (a webhook also keeps up to 8 KB of headers and 2 KB of query); 64 KB of rendered templates per step.
   HTTP calls get 15s and 256 KB of response; up to 5 retries per step; 16 KB of output is kept per step and
   64 KB per run (UTF-8 bytes); the last 50 log lines are kept.
 - Runs are deleted 7 days after they start, or after they wake from their last wait. Workflows stay until you delete them.
