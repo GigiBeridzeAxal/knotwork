@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { WorkflowSummary } from "../../shared/schema";
 import { api } from "../api";
+import { PlusIcon } from "../components/icons";
 import { Button, Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { EXAMPLES } from "../examples";
 import { Link, navigate } from "../router";
@@ -40,8 +41,9 @@ export function WorkflowsPage() {
         </div>
         <Link
           href="/workflows/new"
-          className="inline-flex h-11 items-center rounded-[10px] bg-spark px-4 text-sm font-semibold text-ink hover:bg-spark-hover"
+          className="inline-flex h-11 items-center gap-2 rounded-full bg-text px-5 text-sm font-semibold text-ink transition-colors hover:bg-soft"
         >
+          <PlusIcon className="size-4" />
           New workflow
         </Link>
       </div>

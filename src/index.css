@@ -5,8 +5,11 @@
   --color-ink: #0a0b0a;
   --color-deep: #0f100e;
   --color-graphite: #141613;
+  --color-raised: #20221c;
+  --color-dot: #1a1c17;
   --color-line: #2b2e25;
   --color-edge: #373b30;
+  --color-line-hover: #44483d;
   --color-text: #f2f2ec;
   --color-soft: #b5b9ae;
   --color-muted: #909488;
@@ -42,4 +45,29 @@ body {
 .dots {
   background-image: radial-gradient(#1E211B 1px, transparent 1px);
   background-size: 24px 24px;
+}
+
+/* A slow pulse for live things. Slower than animate-ping so a dashboard left open stays calm. */
+@keyframes kw-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.breathe {
+  animation: kw-breathe 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .breathe {
+    animation: none;
+  }
+}
+
+/* The content sheet scrolls on its own on wide screens: keep its scrollbar thin and quiet. */
+.sheet-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge) transparent;
 }

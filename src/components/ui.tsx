@@ -45,8 +45,9 @@ const STATUS: Record<RunStatus | LogStatus, { label: string; color: string }> = 
   running: { label: "Running", color: "text-wire bg-wire/12" },
   waiting: { label: "Waiting", color: "text-retry bg-retry/12" },
   retrying: { label: "Retrying", color: "text-retry bg-retry/12" },
-  succeeded: { label: "Passed", color: "text-pass bg-pass/12" },
-  ok: { label: "Passed", color: "text-pass bg-pass/12" },
+  // Success stays quiet so problems stand out; lime is kept for live states.
+  succeeded: { label: "Passed", color: "text-soft bg-soft/10" },
+  ok: { label: "Passed", color: "text-soft bg-soft/10" },
   failed: { label: "Failed", color: "text-fail bg-fail/12" },
   stopped: { label: "Stopped by filter", color: "text-soft bg-soft/12" },
 };

@@ -32,6 +32,9 @@ function loadWorkspace(): string {
 
 export const workspaceId = loadWorkspace();
 
+/** A link that opens this browser's workspace somewhere else. Anyone with it can edit these workflows. */
+export const workspaceLink = () => `${location.origin}/home?workspace=${workspaceId}`;
+
 export interface Issue {
   path: (string | number)[];
   message: string;
@@ -68,8 +71,13 @@ export const api = {
   deleteWorkflow: (id: string) => request<void>(`/workflows/${id}`, { method: "DELETE" }),
   runWorkflow: (id: string, input: unknown) =>
     request<{ runId: string }>(`/workflows/${id}/run`, { method: "POST", body: JSON.stringify({ input }) }),
-  runs: (workflowId?: string) =>
-    request<Run[]>(`/runs${workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""}`),
+  runs: (workflowId?: string, limit?: number) => {
+    const q = new URLSearchParams();
+    if (workflowId) q.set("workflowId", workflowId);
+    if (limit) q.set("limit", String(limit));
+    const qs = q.toString();
+    return request<Run[]>(`/runs${qs ? `?${qs}` : ""}`);
+  },
   run: (id: string) => request<RunDetail>(`/runs/${id}`),
   tick: () => request<{ scheduled: number; resumed: number }>("/tick", { method: "POST" }),
 };

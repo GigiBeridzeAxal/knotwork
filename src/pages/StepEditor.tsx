@@ -13,12 +13,13 @@ const OP_LABELS: Record<FilterOp, string> = {
   not_exists: "is empty",
 };
 
+// Step types share one quiet color: amber and red are kept for problems, lime for live states.
 const TYPE_COLOR: Record<Step["type"], string> = {
-  http: "text-wire",
-  transform: "text-spark",
-  filter: "text-retry",
-  delay: "text-soft",
-  log: "text-pass",
+  http: "text-muted",
+  transform: "text-muted",
+  filter: "text-muted",
+  delay: "text-muted",
+  log: "text-muted",
 };
 
 /** JSON when it parses, the raw text when it doesn't (a plain string is a valid body or output). */
