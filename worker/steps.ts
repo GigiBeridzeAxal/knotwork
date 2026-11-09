@@ -14,6 +14,8 @@ export type StepResult =
       calls?: number;
       /** The platform refused another outgoing request in this invocation. Set only from the thrown error, never from text a step wrote. */
       outOfCalls?: boolean;
+      /** The run's own request allowance ran out part-way (a redirect). Set only by the http step itself. */
+      noRoom?: boolean;
     };
 
 export interface Scope {
@@ -49,6 +51,12 @@ export const DEMO_HOSTS = ["api.github.com", "httpbin.org", "jsonplaceholder.typ
 export interface StepOptions {
   /** When set, http steps may only call these hosts. */
   allowHosts?: readonly string[];
+  /**
+   * Asked before every outgoing request, redirects too: takes one from the caller's allowance, or
+   * says no. Taking before the request (not counting after) keeps runs that go at the same time
+   * inside the allowance they share.
+   */
+  take?: () => boolean;
 }
 
 /**
@@ -159,6 +167,9 @@ async function http(step: Extract<Step, { type: "http" }>, scope: Scope, options
     let method: string = config.method;
     let sendBody = body;
     for (let hop = 0; ; hop++) {
+      if (options.take && !options.take()) {
+        return { kind: "fail", message: `${config.method} ${shownHost} paused: no requests left in this go`, calls, noRoom: true };
+      }
       calls += 1;
       res = await fetch(target.toString(), { method, headers, body: sendBody, redirect: "manual", signal });
       const location = res.headers.get("location");

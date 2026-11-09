@@ -421,7 +421,14 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
     });
     await updateLastRun(c, run, "waiting", note);
   };
-  const options = run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {};
+  /** Every request, redirects too, is taken from this run's share and from what the tick's runs share, before it is made. */
+  const take = () => {
+    if (mine <= 0 || allowance.calls <= 0) return false;
+    mine -= 1;
+    allowance.calls -= 1;
+    return true;
+  };
+  const options = { take, ...(run.ownerId === DEMO_USER_ID ? { allowHosts: DEMO_HOSTS } : {}) };
 
   // Without loops each step writes once. With them, the most the run can still write is what is left
   // of its step allowance.
@@ -590,10 +597,6 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
       } catch (err) {
         result = { kind: "fail" as const, message: (err as Error).message || "The step crashed" };
       }
-      // Every request counts, redirects too. (A step that made none, say a refused address, costs nothing.)
-      const made = "calls" in result ? (result.calls ?? 0) : 0;
-      mine -= made;
-      allowance.calls -= made;
 
       switch (result.kind) {
         case "ok":
@@ -656,6 +659,11 @@ async function step(c: Collections, run: RunDoc, started: number, pepper: string
           if (result.outOfCalls) {
             allowance.calls = 0;
             await park(Date.now(), undefined, PAUSED_SHARED);
+            return;
+          }
+          // The allowance ran out between a redirect's hops: the step starts over when there is room.
+          if (result.noRoom) {
+            await park(Date.now(), undefined, mine <= 0 ? PAUSED_OWN : PAUSED_SHARED);
             return;
           }
           if (attempt < current.retry.max) {

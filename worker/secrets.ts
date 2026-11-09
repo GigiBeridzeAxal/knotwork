@@ -151,7 +151,9 @@ function shapes(value: string): Set<string> {
   const found = new Set<string>();
   const add = (text: string) => {
     if (!text) return;
-    for (const form of [text, JSON.stringify(text).slice(1, -1), encodeURIComponent(text)]) found.add(form);
+    const json = JSON.stringify(text).slice(1, -1);
+    // Also as some services echo it: with JSON's optional `\/`, and with `+` read as a space.
+    for (const form of [text, json, encodeURIComponent(text), json.replaceAll("/", "\\/"), text.replaceAll("+", " ")]) found.add(form);
   };
   add(value);
   // Header values and URLs are trimmed on their way out, so a service may echo the value without its edges.
@@ -167,6 +169,9 @@ function shapes(value: string): Set<string> {
       // Some services keep the key in the query (`?key=…&token=…`) or before the host, and echo it by itself.
       const parts = [...url.searchParams.values(), url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)];
       if (url.search.length >= PART_MIN) add(url.search.slice(1));
+      // Query values as written (not decoded), and each longer piece of the path: an error page may show only that.
+      for (const pair of url.search.slice(1).split("&")) parts.push(pair.slice(pair.indexOf("=") + 1));
+      parts.push(...url.pathname.split("/"));
       for (const part of parts) if (part.length >= PART_MIN) add(part);
     } catch {
       // Not an address after all.

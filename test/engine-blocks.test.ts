@@ -787,6 +787,8 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
         ifStep("third", "{{ loop.index }}", "equals", "3", [http("call", "https://api.example/item/{{ loop.item }}")]),
         log("say", "item {{ loop.item }}"),
       ]),
+      // A request as the last step of a loop: its save carries the loop's move too.
+      loop("tail", "{{ trigger.body.few }}", [transform("pick", "{{ loop.item }}"), http("last", "https://api.example/tail/{{ loop.item }}")]),
       transform("after", "{{ steps.each.count }}"),
     ];
     const shape = (run: RunDoc) => ({
@@ -800,7 +802,7 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     const real = c.runs.updateOne.bind(c.runs);
     /** Runs the workflow, stopping at write number `dieAt` (before or after it lands), then picks it up again. */
     async function go(dieAt: number, landed: boolean) {
-      const { runId } = await start(steps, { body: { list } });
+      const { runId } = await start(steps, { body: { list, few: ["a", "b", "c"] } });
       let writes = 0;
       c.runs.updateOne = (async (...args: Parameters<typeof real>) => {
         writes += 1;
@@ -827,18 +829,66 @@ describe.skipIf(!uri)("blocks and secrets in the engine", () => {
     }
     const clean = await go(0, false);
     expect(clean.run.status).toBe("succeeded");
-    expect(clean.run.stepRuns).toBe(1 + 12 * 3 + 1 + 1);
-    expect(clean.calls).toBe(1);
+    expect(clean.run.stepRuns).toBe(1 + 12 * 3 + 1 + (1 + 3 * 2) + 1);
+    expect(clean.calls).toBe(4);
     for (let at = 1; at <= clean.writes; at++) {
       for (const landed of [false, true]) {
         const crashed = await go(at, landed);
         expect(shape(crashed.run), `stopped at write ${at}, ${landed ? "after" : "before"} it landed`).toEqual(shape(clean.run));
         // The request is made once; only a stop on the save right after it can repeat it, and then once.
-        expect(crashed.calls).toBeGreaterThanOrEqual(1);
-        expect(crashed.calls).toBeLessThanOrEqual(2);
+        expect(crashed.calls).toBeGreaterThanOrEqual(4);
+        expect(crashed.calls).toBeLessThanOrEqual(5);
       }
     }
   }, 120_000);
+
+  it("keeps runs that go at the same moment, each following redirects, inside the shared allowance", async () => {
+    const list = Array.from({ length: 4 }, (_, i) => i);
+    const steps = [loop("each", "{{ trigger.body.list }}", [post("call", "https://api.example/hop/0")])];
+    const runs = await Promise.all(Array.from({ length: 6 }, () => start(steps, { body: { list } })));
+    const shared = { calls: LIMITS.httpCallsPerTick };
+    // Every address redirects four times before it answers: five requests for one step.
+    const answer = (url: string) => {
+      const hop = Number(url.split("/").pop());
+      return hop < 4 ? new Response(null, { status: 302, headers: { location: `https://api.example/hop/${hop + 1}` } }) : new Response("ok");
+    };
+    const calls = await withFetch(answer, async () => {
+      await Promise.all(runs.slice(0, 3).map((r) => advance(c, r.runId, "", shared)));
+      await Promise.all(runs.slice(3).map((r) => advance(c, r.runId, "", shared)));
+    });
+    expect(calls.length).toBeLessThanOrEqual(LIMITS.httpCallsPerTick);
+    expect(shared.calls).toBe(0);
+    const states = await Promise.all(runs.map((r) => load(r.runId)));
+    expect(states.every((run) => run.status === "waiting" || run.status === "succeeded")).toBe(true);
+    // A run stopped between hops says so and carries on when woken with room.
+    const parked = states.find((run) => run.status === "waiting")!;
+    expect(parked.error).toMatch(/^Paused: /);
+    await withFetch(answer, () => resume(parked._id));
+    expect((await load(parked._id)).status).toBe("succeeded");
+  });
+
+  it("reads no secrets for a go that can only pause, and still hides them afterwards", async () => {
+    const pepper = "pepper-for-the-skip-test";
+    const { runId, ws, owner } = await start([post("call", "https://api.example/echo", { authorization: "Bearer {{ secrets.API_KEY }}" })]);
+    await putSecret(c, pepper, ws, owner, "API_KEY", "sk_live_skip_test_123456", Date.now());
+    const real = c.secrets.find.bind(c.secrets);
+    let reads = 0;
+    c.secrets.find = ((...args: Parameters<typeof real>) => (reads++, real(...args))) as typeof real;
+    try {
+      const none = await withFetch(() => new Response("never"), () => advance(c, runId, pepper, { calls: 0 }));
+      expect(none.length).toBe(0);
+      expect(reads).toBe(0);
+      expect((await load(runId)).status).toBe("waiting");
+      await withFetch((_url, init) => new Response(`you sent ${new Headers(init.headers).get("authorization")}`), () => resume(runId, pepper));
+    } finally {
+      c.secrets.find = real;
+    }
+    const run = await load(runId);
+    expect(run.status).toBe("succeeded");
+    expect(reads).toBeGreaterThan(0);
+    expect(JSON.stringify(run)).not.toContain("sk_live_skip_test_123456");
+    expect(JSON.stringify(run.outputs)).toContain("[secret API_KEY]");
+  });
 
   it("shares one request allowance between the runs woken together", async () => {
     const list = Array.from({ length: 25 }, (_, i) => i);

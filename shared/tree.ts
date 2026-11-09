@@ -98,8 +98,11 @@ export function replaceStep(steps: Step[], path: Path, step: Step): Step[] {
 /** How deep a place is: 1 for the top level, 2 inside a block, and so on. */
 export const levelOf = (path: Path) => (path.length + 1) / 2;
 
-/** How many levels a step takes up: 1 on its own, more for a block with blocks inside. */
-const heightOf = (step: Step): number => 1 + Math.max(0, ...branchesOf(step).flatMap((b) => b.steps.map(heightOf)));
+/** How many levels a step takes up: 1 on its own, at least 2 for a block (it needs room for its steps, even while empty). */
+const heightOf = (step: Step): number => {
+  const branches = branchesOf(step);
+  return branches.length ? 1 + Math.max(1, ...branches.flatMap((b) => b.steps.map(heightOf))) : 1;
+};
 
 export function moveStep(steps: Step[], from: Path, slot: Path): { steps: Step[]; path: Path } | null {
   const step = getStep(steps, from);

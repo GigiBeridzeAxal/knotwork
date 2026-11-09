@@ -57,6 +57,18 @@ describe("redactor", () => {
     expect(redactor({})(value)).toBe(value);
     expect(redactor({ EMPTY: "" })("nothing here")).toBe("nothing here");
   });
+
+  it("hides a web address secret's pieces the way services echo them back", () => {
+    const clean = redactor({ HOOK: "https://chat.example/v1/spaces/AbCdEfGh1234/messages?key=ab+cd/EF12345&t=x", KEY: "abc+DEF/ghi=123" });
+    // A query value as written, in an HTML error page that escapes the "&".
+    expect(clean("Bad request: /v1/spaces?key=ab+cd/EF12345&amp;t=x")).not.toContain("ab+cd/EF12345");
+    // One piece of the path by itself.
+    expect(clean({ segments: ["v1", "spaces", "AbCdEfGh1234"] })).toEqual({ segments: ["v1", "spaces", "[secret HOOK]"] });
+    // JSON text with the optional backslash before each slash, under a text content type.
+    expect(clean('{"url":"https:\\/\\/chat.example\\/v1\\/spaces\\/AbCdEfGh1234\\/messages"}')).not.toContain("AbCdEfGh1234");
+    // A base64-style value read back from a query, where "+" became a space.
+    expect(clean({ args: { k: "abc DEF/ghi=123" } })).toEqual({ args: { k: "[secret KEY]" } });
+  });
 });
 
 describe("sealing", () => {

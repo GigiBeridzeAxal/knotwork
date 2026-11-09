@@ -131,5 +131,7 @@ describe("step tree", () => {
     expect(moveStep(tree, [1], [0, "steps", 0, "steps", 0, "steps", 0])).toBeNull();
     expect(moveStep(tree, [2], [0, "steps", 0, "steps", 0])).toBeNull();
     expect(moveStep(tree, [2], [0, "steps", 0])).not.toBeNull();
+    // An empty block doesn't fit at level 3 either: it could never be given a step there.
+    expect(moveStep([...tree, loopOf("empty", [])], [3], [0, "steps", 0, "steps", 0])).toBeNull();
   });
 });
