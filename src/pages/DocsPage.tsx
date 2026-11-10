@@ -474,6 +474,11 @@ export function DocsPage() {
               </dd>
               <dt>A run answers 429 or won't start</dt>
               <dd>You reached a limit above. Runs per hour reset at the start of each clock hour.</dd>
+              <dt>The app says "Too many requests at once"</dt>
+              <dd>
+                One address may send 10 requests in 10 seconds. Several tabs, or several people behind one connection,
+                can pass that. Nothing is lost: the app waits about 10 seconds and carries on by itself.
+              </dd>
               <dt>Saving says "This workflow was saved somewhere else"</dt>
               <dd>
                 It changed in another tab or on another device after you opened it. <b>Keep mine</b> saves your version over

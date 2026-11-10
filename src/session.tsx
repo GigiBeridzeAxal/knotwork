@@ -1,6 +1,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Me, Workspace } from "../shared/schema";
 import { api, ApiError, setCurrentWorkspace, whenSignedOut } from "./api";
+import { usePath } from "./router";
 
 type State =
   | { status: "loading" }
@@ -47,19 +48,50 @@ function pick(me: Me, wanted: string): string {
   return me.workspaces.find((w) => w.personal)?.id ?? ids[0] ?? "";
 }
 
+/**
+ * Whether this browser has signed in before. The session cookie can't be read from here, so this
+ * is only a hint: it decides whether the public pages ask the server who is looking.
+ */
+const SEEN_KEY = "knotwork.signedIn";
+const seen = () => {
+  try {
+    return localStorage.getItem(SEEN_KEY) === "1";
+  } catch {
+    return true; // Storage blocked: ask the server, as before.
+  }
+};
+const setSeen = (yes: boolean) => {
+  try {
+    if (yes) localStorage.setItem(SEEN_KEY, "1");
+    else localStorage.removeItem(SEEN_KEY);
+  } catch {
+    // Storage blocked: the public pages keep asking.
+  }
+};
+/** The front page and the docs read the same for everyone, so a visitor who never signed in costs no request there. */
+const PUBLIC = new Set(["/", "/docs"]);
+
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<State>({ status: "loading" });
+  const path = usePath();
+  /** A visitor on a public page who has never signed in here: who they are isn't asked until they leave it. */
+  const idle = PUBLIC.has(path) && state.status === "loading" && !seen();
 
   const signedIn = useCallback((me: Me, wanted = "") => {
     const workspaceId = pick(me, wanted);
     setCurrentWorkspace(workspaceId);
     remember(me.user.id, workspaceId);
+    setSeen(true);
     setState({ status: "signed-in", me, workspaceId });
   }, []);
 
+  const asked = useRef(false);
   useEffect(() => {
+    if (idle || asked.current) return;
+    asked.current = true;
     whenSignedOut(() => {
       setCurrentWorkspace("");
+      setSeen(false);
       setState({ status: "signed-out" });
     });
     api.me().then(
@@ -73,7 +105,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             : { status: "unavailable", message: e instanceof ApiError ? e.message : "Check your connection and try again." },
         ),
     );
-  }, [signedIn]);
+  }, [signedIn, idle]);
 
   // The actions read the latest state through a ref, so their identity never changes. Pages can
   // then list them as effect dependencies without re-running (and re-loading) on every state change.
@@ -83,6 +115,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await api.logout().catch(() => {});
     setCurrentWorkspace("");
+    setSeen(false);
     setState({ status: "signed-out" });
   }, []);
 

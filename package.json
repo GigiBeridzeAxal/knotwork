@@ -1,6 +1,6 @@
 {
   "name": "knotwork",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Workflows that hold. An open-source automation engine that runs on Cloudflare's free plan.",
   "type": "module",

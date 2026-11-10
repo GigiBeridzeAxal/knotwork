@@ -422,8 +422,13 @@ they were.
    for the hostname `knotwork.gigiberidze.com` whose path starts with `/api/`, more than 10 per 10 seconds
    from one IP, block for 10 seconds. Leave `/hooks/` out, for the same shared-address reason (the free plan
    allows one rule, so it can't have a looser one of its own); the Worker refuses made-up webhook URLs
-   without touching the database and limits each URL to 60 calls a minute and each IP to 600. A person
-   watching a run polls every 3 seconds, well under the rule.
+   without touching the database and limits each URL to 60 calls a minute and each IP to 600.
+   The dashboard keeps itself under the rule: [`src/pace.ts`](src/pace.ts) lets one tab send 9 requests in
+   any 11 seconds (7 for polling; the extra second covers requests arriving closer together than they left) and holds the rest back for a moment, and a request that Cloudflare
+   refuses anyway (two tabs, several people behind one address) is sent again after 10 seconds while the
+   app says "Too many requests at once". **If you change the rule's numbers, change `BUDGET` and
+   `BACKGROUND_BUDGET` there too.** Before this, opening four pages in six seconds sent 12 requests and
+   everything answered 429 for the next 10 seconds.
    The Worker's own limiter answers floods with 429 before they reach the hub, but those requests still
    count toward the Worker's 100,000 a day on the free plan; the WAF rule stops them before the Worker runs. What's left is a known limit of the free
    plan: an IP that stays just under the rule (about 86,000 requests a day) uses most of the daily quota, so

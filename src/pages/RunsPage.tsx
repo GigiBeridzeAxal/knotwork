@@ -1,26 +1,25 @@
-import { useEffect, useState } from "react";
-import type { Run } from "../../shared/schema";
-import { api } from "../api";
+import { useEffect } from "react";
+import { LIMITS } from "../../shared/limits";
 import { Card, duration, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { Link } from "../router";
+import { useWorkspace } from "../workspace";
 
 export function RunsPage() {
-  const [runs, setRuns] = useState<Run[] | null>(null);
-  const [error, setError] = useState("");
+  // The newest 100 runs, loaded once for the whole app (the home page and the sidebar use them too).
+  const { runs, error: loadError, refresh } = useWorkspace();
+  const error = runs ? "" : loadError;
 
   useEffect(() => {
-    const load = () => api.runs().then(setRuns, (e) => setError(e.message));
-    load();
     // Every 15 s while the tab is visible; each request counts toward the free plan's daily requests.
-    const timer = setInterval(() => document.visibilityState === "visible" && load(), 15_000);
+    const timer = setInterval(() => document.visibilityState === "visible" && refresh(), 15_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [refresh]);
 
   return (
     <div className="flex flex-col gap-8">
       <div className="flex flex-col gap-2">
         <PageTitle>Runs</PageTitle>
-        <p className="text-soft">Every run from the last 7 days, newest first.</p>
+        <p className="text-soft">The latest 100 runs, newest first. Runs are kept for {LIMITS.runHistoryDays} days.</p>
       </div>
       {error && <p className="text-fail">{error}</p>}
       {runs && runs.length === 0 && <Card className="dots p-10 text-center text-soft">No runs yet. Run a workflow to see it here.</Card>}

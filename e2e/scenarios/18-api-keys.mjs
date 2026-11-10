@@ -30,6 +30,10 @@ export default {
       check(ws.status === 201, `create workspace gave ${ws.status}`);
       data.ws = ws.body.id;
       data.cleaned = leftBehind(`workspace "${wsName}" (${data.ws}) of alice, with its keys`);
+      // The app reads the list of workspaces once, when it opens: load it again so the new one is in it.
+      // (Without the reload this only passed in the dev build, which used to ask for the list twice;
+      // the production build never showed a workspace made outside the page until a reload.)
+      await page.reload();
       await switchTo(alice, wsName);
     });
 

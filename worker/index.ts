@@ -155,7 +155,10 @@ async function overLimit(env: Env, request: Request): Promise<Response | null> {
     env.NET_LIMITER?.limit({ key: `api:${ipKey(from, 48)}` }),
   ]);
   if (address?.success !== false && network?.success !== false) return null;
-  return Response.json({ error: "Too many requests from your network. Wait a minute and try again." }, { status: 429 });
+  return Response.json(
+    { error: "Too many requests from your network. Wait a minute and try again." },
+    { status: 429, headers: { "retry-after": "60" } },
+  );
 }
 // Inside the hub this is skipped: the Worker already checked before forwarding, so a request that
 // is turned away costs none of the hub's daily requests.
@@ -946,9 +949,9 @@ app.all(
       remote ? c.env.HOOK_IP_LIMITER?.limit({ key: ipKey(from) }) : undefined,
       remote ? c.env.HOOK_NET_LIMITER?.limit({ key: ipKey(from, 48) }) : undefined,
     ]);
-    if (perHook?.success === false) return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429);
+    if (perHook?.success === false) return c.json({ error: "Too many calls to this webhook. Wait a minute and try again." }, 429, { "retry-after": "60" });
     if (perIp?.success === false || perNet?.success === false) {
-      return c.json({ error: "Too many webhook calls from your network. Wait a minute and try again." }, 429);
+      return c.json({ error: "Too many webhook calls from your network. Wait a minute and try again." }, 429, { "retry-after": "60" });
     }
     const doc = await db(c).workflows.findOne({ hookKey: key });
     if (!doc || doc.trigger.type !== "webhook") return c.json({ error: "Unknown webhook" }, 404);
