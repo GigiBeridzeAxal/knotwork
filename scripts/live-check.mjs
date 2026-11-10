@@ -32,7 +32,9 @@ await step("front page loads", async () => {
 await step("API answers", async () => {
   const res = await get("/api/health");
   expect(res.ok, `status ${res.status}`);
-  expect((await res.json()).ok === true, "health is not ok");
+  const health = await res.json();
+  expect(health.ok === true, "health is not ok");
+  return `version ${health.version ?? "?"}, commit ${health.commit ?? "?"}`;
 });
 await step("demo account opens", async () => {
   const res = await get("/api/auth/demo", { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "{}" });

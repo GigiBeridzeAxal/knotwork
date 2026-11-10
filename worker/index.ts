@@ -204,7 +204,12 @@ api.use("*", async (c, next) => {
   return next();
 });
 
-api.get("/health", (c) => c.json({ ok: true }));
+/** Set by vite.config.ts at build time; missing in the unit tests, which run the source directly. */
+declare const __KNOTWORK_BUILD__: { version: string; commit: string } | undefined;
+const BUILD = typeof __KNOTWORK_BUILD__ === "object" ? __KNOTWORK_BUILD__ : { version: "dev", commit: "dev" };
+
+// Also says which build is live, so a deploy can be checked from outside (scripts/live-check.mjs).
+api.get("/health", (c) => c.json({ ok: true, ...BUILD }));
 api.get("/limits", (c) => c.json(LIMITS));
 
 // ---------- Accounts ----------
