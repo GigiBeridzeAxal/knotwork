@@ -70,6 +70,12 @@ const setSeen = (yes: boolean) => {
 };
 /** The front page and the docs read the same for everyone, so a visitor who never signed in costs no request there. */
 const PUBLIC = new Set(["/", "/docs"]);
+/**
+ * Pages a visitor who never signed in here can only use signed out. They start signed out instead
+ * of asking the server and getting a 401 back (a red line in the console on the portfolio's demo
+ * link). /demo is safe too: the server keeps a signed-in account rather than swapping it for the demo.
+ */
+const SIGNED_OUT_PAGES = new Set(["/login", "/signup", "/recover", "/demo"]);
 
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<State>({ status: "loading" });
@@ -85,15 +91,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setState({ status: "signed-in", me, workspaceId });
   }, []);
 
+  useEffect(
+    () =>
+      whenSignedOut(() => {
+        setCurrentWorkspace("");
+        setSeen(false);
+        setState({ status: "signed-out" });
+      }),
+    [],
+  );
+
   const asked = useRef(false);
   useEffect(() => {
     if (idle || asked.current) return;
     asked.current = true;
-    whenSignedOut(() => {
-      setCurrentWorkspace("");
-      setSeen(false);
+    if (SIGNED_OUT_PAGES.has(path) && !seen()) {
       setState({ status: "signed-out" });
-    });
+      return;
+    }
     api.me().then(
       (me) => signedIn(me),
       (e) =>
@@ -105,6 +120,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             : { status: "unavailable", message: e instanceof ApiError ? e.message : "Check your connection and try again." },
         ),
     );
+    // `path` is read once, when the session first loads; later page changes don't ask again.
   }, [signedIn, idle]);
 
   // The actions read the latest state through a ref, so their identity never changes. Pages can
