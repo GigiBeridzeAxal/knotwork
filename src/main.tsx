@@ -1,5 +1,6 @@
-import { lazy, StrictMode, Suspense, useEffect } from "react";
+import { lazy, StrictMode, Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { whenHeld } from "./api";
 import { AppShell } from "./components/AppShell";
 import { Button } from "./components/ui";
 import "./index.css";
@@ -66,6 +67,24 @@ function Unavailable({ message }: { message: string }) {
   );
 }
 
+/**
+ * Shown while a request is waiting out a "too many requests" answer (it is sent again by itself),
+ * so a page that takes ten seconds longer doesn't look stuck.
+ */
+function Held() {
+  const [held, setHeld] = useState(false);
+  useEffect(() => {
+    whenHeld(setHeld);
+    return () => whenHeld(() => {});
+  }, []);
+  if (!held) return null;
+  return (
+    <p role="status" className="fixed inset-x-4 bottom-4 z-50 mx-auto w-fit max-w-full rounded-full border border-edge bg-graphite px-4 py-2 text-center text-sm text-soft shadow-lg">
+      Too many requests at once. Carrying on in a few seconds.
+    </p>
+  );
+}
+
 function App() {
   const path = usePath();
   const { state } = useSession();
@@ -97,6 +116,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <SessionProvider>
       <App />
+      <Held />
     </SessionProvider>
   </StrictMode>,
 );

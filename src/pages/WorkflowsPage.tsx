@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { canEdit, type WorkflowSummary } from "../../shared/schema";
-import { api } from "../api";
 import { PlusIcon } from "../components/icons";
 import { Card, Eyebrow, PageTitle, StatusBadge, timeAgo } from "../components/ui";
 import { TEMPLATES } from "../../shared/templates";
 import { ImportButton } from "./TemplatesPage";
 import { Link } from "../router";
 import { useSession } from "../session";
+import { useWorkspace } from "../workspace";
 
 export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
   if (wf.trigger.type === "schedule") return `Schedule · ${wf.trigger.cron}`;
@@ -15,13 +15,11 @@ export function triggerLabel(wf: Pick<WorkflowSummary, "trigger">) {
 }
 
 export function WorkflowsPage() {
-  const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
-  const [error, setError] = useState("");
+  // The same list the sidebar shows, already loaded: no request of its own.
+  const { workflows, error: loadError } = useWorkspace();
+  const [importError, setError] = useState("");
+  const error = importError || (workflows ? "" : loadError);
   const editable = canEdit(useSession().workspace.role);
-
-  useEffect(() => {
-    api.workflows().then(setWorkflows, (e) => setError(e.message));
-  }, []);
 
   return (
     <div className="flex flex-col gap-12">

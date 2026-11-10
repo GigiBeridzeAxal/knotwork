@@ -14,5 +14,5 @@
     "noUnusedParameters": true,
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["worker", "shared", "test"]
+  "include": ["worker", "shared", "test", "src/pace.ts"]
 }

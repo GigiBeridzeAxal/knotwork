@@ -22,6 +22,7 @@ import type {
   WorkflowVersionDetail,
   Workspace,
 } from "../shared/schema";
+import { createPacer, retryAfter } from "./pace";
 
 /**
  * The signed-in session lives in an HttpOnly cookie the browser sends by itself. The workspace being
@@ -54,16 +55,79 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** Called whenever a successful request changed something, so lists that show it can reload. */
+let onChanged = () => {};
+export const whenChanged = (fn: () => void) => {
+  onChanged = fn;
+};
+
+/** Called with true while a request someone is waiting for is held back after a 429, and false once none is. */
+let onHeld = (_held: boolean) => {};
+export const whenHeld = (fn: (held: boolean) => void) => {
+  onHeld = fn;
+};
+let held = 0;
+
+const SENT_KEY = "knotwork.sent";
+/**
+ * On this computer there is no Cloudflare in front, and the test browsers click far faster than a
+ * person, so requests aren't paced there. Setting `knotwork.pace` to "on" in localStorage turns it
+ * on anyway (e2e/scenarios/24-request-pace.mjs).
+ */
+const unlimited = (() => {
+  try {
+    return ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname) && localStorage.getItem("knotwork.pace") !== "on";
+  } catch {
+    return false;
+  }
+})();
+const pacer = createPacer({
+  unlimited,
+  load: () => JSON.parse(sessionStorage.getItem(SENT_KEY) ?? "[]"),
+  save: (sent) => sessionStorage.setItem(SENT_KEY, JSON.stringify(sent)),
+});
+
+const BUSY = "Knotwork is getting too many requests from your network right now. Wait a few seconds and try again.";
+/** A 429 that can be sent again is tried twice more before the person is told. */
+const RETRIES = 2;
+
+interface Options {
+  /** Polling and other refreshes nobody asked for: they wait behind requests a click made (pace.ts). */
+  background?: boolean;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, { background = false }: Options = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set("content-type", "application/json");
   if (currentWorkspace) headers.set("x-knotwork-workspace", currentWorkspace);
-  const res = await fetch(`/api${path}`, { ...init, headers, credentials: "same-origin" });
-  if (res.status === 204) return undefined as T;
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && !path.startsWith("/auth/")) onSignedOut();
-  if (!res.ok) throw new ApiError(data.error ?? `Request failed (${res.status})`, res.status, data.issues, data);
-  return data as T;
+  let waited = false;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      await pacer.turn(background);
+      const res = await fetch(`/api${path}`, { ...init, headers, credentials: "same-origin" });
+      const data = res.status === 204 ? {} : await res.json().catch(() => null);
+      if (res.status === 429) {
+        // Cloudflare's block answers with its own page; Knotwork's limits answer { error }.
+        const wait = retryAfter(typeof data?.error === "string", res.headers.get("retry-after"));
+        if (wait !== null) {
+          if (attempt >= RETRIES) throw new ApiError(BUSY, 429);
+          pacer.pause(wait);
+          if (!background && !waited) {
+            waited = true;
+            if (held++ === 0) onHeld(true);
+          }
+          continue;
+        }
+      }
+      if (res.status === 401 && !path.startsWith("/auth/")) onSignedOut();
+      if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status, data?.issues, data ?? {});
+      // Workflows and runs are what the sidebar and the home page list.
+      if (init.method && init.method !== "GET" && /^\/(workflows|runs)\b/.test(path)) onChanged();
+      return (res.status === 204 ? undefined : data) as T;
+    }
+  } finally {
+    if (waited && --held === 0) onHeld(false);
+  }
 }
 
 const post = (body?: unknown): RequestInit => ({ method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
@@ -107,7 +171,7 @@ export const api = {
     request<Workspace>(`/workspaces/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   deleteWorkspace: (id: string) => request<void>(`/workspaces/${id}`, { method: "DELETE" }),
 
-  overview: () => request<Overview>("/overview"),
+  overview: (options?: Options) => request<Overview>("/overview", {}, options),
   workflows: () => request<WorkflowSummary[]>("/workflows"),
   workflow: (id: string) => request<Workflow>(`/workflows/${id}`),
   createWorkflow: (input: WorkflowInput) => request<Workflow>("/workflows", post(input)),
@@ -124,7 +188,7 @@ export const api = {
     const qs = q.toString();
     return request<Run[]>(`/runs${qs ? `?${qs}` : ""}`);
   },
-  run: (id: string) => request<RunDetail>(`/runs/${id}`),
+  run: (id: string, options?: Options) => request<RunDetail>(`/runs/${id}`, {}, options),
   checkRun: (id: string) => request<RunDetail>(`/runs/${id}/check`, post()),
   rerun: (id: string) => request<{ runId: string }>(`/runs/${id}/rerun`, post()),
 

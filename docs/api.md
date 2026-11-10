@@ -326,10 +326,13 @@ field and a `message`. A `409` from `PUT` has `current` instead.
 Requests:
 
 - 60 requests a minute per IP address (an IPv6 address counts per /64), and 600 a minute per network
-  (IPv6 /48). Over that: `429`. Wait a minute.
+  (IPv6 /48). Over that: `429` with `retry-after: 60`. Wait a minute.
 - On top of that, Cloudflare blocks an IP that sends more than 10 requests to `/api/` in 10 seconds, for
-  10 seconds. That answer comes from Cloudflare, not Knotwork, so it isn't Knotwork's JSON. Polling a run
-  every 3 seconds stays well under it.
+  10 seconds. That answer comes from Cloudflare, not Knotwork, so it isn't Knotwork's JSON: a `429`
+  whose body has no `error` field means "wait 10 seconds and send the same request again" (it never
+  reached Knotwork, so sending it again is safe for any method). Polling a run every 3 seconds stays
+  under it as long as little else is sent; everything behind one address shares the 10, including an
+  open dashboard.
 
 Runs, from `shared/limits.ts`. A run is always counted against the workspace's **owner**, whoever's key
 started it, so all keys and members of a workspace share the owner's budget:

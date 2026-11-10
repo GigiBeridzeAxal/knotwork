@@ -24,15 +24,19 @@ export function RunPage({ id }: { id: string }) {
     const schedule = (ms: number) => {
       timer = setTimeout(() => (document.visibilityState === "visible" ? load() : schedule(ms)), ms);
     };
+    let polls = 0;
     const load = async () => {
       try {
-        const next = await api.run(id);
+        // The first load and the first poll are waited for (most runs are done by then); the polls
+        // after that give way to anything clicked.
+        const next = await api.run(id, { background: polls > 1 });
         if (stopped) return;
         setRun(next);
         setRetrying("");
-        // Poll quickly while a run is moving, slowly while it waits for a delay or retry, and not
-        // at all while the tab is hidden.
-        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : 3000);
+        // Poll quickly while a run is moving (most finish within seconds), less often once it has
+        // run for a while, slowly while it waits for a delay or retry, and not at all while the tab
+        // is hidden. Every poll counts toward the requests an address may send (src/pace.ts).
+        if (!DONE.has(next.status)) schedule(next.status === "waiting" ? 30_000 : ++polls <= 4 ? 2000 : 5000);
       } catch (e) {
         if (stopped) return;
         if (e instanceof ApiError && e.status === 404 && (await findElsewhere("run", id))) return;
