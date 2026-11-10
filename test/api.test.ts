@@ -255,6 +255,14 @@ describe.skipIf(!uri)("HTTP API", () => {
     expect(res.status).toBe(403);
   });
 
+  it("keeps a signed-in account when the demo link is opened", async () => {
+    const res = await call("POST", "/api/auth/demo", { cookie: alice.cookie });
+    expect(res.status).toBe(200);
+    expect(res.body.user).toMatchObject({ demo: false });
+    expect(res.cookie).toBeFalsy();
+    expect((await call("GET", "/api/me", { cookie: alice.cookie })).body.user.demo).toBe(false);
+  });
+
   it("keeps a workflow's versions and hands back its newest finished run as sample data", async () => {
     const opts = { cookie: alice.cookie, ws: alice.ws };
     const wf = await call("POST", "/api/workflows", { ...opts, body: flow("History") });

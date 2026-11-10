@@ -309,6 +309,13 @@ api.post("/auth/login", async (c) => {
 });
 
 api.post("/auth/demo", async (c) => {
+  // Someone already signed in keeps their account: the dashboard may not have asked who they are
+  // before sending them here (src/session.tsx starts first-time visitors signed out).
+  const current = await findSession(db(c), readCookie(c.req.header("cookie"), cookieName(secure(c))));
+  if (current) {
+    const data = await me(c, current.userId);
+    if (data) return c.json(data);
+  }
   if (!(await underLimit(db(c), `demo:ip:${network(c)}`, HOUR, LIMITS.demoLoginsPerIpPerHour))) {
     return c.json({ error: "Too many demo sign-ins from your network. Try again in an hour." }, 429);
   }

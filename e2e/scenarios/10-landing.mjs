@@ -49,8 +49,10 @@ export default {
       check(who.demo === false && who.email === data.email, `signed in as ${JSON.stringify(who)}`);
     });
     await step(carol, "in the demo, finds 'Create your own account' in the account menu", async ({ page }) => {
-      // carol has her own account; open the demo over it, as the demo button would.
+      // The demo never replaces an account that is signed in, so carol signs out first, then
+      // opens the demo the way the demo button does.
       await page.goto("/home");
+      await page.context().clearCookies();
       await page.evaluate(() => fetch("/api/auth/demo", { method: "POST" }));
       await page.goto("/home");
       await page.getByRole("button", { name: "Account menu" }).click();
