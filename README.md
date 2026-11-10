@@ -431,6 +431,14 @@ they were.
    fail until 00:00 UTC while the
    dashboard's static files keep loading.
 
+### Automatic deploys
+
+Since 2026-11-10 the Worker is connected to this repository with Cloudflare Workers Builds (Worker →
+Settings → Builds). Every push to `main` runs `npm run build` and `npx wrangler deploy`; other branches
+get a preview version with `npx wrangler versions upload`, which takes no traffic. `npm run deploy` from
+a computer still works and is only needed for the first deploy or an emergency. `/api/health` reports the
+version and commit that is live, and the live check prints them.
+
 ### The hub
 
 - **First deploy.** `npm run deploy` creates the Durable Object class `Hub` (the `v1` migration in
