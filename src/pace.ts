@@ -5,11 +5,18 @@
  * with 429 until the block ended.
  *
  * Requests take a turn before they are sent. A turn is free while fewer than BUDGET went out in the
- * last 10 seconds; after that it waits for the oldest one to leave the window. Background requests
+ * last 11 seconds; after that it waits for the oldest one to leave the window. Background requests
  * (polling) stop two short of the budget, so a click never has to wait behind a refresh.
  */
 
-export const WINDOW_MS = 10_000;
+/** The rule's own window. */
+export const RULE_WINDOW_MS = 10_000;
+/**
+ * How long a sent request keeps its place: the rule's 10 seconds plus one. Requests don't arrive
+ * at Cloudflare exactly as far apart as they left, so without the extra second the tenth could
+ * land in the same 10 seconds as the first nine.
+ */
+export const WINDOW_MS = RULE_WINDOW_MS + 1000;
 /** One under the rule, because Cloudflare counts arrivals and this counts departures. */
 export const BUDGET = 9;
 export const BACKGROUND_BUDGET = 7;

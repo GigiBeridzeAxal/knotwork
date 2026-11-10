@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BACKGROUND_BUDGET, BLOCK_MS, BUDGET, createPacer, retryAfter, WINDOW_MS } from "../src/pace";
+import { BACKGROUND_BUDGET, BLOCK_MS, BUDGET, createPacer, retryAfter, RULE_WINDOW_MS, WINDOW_MS } from "../src/pace";
 
 /**
  * The dashboard's request pacing: one tab must never send more than Cloudflare's rule in front of
@@ -18,8 +18,8 @@ describe("request pacing", () => {
     for (let i = 0; i < count; i++) pacer.turn(background).then(() => given.push(Date.now()));
     return given;
   }
-  /** The most turns given inside any 10 second window. */
-  const worst = (times: number[]) => Math.max(...times.map((a) => times.filter((b) => b >= a && b < a + WINDOW_MS).length));
+  /** The most turns given inside any window of this length. */
+  const worst = (times: number[], window: number) => Math.max(...times.map((a) => times.filter((b) => b >= a && b < a + window).length));
 
   it("sends a normal page's requests at once", async () => {
     const given = ask(createPacer(), 5);
@@ -37,7 +37,8 @@ describe("request pacing", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     const all = [...given, ...more].sort((a, b) => a - b);
     expect(all).toHaveLength(35);
-    expect(worst(all)).toBeLessThanOrEqual(BUDGET);
+    // Even if requests arrive up to a second closer together than they left, the rule's 10 seconds hold.
+    expect(worst(all, RULE_WINDOW_MS + 999)).toBeLessThanOrEqual(BUDGET);
     expect(BUDGET).toBeLessThan(10);
   });
 

@@ -424,7 +424,7 @@ they were.
    allows one rule, so it can't have a looser one of its own); the Worker refuses made-up webhook URLs
    without touching the database and limits each URL to 60 calls a minute and each IP to 600.
    The dashboard keeps itself under the rule: [`src/pace.ts`](src/pace.ts) lets one tab send 9 requests in
-   any 10 seconds (7 for polling) and holds the rest back for a moment, and a request that Cloudflare
+   any 11 seconds (7 for polling; the extra second covers requests arriving closer together than they left) and holds the rest back for a moment, and a request that Cloudflare
    refuses anyway (two tabs, several people behind one address) is sent again after 10 seconds while the
    app says "Too many requests at once". **If you change the rule's numbers, change `BUDGET` and
    `BACKGROUND_BUDGET` there too.** Before this, opening four pages in six seconds sent 12 requests and

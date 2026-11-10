@@ -21,6 +21,7 @@ export default {
       });
     });
     await step(alice, "opens page after page without a pause, twice over", async ({ page }) => {
+      await page.evaluate(() => sessionStorage.removeItem("knotwork.sent"));
       const sent = [];
       const count = (r) => new URL(r.url()).pathname.startsWith("/api/") && sent.push(Date.now());
       page.on("request", count);
@@ -35,7 +36,7 @@ export default {
         }
       }
       // Everything that had to wait for its turn has been sent by now.
-      await page.waitForTimeout(12_000);
+      await page.waitForTimeout(13_000);
       page.off("request", count);
       const worst = Math.max(...sent.map((a) => sent.filter((b) => b >= a && b < a + 10_000).length));
       check(sent.length >= 10, `only ${sent.length} requests were sent, so this proves nothing`);
@@ -44,6 +45,11 @@ export default {
       check((await page.getByText(/Request failed|429/).count()) === 0, "the page shows a request error");
     });
     await step(alice, "is refused once by Cloudflare, sees a short notice, and the page loads by itself", async ({ page }) => {
+      // Start with a full allowance, so the request under test is sent at once instead of waiting its turn.
+      await page.evaluate(() => sessionStorage.removeItem("knotwork.sent"));
+      await page.goto("/home");
+      await page.getByText("FREE PLAN").first().waitFor();
+      await page.unroute(`**/api/workflows/${data.id}`).catch(() => {});
       let refused = 0;
       await page.route(`**/api/workflows/${data.id}`, (route) =>
         refused++ === 0
@@ -54,7 +60,7 @@ export default {
         history.pushState(null, "", to);
         dispatchEvent(new PopStateEvent("popstate"));
       }, `/workflows/${data.id}`);
-      await page.getByText("Too many requests at once").waitFor({ timeout: 5000 });
+      await page.getByText("Too many requests at once").waitFor({ timeout: 8000 });
       await page.locator("#wf-name").waitFor({ timeout: 15_000 });
       await page.getByText("Too many requests at once").waitFor({ state: "hidden", timeout: 5000 });
       check(refused >= 2, "the refused request wasn't sent again");
