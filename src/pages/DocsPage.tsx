@@ -22,6 +22,8 @@ const SECTIONS = [
   { id: "retries", label: "Retries and delays" },
   { id: "runs", label: "Runs" },
   { id: "workspaces", label: "Workspaces and account" },
+  { id: "teams", label: "Teams" },
+  { id: "api", label: "API keys" },
   { id: "demo", label: "The demo account" },
   { id: "limits", label: "Limits" },
   { id: "help", label: "Problems and answers" },
@@ -369,7 +371,48 @@ export function DocsPage() {
               and run, and can't be undone.
             </p>
             <p>
-              Knotwork sends no email, so a forgotten password can't be reset yet. Keep it in a password manager.
+              Knotwork sends no email, so there is no reset link. Instead, <b>Settings</b>, then <b>Recovery codes</b>, makes{" "}
+              {LIMITS.recoveryCodes} one-time codes (your password confirms it). Copy or download them and keep them somewhere
+              safe. If you forget your password, press <b>Forgot your password?</b> on the login page,
+              enter your email and one code, and set a new password. That ends the whole set, logs you out on every other device
+              and revokes your API keys, so make new codes afterwards.
+            </p>
+          </Section>
+
+          <Section id="teams" title="Teams">
+            <p>
+              The owner of a workspace can share it; a Personal workspace can't be shared. In <b>Settings</b>, under{" "}
+              <b>Members</b>, pick <b>Editor</b> or <b>Viewer</b> and press <b>Create invite link</b>, then send the link. It works
+              for {LIMITS.inviteDays} days and for up to {LIMITS.inviteUses} people, and <b>Open links</b> lets you revoke it
+              sooner. Whoever opens it presses <b>Join workspace</b> (or <b>Make an account to join</b>).
+            </p>
+            <dl>
+              <dt>Owner</dt>
+              <dd>Does everything, and is the only one who renames or deletes the workspace, makes invite links, and changes or removes members.</dd>
+              <dt>Editor</dt>
+              <dd>Changes workflows, starts runs and manages the workspace's secrets.</dd>
+              <dt>Viewer</dt>
+              <dd>Reads workflows and runs and changes nothing. Viewers don't see webhook URLs or secret values.</dd>
+            </dl>
+            <p>
+              A role change or a removal applies on that person's next click. A member can leave from the same place. Runs in a
+              shared workspace count toward the owner's limits, whoever starts them. A workspace holds up to{" "}
+              {LIMITS.membersPerWorkspace} people besides its owner. The demo account can't invite anyone.
+            </p>
+          </Section>
+
+          <Section id="api" title="API keys">
+            <p>
+              Scripts can list and change workflows, start runs and read results with a key. In <b>Settings</b>, under{" "}
+              <b>API keys</b>, give it a name, choose <b>Read only</b> or read and write, and press <b>Create API key</b>. The key is
+              shown once, so copy it then. It works in the workspace you made it in, and never does more than you can do there.
+            </p>
+            <pre>{`curl -H "Authorization: Bearer kw_…" https://knotwork.gigiberidze.com/api/workflows`}</pre>
+            <p>
+              Keys reach workflows, runs and the overview only, never accounts, members or other keys. Revoke one in the same
+              list. Changing your password, using a recovery code, or leaving the workspace ends your keys. Each account can
+              have {LIMITS.apiKeysPerAccount}. Every endpoint is in the{" "}
+              <a href="https://github.com/GigiBeridzeAxal/knotwork/blob/main/docs/api.md">API reference</a>.
             </p>
           </Section>
 
